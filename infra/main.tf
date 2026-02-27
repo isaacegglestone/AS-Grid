@@ -45,7 +45,7 @@ data "aws_ami" "al2023_arm" {
 # ---------------------------------------------------------------------------
 
 resource "aws_key_pair" "bot" {
-  key_name   = "bitunix-bot-key"
+  key_name   = "${var.name_prefix}-key"
   public_key = var.ssh_public_key
 }
 
@@ -54,7 +54,7 @@ resource "aws_key_pair" "bot" {
 # ---------------------------------------------------------------------------
 
 resource "aws_security_group" "bot" {
-  name        = "bitunix-bot-sg"
+  name        = "${var.name_prefix}-sg"
   description = "Allow SSH inbound, all outbound for the grid bot"
 
   ingress {
@@ -74,7 +74,7 @@ resource "aws_security_group" "bot" {
   }
 
   tags = {
-    Name = "bitunix-bot-sg"
+    Name = "${var.name_prefix}-sg"
   }
 }
 
@@ -101,7 +101,7 @@ resource "aws_instance" "bot" {
   }
 
   tags = {
-    Name = "bitunix-bot"
+    Name = var.name_prefix
   }
 
   lifecycle {
@@ -119,6 +119,6 @@ resource "aws_eip" "bot" {
   domain   = "vpc"
 
   tags = {
-    Name = "bitunix-bot-eip"
+    Name = "${var.name_prefix}-eip"
   }
 }

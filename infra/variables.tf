@@ -22,7 +22,7 @@ variable "ssh_public_key" {
 variable "allowed_ssh_cidr" {
   description = "CIDR allowed to SSH to the instance. Defaults to your own IP — get it from https://checkip.amazonaws.com"
   type        = string
-  default     = "0.0.0.0/0"  # Tighten this to your IP for production: "1.2.3.4/32"
+  default     = "0.0.0.0/0" # Tighten this to your IP for production: "1.2.3.4/32"
 }
 
 variable "repo_url" {
@@ -35,4 +35,10 @@ variable "repo_branch" {
   description = "Branch to deploy"
   type        = string
   default     = "main"
+}
+
+variable "name_prefix" {
+  description = "Prefix for all resource names. Override in CI to avoid conflicts with the live instance (e.g. 'ci-12345')."
+  type        = string
+  default     = "bitunix-bot"
 }
