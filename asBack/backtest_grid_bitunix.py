@@ -560,8 +560,10 @@ CONFIG: Dict[str, Any] = {
     "interval": "1min",           # Bitunix intervals: 1min 3min 5min 15min 30min 1hour 2hour 4hour 6hour 8hour 12hour 1day 3day 1week
 
     # ── Date range
+    # end_date is exclusive (midnight = start of that day), so use Aug 1 to
+    # include all 31 days of July (31 × 1440 = 44,640 candles expected).
     "start_date": datetime(2025, 7, 1),
-    "end_date": datetime(2025, 7, 31),
+    "end_date": datetime(2025, 8, 1),
 
     # ── Account / risk
     "initial_balance": 1000,
@@ -570,23 +572,33 @@ CONFIG: Dict[str, Any] = {
     "max_positions": 20,
     "fee_pct": 0.0006,           # Bitunix taker fee 0.06 %
     "leverage": 1,
-    "direction": "long",         # "long" | "short" | "both"
+    # "both" runs symmetric long+short grids — market-neutral, profits from
+    # oscillation in either direction.  "long" only profits when price rises.
+    "direction": "both",         # "long" | "short" | "both"
     "grid_refresh_interval": 10, # minutes between grid re-anchoring
 
     # ── Parameter sets to grid-search
+    # Grid spacing = distance between order levels as a fraction of price.
+    # Tighter spacing → more frequent fills but smaller profit per trade.
+    # Wider spacing  → fewer fills but larger profit per trade.
     "param_sets": [
         {
-            "name": "conservative",
+            "name": "tight_0.2pct",
+            "long_settings":  {"up_spacing": 0.002, "down_spacing": 0.002},
+            "short_settings": {"up_spacing": 0.002, "down_spacing": 0.002},
+        },
+        {
+            "name": "medium_0.3pct",
             "long_settings":  {"up_spacing": 0.003, "down_spacing": 0.003},
             "short_settings": {"up_spacing": 0.003, "down_spacing": 0.003},
         },
         {
-            "name": "moderate",
+            "name": "medium_0.5pct",
             "long_settings":  {"up_spacing": 0.005, "down_spacing": 0.005},
             "short_settings": {"up_spacing": 0.005, "down_spacing": 0.005},
         },
         {
-            "name": "aggressive",
+            "name": "wide_0.8pct",
             "long_settings":  {"up_spacing": 0.008, "down_spacing": 0.008},
             "short_settings": {"up_spacing": 0.008, "down_spacing": 0.008},
         },
