@@ -134,17 +134,38 @@ class GridOrderBacktester:
     # ------------------------------------------------------------------
 
     def run(self) -> Dict[str, Any]:
-        for _, row in self.df.iterrows():
+        total_candles = len(self.df)
+        milestones_printed: set = set()
+
+        for idx, row in self.df.iterrows():
+            # Progress milestones at 25 / 50 / 75 %
+            pct_done = int(idx / total_candles * 100)
+            milestone = (pct_done // 25) * 25
+            if milestone > 0 and milestone not in milestones_printed:
+                milestones_printed.add(milestone)
+                equity = self.balance + self._calculate_unrealized_pnl(row["close"])
+                realized = sum(t[5] for t in self.trade_history if t[5] != 0.0)
+                print(
+                    f"  [{milestone:3d}%] candle {idx:,}/{total_candles:,}  "
+                    f"equity: ${equity:,.2f}  realized: ${realized:+.2f}  "
+                    f"open: {len(self.long_positions)}L/{len(self.short_positions)}S",
+                    flush=True,
+                )
+
             price: float = row["close"]
             timestamp = row["open_time"]
             effective_order_value = self.config["order_value"] * self.leverage
 
             self._refresh_orders_if_needed(price, timestamp)
 
+            # Per-side caps: for a hedge strategy use max_positions_per_side=1
+            max_per_side = self.config.get("max_positions_per_side", self.config["max_positions"])
+            long_at_cap  = len(self.long_positions)  >= max_per_side
+            short_at_cap = len(self.short_positions) >= max_per_side
             open_position_count = len(self.long_positions) + len(self.short_positions)
             at_max = open_position_count >= self.config["max_positions"]
-            if at_max and not self._max_positions_warned:
-                print("⚠️ Max positions reached (new entries paused, existing positions continue)")
+            if (long_at_cap or short_at_cap) and not self._max_positions_warned:
+                print("⚠️ Per-side position cap reached (new entries paused, existing positions continue)")
                 self._max_positions_warned = True
 
             used_margin = sum(pos[2] for pos in self.long_positions + self.short_positions)
@@ -154,7 +175,7 @@ class GridOrderBacktester:
             if self.direction in ["long", "both"]:
                 for order_price, action in self.orders["long"]:
                     if action == "BUY" and price <= order_price:
-                        if at_max:
+                        if long_at_cap:
                             break
                         qty = effective_order_value / price
                         margin_required = qty * price / self.leverage
@@ -191,7 +212,7 @@ class GridOrderBacktester:
             if self.direction in ["short", "both"]:
                 for order_price, action in self.orders["short"]:
                     if action == "SELL_SHORT" and price >= order_price:
-                        if at_max:
+                        if short_at_cap:
                             break
                         qty = effective_order_value / price
                         margin_required = qty * price / self.leverage
@@ -349,7 +370,13 @@ async def fetch_klines_as_df(
     chunk_start = _to_ms(start_dt)
     end_ms = _to_ms(end_dt)
 
+    # Estimate total chunks for progress reporting
+    total_ms = end_ms - _to_ms(start_dt)
+    estimated_chunks = max(1, total_ms // WINDOW_MS)
+    chunk_num = 0
+
     print(f"Fetching {symbol} {interval} klines from {start_dt.date()} to {end_dt.date()} …")
+    print(f"  (estimated ~{estimated_chunks} API requests)")
 
     seen_times: set = set()  # de-duplicate candles at chunk boundaries
 
@@ -363,6 +390,11 @@ async def fetch_klines_as_df(
             end_time=chunk_end,
             limit=CHUNK_SIZE,
         )
+        chunk_num += 1
+        if chunk_num % 50 == 0 or chunk_num == 1:
+            pct = min(100, int(len(all_candles) / max(1, estimated_chunks * CHUNK_SIZE) * 100))
+            print(f"  chunk {chunk_num}/{estimated_chunks}  ~{pct}% …", flush=True)
+
         if not candles:
             break
 
@@ -389,7 +421,8 @@ async def fetch_klines_as_df(
     df = pd.DataFrame(all_candles)
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     df = df.sort_values("open_time").reset_index(drop=True)
-    print(f"  → {len(df):,} candles loaded")
+    price_range = f"${df['low'].min():,.0f} – ${df['high'].max():,.0f}"
+    print(f"  → {len(df):,} candles loaded  |  price range: {price_range}")
     return df
 
 
@@ -524,10 +557,17 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
             }
         )
         results.append(result)
+        open_long  = len(bt.long_positions)
+        open_short = len(bt.short_positions)
         print(
             f"  → return: {result['return_pct'] * 100:.2f}%  "
             f"trades: {result['trades']}  "
             f"max_dd: {result['max_drawdown'] * 100:.2f}%"
+        )
+        print(
+            f"     realized: ${result['realized_pnl']:+.2f}  "
+            f"unrealized: ${result['unrealized_pnl']:+.2f}  "
+            f"open at end: {open_long}L / {open_short}S"
         )
 
         if best_result is None or result["return_pct"] > best_result["return_pct"]:
@@ -580,11 +620,11 @@ CONFIG: Dict[str, Any] = {
     "initial_balance": 1000,
     "order_value": 10,           # USD per grid order
     "max_drawdown": 0.9,
-    "max_positions": 20,
+    "max_positions": 2,          # total cap (1 long + 1 short for hedge mode)
+    "max_positions_per_side": 1, # hedge mode: never stack directional exposure
     "fee_pct": 0.0006,           # Bitunix taker fee 0.06 %
     "leverage": 1,
-    # "both" runs symmetric long+short grids — market-neutral, profits from
-    # oscillation in either direction.  "long" only profits when price rises.
+    # direction="both" = market-neutral hedge: profits from oscillation in either direction
     "direction": "both",         # "long" | "short" | "both"
     "grid_refresh_interval": 10, # minutes between grid re-anchoring
 
