@@ -124,10 +124,23 @@ class GridOrderBacktester:
                 self._place_short_orders(price)
             self.last_refresh_time = current_time
 
+    def _locked_margin(self) -> float:
+        """Total margin currently locked in open positions.
+
+        When a position opens, `balance -= margin_required`.  Equity must
+        add this back or each open position looks like a phantom loss equal
+        to the order size (≈ $10 on a $1,000 account).
+        """
+        return sum(m for _, _, m in self.long_positions + self.short_positions)
+
     def _calculate_unrealized_pnl(self, price: float) -> float:
         long_pnl = sum((price - ep) * qty for ep, qty, _ in self.long_positions)
         short_pnl = sum((ep - price) * qty for ep, qty, _ in self.short_positions)
         return long_pnl + short_pnl
+
+    def _equity(self, price: float) -> float:
+        """True portfolio equity = cash + locked margin + unrealised P&L."""
+        return self.balance + self._locked_margin() + self._calculate_unrealized_pnl(price)
 
     # ------------------------------------------------------------------
     # Main simulation loop
@@ -143,7 +156,7 @@ class GridOrderBacktester:
             milestone = (pct_done // 25) * 25
             if milestone > 0 and milestone not in milestones_printed:
                 milestones_printed.add(milestone)
-                equity = self.balance + self._calculate_unrealized_pnl(row["close"])
+                equity = self._equity(row["close"])
                 realized = sum(t[5] for t in self.trade_history if t[5] != 0.0)
                 print(
                     f"  [{milestone:3d}%] candle {idx:,}/{total_candles:,}  "
@@ -188,7 +201,7 @@ class GridOrderBacktester:
                         self.trade_history.append((
                             timestamp, "BUY", price, qty, "LONG",
                             0.0, fee_cost, 0.0, unrealized_pnl,
-                            self.balance + unrealized_pnl,
+                            self._equity(price),
                         ))
                         self._update_orders_after_trade("long", price)
                         break
@@ -203,7 +216,7 @@ class GridOrderBacktester:
                         self.trade_history.append((
                             timestamp, "SELL", price, qty, "LONG",
                             net_pnl, fee_cost, gross_pnl, unrealized_pnl,
-                            self.balance + unrealized_pnl,
+                            self._equity(price),
                         ))
                         self._update_orders_after_trade("long", price)
                         break
@@ -225,7 +238,7 @@ class GridOrderBacktester:
                         self.trade_history.append((
                             timestamp, "SELL_SHORT", price, qty, "SHORT",
                             0.0, fee_cost, 0.0, unrealized_pnl,
-                            self.balance + unrealized_pnl,
+                            self._equity(price),
                         ))
                         self._update_orders_after_trade("short", price)
                         break
@@ -240,7 +253,7 @@ class GridOrderBacktester:
                         self.trade_history.append((
                             timestamp, "COVER_SHORT", price, qty, "SHORT",
                             net_pnl, fee_cost, gross_pnl, unrealized_pnl,
-                            self.balance + unrealized_pnl,
+                            self._equity(price),
                         ))
                         self._update_orders_after_trade("short", price)
                         break
@@ -249,7 +262,7 @@ class GridOrderBacktester:
             long_pnl = sum((price - ep) * qty for ep, qty, _ in self.long_positions)
             short_pnl = sum((ep - price) * qty for ep, qty, _ in self.short_positions)
             unrealized_pnl = long_pnl + short_pnl
-            equity = self.balance + unrealized_pnl
+            equity = self.balance + self._locked_margin() + unrealized_pnl
             self.max_equity = max(self.max_equity, equity)
             drawdown = 1 - (equity / self.max_equity) if self.max_equity > 0 else 0
             realized_pnl_so_far = sum(t[5] for t in self.trade_history)
@@ -272,7 +285,7 @@ class GridOrderBacktester:
         short_pnl = sum((ep - final_price) * qty for ep, qty, _ in self.short_positions)
         unrealized_pnl = long_pnl + short_pnl
         realized_pnl = sum(t[5] for t in self.trade_history if t[5] != 0.0)
-        final_equity = self.balance + unrealized_pnl
+        final_equity = self.balance + self._locked_margin() + unrealized_pnl
         return {
             "final_equity": final_equity,
             "return_pct": (final_equity - self.config["initial_balance"])
