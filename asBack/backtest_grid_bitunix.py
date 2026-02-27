@@ -108,11 +108,11 @@ class GridOrderBacktester:
         add this back or each open position looks like a phantom loss equal
         to the order size (≈ $10 on a $1,000 account).
         """
-        return sum(m for _, _, m, _ in self.long_positions + self.short_positions)
+        return sum(m for _, _, m, _, _ in self.long_positions + self.short_positions)
 
     def _calculate_unrealized_pnl(self, price: float) -> float:
-        long_pnl = sum((price - ep) * qty for ep, qty, _m, _t in self.long_positions)
-        short_pnl = sum((ep - price) * qty for ep, qty, _m, _t in self.short_positions)
+        long_pnl = sum((price - ep) * qty for ep, qty, _m, _t, _s in self.long_positions)
+        short_pnl = sum((ep - price) * qty for ep, qty, _m, _t, _s in self.short_positions)
         return long_pnl + short_pnl
 
     def _equity(self, price: float) -> float:
@@ -159,8 +159,9 @@ class GridOrderBacktester:
             # Prevents piling into a trending move — if the open positions on
             # one side are already down more than the threshold, stop adding.
             max_unreal_loss = self.config.get("max_unrealized_loss_per_side", float("inf"))
-            long_unreal  = sum((price - ep) * qty for ep, qty, _m, _t in self.long_positions)
-            short_unreal = sum((ep - price) * qty for ep, qty, _m, _t in self.short_positions)
+            sl_multiplier = self.config.get("sl_multiplier", 2.0)
+            long_unreal  = sum((price - ep) * qty for ep, qty, _m, _t, _s in self.long_positions)
+            short_unreal = sum((ep - price) * qty for ep, qty, _m, _t, _s in self.short_positions)
             long_loss_tripped  = long_unreal  < -abs(max_unreal_loss)
             short_loss_tripped = short_unreal < -abs(max_unreal_loss)
 
@@ -183,7 +184,7 @@ class GridOrderBacktester:
             if self.direction in ["long", "both"]:
                 # 1. Close first position whose TP is hit (for...else: else only
                 #    runs when no break fired, i.e. no TP hit this candle)
-                for i, (ep, qty, margin_required, tp) in enumerate(self.long_positions):
+                for i, (ep, qty, margin_required, tp, sl) in enumerate(self.long_positions):
                     if price >= tp:
                         self.long_positions.pop(i)
                         fee_cost = qty * price * (self.fee / 2)
@@ -198,6 +199,20 @@ class GridOrderBacktester:
                         ))
                         self.last_long_price = price  # next re-entry anchors below TP
                         break
+                    elif price <= sl:
+                        self.long_positions.pop(i)
+                        fee_cost = qty * price * (self.fee / 2)
+                        gross_pnl = (price - ep) * qty  # negative: stopped out below entry
+                        net_pnl = gross_pnl - fee_cost
+                        self.balance += margin_required + net_pnl
+                        unrealized_pnl = self._calculate_unrealized_pnl(price)
+                        self.trade_history.append((
+                            timestamp, "SELL_STOP", price, qty, "LONG",
+                            net_pnl, fee_cost, gross_pnl, unrealized_pnl,
+                            self._equity(price),
+                        ))
+                        self.last_long_price = price  # re-anchor after stop
+                        break
                 else:
                     # 2. Open new entry only if no close happened this candle
                     if not long_at_cap and not long_loss_tripped:
@@ -208,8 +223,9 @@ class GridOrderBacktester:
                             fee_cost = qty * price * (self.fee / 2)
                             if (margin_required + fee_cost) <= available_margin:
                                 tp_price = price * (1 + self.long_settings["up_spacing"])
+                                sl_price = price * (1 - sl_multiplier * self.long_settings["down_spacing"])
                                 self.balance -= margin_required + fee_cost
-                                self.long_positions.append((price, qty, margin_required, tp_price))
+                                self.long_positions.append((price, qty, margin_required, tp_price, sl_price))
                                 unrealized_pnl = self._calculate_unrealized_pnl(price)
                                 self.trade_history.append((
                                     timestamp, "BUY", price, qty, "LONG",
@@ -220,7 +236,7 @@ class GridOrderBacktester:
 
             # SHORT SIDE — each open position carries its own pinned TP level
             if self.direction in ["short", "both"]:
-                for i, (ep, qty, margin_required, tp) in enumerate(self.short_positions):
+                for i, (ep, qty, margin_required, tp, sl) in enumerate(self.short_positions):
                     if price <= tp:
                         self.short_positions.pop(i)
                         fee_cost = qty * price * (self.fee / 2)
@@ -235,6 +251,20 @@ class GridOrderBacktester:
                         ))
                         self.last_short_price = price  # next re-entry anchors above TP
                         break
+                    elif price >= sl:
+                        self.short_positions.pop(i)
+                        fee_cost = qty * price * (self.fee / 2)
+                        gross_pnl = (ep - price) * qty  # negative: stopped out above entry
+                        net_pnl = gross_pnl - fee_cost
+                        self.balance += margin_required + net_pnl
+                        unrealized_pnl = self._calculate_unrealized_pnl(price)
+                        self.trade_history.append((
+                            timestamp, "COVER_SHORT_STOP", price, qty, "SHORT",
+                            net_pnl, fee_cost, gross_pnl, unrealized_pnl,
+                            self._equity(price),
+                        ))
+                        self.last_short_price = price  # re-anchor after stop
+                        break
                 else:
                     if not short_at_cap and not short_loss_tripped:
                         sell_price = self.last_short_price * (1 + self.short_settings["up_spacing"])
@@ -244,8 +274,9 @@ class GridOrderBacktester:
                             fee_cost = qty * price * (self.fee / 2)
                             if (margin_required + fee_cost) <= available_margin:
                                 tp_price = price * (1 - self.short_settings["down_spacing"])
+                                sl_price = price * (1 + sl_multiplier * self.short_settings["up_spacing"])
                                 self.balance -= margin_required + fee_cost
-                                self.short_positions.append((price, qty, margin_required, tp_price))
+                                self.short_positions.append((price, qty, margin_required, tp_price, sl_price))
                                 unrealized_pnl = self._calculate_unrealized_pnl(price)
                                 self.trade_history.append((
                                     timestamp, "SELL_SHORT", price, qty, "SHORT",
@@ -255,8 +286,8 @@ class GridOrderBacktester:
                                 self.last_short_price = price  # cascade next entry above
 
             # Equity tracking
-            long_pnl = sum((price - ep) * qty for ep, qty, _m, _t in self.long_positions)
-            short_pnl = sum((ep - price) * qty for ep, qty, _m, _t in self.short_positions)
+            long_pnl = sum((price - ep) * qty for ep, qty, _m, _t, _s in self.long_positions)
+            short_pnl = sum((ep - price) * qty for ep, qty, _m, _t, _s in self.short_positions)
             unrealized_pnl = long_pnl + short_pnl
             equity = self.balance + self._locked_margin() + unrealized_pnl
             self.max_equity = max(self.max_equity, equity)
@@ -277,8 +308,8 @@ class GridOrderBacktester:
     # ------------------------------------------------------------------
 
     def summary(self, final_price: float) -> Dict[str, Any]:
-        long_pnl = sum((final_price - ep) * qty for ep, qty, _m, _t in self.long_positions)
-        short_pnl = sum((ep - final_price) * qty for ep, qty, _m, _t in self.short_positions)
+        long_pnl = sum((final_price - ep) * qty for ep, qty, _m, _t, _s in self.long_positions)
+        short_pnl = sum((ep - final_price) * qty for ep, qty, _m, _t, _s in self.short_positions)
         unrealized_pnl = long_pnl + short_pnl
         realized_pnl = sum(t[5] for t in self.trade_history if t[5] != 0.0)
         final_equity = self.balance + self._locked_margin() + unrealized_pnl
@@ -633,6 +664,7 @@ CONFIG: Dict[str, Any] = {
     "max_positions_per_side": 3, # allow 3 stacked levels per side
     "max_unrealized_loss_per_side": 30, # USD — circuit breaker: stop adding to
                                          # a trending side once it's down >$30
+    "sl_multiplier": 2.0,        # SL distance = sl_multiplier × spacing (e.g. 2× TP distance)
     "fee_pct": 0.0006,           # Bitunix taker fee 0.06 %
     "leverage": 1,
     # direction="both" = market-neutral: profits from oscillation in either direction
@@ -696,6 +728,7 @@ XRP_CONFIG: Dict[str, Any] = {
     "max_positions_per_side": 3,
     "max_unrealized_loss_per_side": 30, # USD — circuit breaker: stop adding to
                                          # a trending side once it's down >$30
+    "sl_multiplier": 2.0,        # SL distance = sl_multiplier × spacing
     "fee_pct": 0.0006,           # Bitunix taker fee 0.06 %
     "leverage": 1,
     "direction": "both",
