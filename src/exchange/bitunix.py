@@ -555,7 +555,7 @@ class BitunixExchange:
         Parameters
         ----------
         symbol     : e.g. ``"BTCUSDT"``
-        interval   : one of ``1min 5min 15min 30min 1hour 4hour 1day 1week``
+        interval   : one of ``1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M``
         start_time : start of range in milliseconds (inclusive)
         end_time   : end of range in milliseconds (inclusive)
         limit      : number of candles to return (max 1000)
@@ -569,6 +569,7 @@ class BitunixExchange:
             "symbol": symbol,
             "interval": interval,
             "limit": limit,
+            "type": "LAST_PRICE",
         }
         if start_time is not None:
             params["startTime"] = start_time
@@ -576,7 +577,7 @@ class BitunixExchange:
             params["endTime"] = end_time
 
         raw = await self._client.get_public(
-            "/api/v1/futures/market/klines", params=params
+            "/api/v1/futures/market/kline", params=params
         )
         candles: List[Dict[str, Any]] = []
         for item in raw or []:

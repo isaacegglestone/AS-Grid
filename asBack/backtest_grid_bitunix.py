@@ -510,7 +510,7 @@ CONFIG: Dict[str, Any] = {
 
     # ── Market
     "symbol": "BTCUSDT",
-    "interval": "1min",          # 1min | 5min | 15min | 30min | 1hour | 4hour | 1day
+    "interval": "1m",             # 1m | 5m | 15m | 30m | 1h | 2h | 4h | 6h | 8h | 12h | 1d | 3d | 1w | 1M
 
     # ── Date range
     "start_date": datetime(2025, 7, 1),
