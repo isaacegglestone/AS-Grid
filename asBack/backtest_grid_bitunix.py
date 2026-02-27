@@ -283,7 +283,7 @@ async def fetch_klines_as_df(
 ) -> pd.DataFrame:
     """
     Fetch all klines for *symbol* between *start_dt* and *end_dt* from Bitunix
-    in 1000-candle chunks and return a pandas DataFrame.
+    in 200-candle chunks (Bitunix API hard limit per request).
 
     Columns: open_time (datetime), open, high, low, close, volume (floats).
 
@@ -316,12 +316,15 @@ async def fetch_klines_as_df(
         if not candles:
             break
 
+        # API may return newest-first — sort ascending so last element is newest.
+        candles.sort(key=lambda c: c["open_time"])
+
         all_candles.extend(candles)
 
-        # Advance to one millisecond after the last returned candle.
+        # Advance to one millisecond after the newest returned candle.
         last_time = candles[-1]["open_time"]
         if last_time <= chunk_start:
-            break  # Guard against infinite loop if API returns old data
+            break  # Guard against infinite loop
         chunk_start = last_time + 1
 
         # If fewer candles than requested, we've reached the end of the range.
