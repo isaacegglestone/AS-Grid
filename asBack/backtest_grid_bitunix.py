@@ -207,51 +207,30 @@ class GridOrderBacktester:
                 trending_down = velocity < -vel_threshold
 
                 if trending_up and self.trend_mode != "up":
-                    # Close all open short positions (losing side) at market
-                    n_closed = len(self.short_positions)
-                    for (ep, qty, margin_req, tp, sl) in list(self.short_positions):
-                        fee_cost  = qty * price * (self.fee / 2)
-                        gross_pnl = (ep - price) * qty  # negative when price rose above entry
-                        net_pnl   = gross_pnl - fee_cost
-                        self.balance += margin_req + net_pnl
-                        unrealized_pnl = self._calculate_unrealized_pnl(price)
-                        self.trade_history.append((
-                            timestamp, "TREND_CLOSE_SHORT", price, qty, "SHORT",
-                            net_pnl, fee_cost, gross_pnl, unrealized_pnl,
-                            self._equity(price),
-                        ))
-                    self.short_positions.clear()
+                    # Block new short entries during uptrend — let existing
+                    # shorts ride to their own TP or SL rather than force-
+                    # closing them (forced closures cause churn on volatile days).
                     self.last_short_price = price  # re-anchor for when trend ends
                     self.trend_mode = "up"
                     self.trend_cooldown_counter = 0
+                    n_open_shorts = len(self.short_positions)
                     print(
                         f"\U0001f4c8 [{timestamp}] Trend UP detected "
                         f"(vel={velocity * 100:.2f}% over {trend_lookback}min) "
-                        f"\u2014 {n_closed} short(s) closed at ${price:,.4f}"
+                        f"\u2014 new short entries blocked ({n_open_shorts} existing short(s) ride to TP/SL)"
                     )
 
                 elif trending_down and self.trend_mode != "down":
-                    # Close all open long positions (losing side) at market
-                    n_closed = len(self.long_positions)
-                    for (ep, qty, margin_req, tp, sl) in list(self.long_positions):
-                        fee_cost  = qty * price * (self.fee / 2)
-                        gross_pnl = (price - ep) * qty  # negative when price fell below entry
-                        net_pnl   = gross_pnl - fee_cost
-                        self.balance += margin_req + net_pnl
-                        unrealized_pnl = self._calculate_unrealized_pnl(price)
-                        self.trade_history.append((
-                            timestamp, "TREND_CLOSE_LONG", price, qty, "LONG",
-                            net_pnl, fee_cost, gross_pnl, unrealized_pnl,
-                            self._equity(price),
-                        ))
-                    self.long_positions.clear()
+                    # Block new long entries during downtrend — let existing
+                    # longs ride to their own TP or SL.
                     self.last_long_price = price  # re-anchor for when trend ends
                     self.trend_mode = "down"
                     self.trend_cooldown_counter = 0
+                    n_open_longs = len(self.long_positions)
                     print(
                         f"\U0001f4c9 [{timestamp}] Trend DOWN detected "
                         f"(vel={velocity * 100:.2f}% over {trend_lookback}min) "
-                        f"\u2014 {n_closed} long(s) closed at ${price:,.4f}"
+                        f"\u2014 new long entries blocked ({n_open_longs} existing long(s) ride to TP/SL)"
                     )
 
                 elif self.trend_mode is not None:
