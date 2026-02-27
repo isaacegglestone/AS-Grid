@@ -160,6 +160,7 @@ class GridOrderBacktester:
             # one side are already down more than the threshold, stop adding.
             max_unreal_loss = self.config.get("max_unrealized_loss_per_side", float("inf"))
             sl_multiplier = self.config.get("sl_multiplier", 2.0)
+            min_sl_pct    = self.config.get("min_sl_pct", 0.0)  # floor: SL never closer than this % from entry
             long_unreal  = sum((price - ep) * qty for ep, qty, _m, _t, _s in self.long_positions)
             short_unreal = sum((ep - price) * qty for ep, qty, _m, _t, _s in self.short_positions)
             long_loss_tripped  = long_unreal  < -abs(max_unreal_loss)
@@ -223,7 +224,8 @@ class GridOrderBacktester:
                             fee_cost = qty * price * (self.fee / 2)
                             if (margin_required + fee_cost) <= available_margin:
                                 tp_price = price * (1 + self.long_settings["up_spacing"])
-                                sl_price = price * (1 - sl_multiplier * self.long_settings["down_spacing"])
+                                long_sl_pct = max(sl_multiplier * self.long_settings["down_spacing"], min_sl_pct)
+                                sl_price = price * (1 - long_sl_pct)
                                 self.balance -= margin_required + fee_cost
                                 self.long_positions.append((price, qty, margin_required, tp_price, sl_price))
                                 unrealized_pnl = self._calculate_unrealized_pnl(price)
@@ -274,7 +276,8 @@ class GridOrderBacktester:
                             fee_cost = qty * price * (self.fee / 2)
                             if (margin_required + fee_cost) <= available_margin:
                                 tp_price = price * (1 - self.short_settings["down_spacing"])
-                                sl_price = price * (1 + sl_multiplier * self.short_settings["up_spacing"])
+                                short_sl_pct = max(sl_multiplier * self.short_settings["up_spacing"], min_sl_pct)
+                                sl_price = price * (1 + short_sl_pct)
                                 self.balance -= margin_required + fee_cost
                                 self.short_positions.append((price, qty, margin_required, tp_price, sl_price))
                                 unrealized_pnl = self._calculate_unrealized_pnl(price)
@@ -665,6 +668,7 @@ CONFIG: Dict[str, Any] = {
     "max_unrealized_loss_per_side": 30, # USD — circuit breaker: stop adding to
                                          # a trending side once it's down >$30
     "sl_multiplier": 2.0,        # SL distance = sl_multiplier × spacing (e.g. 2× TP distance)
+    "min_sl_pct": 0.01,          # floor: SL never closer than 1.0% from entry (prevents noise-stops on tight spacings)
     "fee_pct": 0.0006,           # Bitunix taker fee 0.06 %
     "leverage": 1,
     # direction="both" = market-neutral: profits from oscillation in either direction
@@ -729,6 +733,7 @@ XRP_CONFIG: Dict[str, Any] = {
     "max_unrealized_loss_per_side": 30, # USD — circuit breaker: stop adding to
                                          # a trending side once it's down >$30
     "sl_multiplier": 2.0,        # SL distance = sl_multiplier × spacing
+    "min_sl_pct": 0.01,          # floor: SL never closer than 1.0% from entry
     "fee_pct": 0.0006,           # Bitunix taker fee 0.06 %
     "leverage": 1,
     "direction": "both",
