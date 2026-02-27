@@ -154,9 +154,27 @@ class GridOrderBacktester:
             short_at_cap = len(self.short_positions) >= max_per_side
             open_position_count = len(self.long_positions) + len(self.short_positions)
             at_max = open_position_count >= self.config["max_positions"]
+
+            # Per-side unrealized loss circuit breaker.
+            # Prevents piling into a trending move — if the open positions on
+            # one side are already down more than the threshold, stop adding.
+            max_unreal_loss = self.config.get("max_unrealized_loss_per_side", float("inf"))
+            long_unreal  = sum((price - ep) * qty for ep, qty, _m, _t in self.long_positions)
+            short_unreal = sum((ep - price) * qty for ep, qty, _m, _t in self.short_positions)
+            long_loss_tripped  = long_unreal  < -abs(max_unreal_loss)
+            short_loss_tripped = short_unreal < -abs(max_unreal_loss)
+
             if (long_at_cap or short_at_cap) and not self._max_positions_warned:
-                print("⚠️ Per-side position cap reached (new entries paused, existing positions continue)")
+                print("\u26a0\ufe0f Per-side position cap reached (new entries paused, existing positions continue)")
                 self._max_positions_warned = True
+            if long_loss_tripped and not getattr(self, "_long_loss_warned", False):
+                print(f"\u26a0\ufe0f Long-side unrealized loss circuit tripped "
+                      f"(${long_unreal:+.2f} < -${abs(max_unreal_loss):.0f}) — no new longs")
+                self._long_loss_warned = True
+            if short_loss_tripped and not getattr(self, "_short_loss_warned", False):
+                print(f"\u26a0\ufe0f Short-side unrealized loss circuit tripped "
+                      f"(${short_unreal:+.2f} < -${abs(max_unreal_loss):.0f}) — no new shorts")
+                self._short_loss_warned = True
 
             used_margin = sum(pos[2] for pos in self.long_positions + self.short_positions)
             available_margin = self.balance - used_margin
@@ -182,7 +200,7 @@ class GridOrderBacktester:
                         break
                 else:
                     # 2. Open new entry only if no close happened this candle
-                    if not long_at_cap:
+                    if not long_at_cap and not long_loss_tripped:
                         buy_price = self.last_long_price * (1 - self.long_settings["down_spacing"])
                         if price <= buy_price:
                             qty = effective_order_value / price
@@ -218,7 +236,7 @@ class GridOrderBacktester:
                         self.last_short_price = price  # next re-entry anchors above TP
                         break
                 else:
-                    if not short_at_cap:
+                    if not short_at_cap and not short_loss_tripped:
                         sell_price = self.last_short_price * (1 + self.short_settings["up_spacing"])
                         if price >= sell_price:
                             qty = effective_order_value / price
@@ -613,6 +631,8 @@ CONFIG: Dict[str, Any] = {
     "max_drawdown": 0.9,
     "max_positions": 6,          # total cap (3 long + 3 short)
     "max_positions_per_side": 3, # allow 3 stacked levels per side
+    "max_unrealized_loss_per_side": 30, # USD — circuit breaker: stop adding to
+                                         # a trending side once it's down >$30
     "fee_pct": 0.0006,           # Bitunix taker fee 0.06 %
     "leverage": 1,
     # direction="both" = market-neutral: profits from oscillation in either direction
@@ -674,6 +694,8 @@ XRP_CONFIG: Dict[str, Any] = {
     "max_drawdown": 0.9,
     "max_positions": 6,          # 3 long + 3 short
     "max_positions_per_side": 3,
+    "max_unrealized_loss_per_side": 30, # USD — circuit breaker: stop adding to
+                                         # a trending side once it's down >$30
     "fee_pct": 0.0006,           # Bitunix taker fee 0.06 %
     "leverage": 1,
     "direction": "both",
