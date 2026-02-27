@@ -273,6 +273,25 @@ class GridOrderBacktester:
 # Bitunix data loader  (async – replaces load_data_for_date CSV reader)
 # ===========================================================================
 
+# Bitunix interval string → milliseconds per candle
+_INTERVAL_MS: Dict[str, int] = {
+    "1min":  60_000,
+    "3min":  3 * 60_000,
+    "5min":  5 * 60_000,
+    "15min": 15 * 60_000,
+    "30min": 30 * 60_000,
+    "1hour": 60 * 60_000,
+    "2hour": 2 * 60 * 60_000,
+    "4hour": 4 * 60 * 60_000,
+    "6hour": 6 * 60 * 60_000,
+    "8hour": 8 * 60 * 60_000,
+    "12hour": 12 * 60 * 60_000,
+    "1day":  24 * 60 * 60_000,
+    "3day":  3 * 24 * 60 * 60_000,
+    "1week": 7 * 24 * 60 * 60_000,
+}
+
+
 async def fetch_klines_as_df(
     symbol: str,
     interval: str,
@@ -287,6 +306,15 @@ async def fetch_klines_as_df(
 
     Columns: open_time (datetime), open, high, low, close, volume (floats).
 
+    Pagination notes (confirmed by live API tests):
+    - The API returns candles DESCENDING (newest-first) within the requested window.
+    - Passing only startTime causes the API to return the 200 most-recent candles
+      with open_time >= startTime — making startTime-only pagination useless for
+      historical data since it always returns today's candles.
+    - Correct approach: pass both startTime and endTime as a sliding window of
+      exactly CHUNK_SIZE candle-widths.  The API rounds startTime down to the
+      nearest candle boundary, so we advance by interval_ms (not +1).
+
     *api_key* / *secret_key* are only required for private endpoints; the
     klines endpoint is public and they can be left as empty strings.
     """
@@ -297,39 +325,52 @@ async def fetch_klines_as_df(
             dt = dt.replace(tzinfo=timezone.utc)
         return int(dt.timestamp() * 1000)
 
+    interval_ms = _INTERVAL_MS.get(interval)
+    if interval_ms is None:
+        raise ValueError(
+            f"Unknown interval '{interval}'. Expected one of: {list(_INTERVAL_MS)}"
+        )
+
+    CHUNK_SIZE = 200  # Bitunix API hard limit per request
+    WINDOW_MS  = CHUNK_SIZE * interval_ms  # total time span per request
+
     all_candles: List[Dict[str, Any]] = []
     chunk_start = _to_ms(start_dt)
     end_ms = _to_ms(end_dt)
 
     print(f"Fetching {symbol} {interval} klines from {start_dt.date()} to {end_dt.date()} …")
 
-    CHUNK_SIZE = 200  # Bitunix API hard limit per request
+    seen_times: set = set()  # de-duplicate candles at chunk boundaries
 
     while chunk_start < end_ms:
+        chunk_end = min(chunk_start + WINDOW_MS, end_ms)
+
         candles = await exchange.get_klines(
             symbol=symbol,
             interval=interval,
             start_time=chunk_start,
-            end_time=end_ms,
+            end_time=chunk_end,
             limit=CHUNK_SIZE,
         )
         if not candles:
             break
 
-        # API may return newest-first — sort ascending so last element is newest.
+        # API returns newest-first — sort ascending so candles[-1] is newest.
         candles.sort(key=lambda c: c["open_time"])
 
-        all_candles.extend(candles)
+        # De-duplicate: the API includes the endTime boundary candle in both
+        # the current and following chunk (off-by-one at minute boundaries).
+        new_candles = [c for c in candles if c["open_time"] not in seen_times]
+        for c in new_candles:
+            seen_times.add(c["open_time"])
+        all_candles.extend(new_candles)
 
-        # Advance to one millisecond after the newest returned candle.
         last_time = candles[-1]["open_time"]
         if last_time <= chunk_start:
             break  # Guard against infinite loop
-        chunk_start = last_time + 1
 
-        # If fewer candles than requested, we've reached the end of the range.
-        if len(candles) < CHUNK_SIZE:
-            break
+        # Advance by one candle width (not +1 ms) to avoid the boundary overlap.
+        chunk_start = last_time + interval_ms
 
     if not all_candles:
         raise ValueError(f"No klines returned for {symbol} between {start_dt} and {end_dt}")
