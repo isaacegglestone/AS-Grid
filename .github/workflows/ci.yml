@@ -59,6 +59,7 @@ jobs:
           ssh-keygen -t ed25519 -f /tmp/test_key -N ""
           echo "TEST_PUBLIC_KEY=$(cat /tmp/test_key.pub)" >> $GITHUB_ENV
           echo "NAME_PREFIX=ci-${{ github.run_id }}" >> $GITHUB_ENV
+          echo "RUNNER_IP=$(curl -sf https://checkip.amazonaws.com)" >> $GITHUB_ENV
 
       - name: Terraform init & apply
         run: |
@@ -67,7 +68,8 @@ jobs:
           terraform apply -auto-approve \
             -var="ssh_public_key=${{ env.TEST_PUBLIC_KEY }}" \
             -var="name_prefix=${{ env.NAME_PREFIX }}" \
-            -var="repo_branch=${{ github.head_ref || github.ref_name }}"
+            -var="repo_branch=${{ github.head_ref || github.ref_name }}" \
+            -var="allowed_ssh_cidr=${{ env.RUNNER_IP }}/32"
           echo "INSTANCE_IP=$(terraform output -raw instance_ip)" >> $GITHUB_ENV
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -110,7 +112,8 @@ jobs:
           terraform destroy -auto-approve \
             -var="ssh_public_key=${{ env.TEST_PUBLIC_KEY || 'placeholder' }}" \
             -var="name_prefix=${{ env.NAME_PREFIX || 'ci-cleanup' }}" \
-            -var="repo_branch=${{ github.head_ref || github.ref_name }}"
+            -var="repo_branch=${{ github.head_ref || github.ref_name }}" \
+            -var="allowed_ssh_cidr=${{ env.RUNNER_IP || '0.0.0.0/0' }}"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
