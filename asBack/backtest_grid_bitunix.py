@@ -83,19 +83,29 @@ class GridOrderBacktester:
         if self.direction in ["short", "both"]:
             self._place_short_orders(price)
 
-    def _place_long_orders(self, current_price: float) -> None:
-        """Long grid: take-profit above, re-entry below."""
+    def _place_long_orders(self, current_price: float, tp_price: Optional[float] = None) -> None:
+        """Long grid: take-profit above, re-entry below.
+
+        *tp_price* lets the caller pin the SELL to the open position's entry
+        rather than re-anchoring it to *current_price* (which would move TP
+        below the entry and force a losing close).
+        """
+        sell_price = (tp_price or current_price) * (1 + self.long_settings["up_spacing"])
         self.orders["long"] = [
             (current_price * (1 - self.long_settings["down_spacing"]), "BUY"),
-            (current_price * (1 + self.long_settings["up_spacing"]), "SELL"),
+            (sell_price, "SELL"),
         ]
         self.last_long_price = current_price
 
-    def _place_short_orders(self, current_price: float) -> None:
-        """Short grid: re-entry above, take-profit below."""
+    def _place_short_orders(self, current_price: float, tp_price: Optional[float] = None) -> None:
+        """Short grid: re-entry above, take-profit below.
+
+        *tp_price* pins the COVER_SHORT to the open position's entry price.
+        """
+        cover_price = (tp_price or current_price) * (1 - self.short_settings["down_spacing"])
         self.orders["short"] = [
             (current_price * (1 + self.short_settings["up_spacing"]), "SELL_SHORT"),
-            (current_price * (1 - self.short_settings["down_spacing"]), "COVER_SHORT"),
+            (cover_price, "COVER_SHORT"),
         ]
         self.last_short_price = current_price
 
@@ -109,19 +119,23 @@ class GridOrderBacktester:
         """Periodically re-anchor grid to current price.
 
         Mirrors live bot behaviour: cancel pending (unfilled) orders and place
-        fresh TP + entry at the new price level.  Existing open positions are
+        fresh entry + TP at the new price level.  Existing open positions are
         kept — only the order levels move.
+
+        Crucially: if a position is already open its TP is pinned to the
+        original entry price so re-anchoring can never force a losing close.
         """
         if self.last_refresh_time is None or (
             current_time - self.last_refresh_time
             >= timedelta(minutes=self.config["grid_refresh_interval"])
         ):
-            # In the backtester, 'cancelling orders' just means replacing the
-            # order list with levels re-anchored to the current price.
             if self.direction in ["long", "both"]:
-                self._place_long_orders(price)
+                # Pin TP to open position entry if one exists
+                long_tp_anchor = self.long_positions[0][0] if self.long_positions else None
+                self._place_long_orders(price, tp_price=long_tp_anchor)
             if self.direction in ["short", "both"]:
-                self._place_short_orders(price)
+                short_tp_anchor = self.short_positions[0][0] if self.short_positions else None
+                self._place_short_orders(price, tp_price=short_tp_anchor)
             self.last_refresh_time = current_time
 
     def _locked_margin(self) -> float:
