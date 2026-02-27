@@ -65,77 +65,40 @@ class GridOrderBacktester:
         self.equity_curve: List = []
         self.max_equity = self.balance
 
-        self.orders: Dict[str, List] = {"long": [], "short": []}
         self.last_refresh_time = None
         self.last_long_price: Optional[float] = None
         self.last_short_price: Optional[float] = None
         self._max_positions_warned = False
 
-        self._init_orders(self.df["close"].iloc[0])
+        self._init_anchors(self.df["close"].iloc[0])
 
     # ------------------------------------------------------------------
     # Order placement helpers
     # ------------------------------------------------------------------
 
-    def _init_orders(self, price: float) -> None:
+    def _init_anchors(self, price: float) -> None:
+        """Set initial price anchors for entry-level calculation."""
         if self.direction in ["long", "both"]:
-            self._place_long_orders(price)
+            self.last_long_price = price
         if self.direction in ["short", "both"]:
-            self._place_short_orders(price)
-
-    def _place_long_orders(self, current_price: float, tp_price: Optional[float] = None) -> None:
-        """Long grid: take-profit above, re-entry below.
-
-        *tp_price* lets the caller pin the SELL to the open position's entry
-        rather than re-anchoring it to *current_price* (which would move TP
-        below the entry and force a losing close).
-        """
-        sell_price = (tp_price or current_price) * (1 + self.long_settings["up_spacing"])
-        self.orders["long"] = [
-            (current_price * (1 - self.long_settings["down_spacing"]), "BUY"),
-            (sell_price, "SELL"),
-        ]
-        self.last_long_price = current_price
-
-    def _place_short_orders(self, current_price: float, tp_price: Optional[float] = None) -> None:
-        """Short grid: re-entry above, take-profit below.
-
-        *tp_price* pins the COVER_SHORT to the open position's entry price.
-        """
-        cover_price = (tp_price or current_price) * (1 - self.short_settings["down_spacing"])
-        self.orders["short"] = [
-            (current_price * (1 + self.short_settings["up_spacing"]), "SELL_SHORT"),
-            (cover_price, "COVER_SHORT"),
-        ]
-        self.last_short_price = current_price
-
-    def _update_orders_after_trade(self, side: str, fill_price: float) -> None:
-        if side == "long":
-            self._place_long_orders(fill_price)
-        elif side == "short":
-            self._place_short_orders(fill_price)
+            self.last_short_price = price
 
     def _refresh_orders_if_needed(self, price: float, current_time: datetime) -> None:
-        """Periodically re-anchor grid to current price.
+        """Re-anchor entry levels to current price every grid_refresh_interval minutes.
 
-        Mirrors live bot behaviour: cancel pending (unfilled) orders and place
-        fresh entry + TP at the new price level.  Existing open positions are
-        kept — only the order levels move.
-
-        Crucially: if a position is already open its TP is pinned to the
-        original entry price so re-anchoring can never force a losing close.
+        Mirrors live bot behaviour: only the pending entry order level moves.
+        Each open position's TP is stored inside the position tuple and is
+        never displaced by re-anchoring (avoids forcing losing closes during
+        trending moves).
         """
         if self.last_refresh_time is None or (
             current_time - self.last_refresh_time
             >= timedelta(minutes=self.config["grid_refresh_interval"])
         ):
             if self.direction in ["long", "both"]:
-                # Pin TP to open position entry if one exists
-                long_tp_anchor = self.long_positions[0][0] if self.long_positions else None
-                self._place_long_orders(price, tp_price=long_tp_anchor)
+                self.last_long_price = price
             if self.direction in ["short", "both"]:
-                short_tp_anchor = self.short_positions[0][0] if self.short_positions else None
-                self._place_short_orders(price, tp_price=short_tp_anchor)
+                self.last_short_price = price
             self.last_refresh_time = current_time
 
     def _locked_margin(self) -> float:
@@ -145,11 +108,11 @@ class GridOrderBacktester:
         add this back or each open position looks like a phantom loss equal
         to the order size (≈ $10 on a $1,000 account).
         """
-        return sum(m for _, _, m in self.long_positions + self.short_positions)
+        return sum(m for _, _, m, _ in self.long_positions + self.short_positions)
 
     def _calculate_unrealized_pnl(self, price: float) -> float:
-        long_pnl = sum((price - ep) * qty for ep, qty, _ in self.long_positions)
-        short_pnl = sum((ep - price) * qty for ep, qty, _ in self.short_positions)
+        long_pnl = sum((price - ep) * qty for ep, qty, _m, _t in self.long_positions)
+        short_pnl = sum((ep - price) * qty for ep, qty, _m, _t in self.short_positions)
         return long_pnl + short_pnl
 
     def _equity(self, price: float) -> float:
@@ -198,32 +161,15 @@ class GridOrderBacktester:
             used_margin = sum(pos[2] for pos in self.long_positions + self.short_positions)
             available_margin = self.balance - used_margin
 
-            # LONG SIDE
+            # LONG SIDE — each open position carries its own pinned TP level
             if self.direction in ["long", "both"]:
-                for order_price, action in self.orders["long"]:
-                    if action == "BUY" and price <= order_price:
-                        if long_at_cap:
-                            break
-                        qty = effective_order_value / price
-                        margin_required = qty * price / self.leverage
+                # 1. Close first position whose TP is hit (for...else: else only
+                #    runs when no break fired, i.e. no TP hit this candle)
+                for i, (ep, qty, margin_required, tp) in enumerate(self.long_positions):
+                    if price >= tp:
+                        self.long_positions.pop(i)
                         fee_cost = qty * price * (self.fee / 2)
-                        if (margin_required + fee_cost) > available_margin:
-                            break
-                        self.balance -= margin_required + fee_cost
-                        self.long_positions.append((price, qty, margin_required))
-                        unrealized_pnl = self._calculate_unrealized_pnl(price)
-                        self.trade_history.append((
-                            timestamp, "BUY", price, qty, "LONG",
-                            0.0, fee_cost, 0.0, unrealized_pnl,
-                            self._equity(price),
-                        ))
-                        self._update_orders_after_trade("long", price)
-                        break
-
-                    elif action == "SELL" and self.long_positions and price >= order_price:
-                        entry_price, qty, margin_required = self.long_positions.pop(0)
-                        fee_cost = qty * price * (self.fee / 2)
-                        gross_pnl = (price - entry_price) * qty
+                        gross_pnl = (price - ep) * qty
                         net_pnl = gross_pnl - fee_cost
                         self.balance += margin_required + net_pnl
                         unrealized_pnl = self._calculate_unrealized_pnl(price)
@@ -232,35 +178,35 @@ class GridOrderBacktester:
                             net_pnl, fee_cost, gross_pnl, unrealized_pnl,
                             self._equity(price),
                         ))
-                        self._update_orders_after_trade("long", price)
+                        self.last_long_price = price  # next re-entry anchors below TP
                         break
+                else:
+                    # 2. Open new entry only if no close happened this candle
+                    if not long_at_cap:
+                        buy_price = self.last_long_price * (1 - self.long_settings["down_spacing"])
+                        if price <= buy_price:
+                            qty = effective_order_value / price
+                            margin_required = qty * price / self.leverage
+                            fee_cost = qty * price * (self.fee / 2)
+                            if (margin_required + fee_cost) <= available_margin:
+                                tp_price = price * (1 + self.long_settings["up_spacing"])
+                                self.balance -= margin_required + fee_cost
+                                self.long_positions.append((price, qty, margin_required, tp_price))
+                                unrealized_pnl = self._calculate_unrealized_pnl(price)
+                                self.trade_history.append((
+                                    timestamp, "BUY", price, qty, "LONG",
+                                    0.0, fee_cost, 0.0, unrealized_pnl,
+                                    self._equity(price),
+                                ))
+                                self.last_long_price = price  # cascade next entry below
 
-            # SHORT SIDE
+            # SHORT SIDE — each open position carries its own pinned TP level
             if self.direction in ["short", "both"]:
-                for order_price, action in self.orders["short"]:
-                    if action == "SELL_SHORT" and price >= order_price:
-                        if short_at_cap:
-                            break
-                        qty = effective_order_value / price
-                        margin_required = qty * price / self.leverage
+                for i, (ep, qty, margin_required, tp) in enumerate(self.short_positions):
+                    if price <= tp:
+                        self.short_positions.pop(i)
                         fee_cost = qty * price * (self.fee / 2)
-                        if (margin_required + fee_cost) > available_margin:
-                            break
-                        self.balance -= margin_required + fee_cost
-                        self.short_positions.append((price, qty, margin_required))
-                        unrealized_pnl = self._calculate_unrealized_pnl(price)
-                        self.trade_history.append((
-                            timestamp, "SELL_SHORT", price, qty, "SHORT",
-                            0.0, fee_cost, 0.0, unrealized_pnl,
-                            self._equity(price),
-                        ))
-                        self._update_orders_after_trade("short", price)
-                        break
-
-                    elif action == "COVER_SHORT" and self.short_positions and price <= order_price:
-                        entry_price, qty, margin_required = self.short_positions.pop(0)
-                        fee_cost = qty * price * (self.fee / 2)
-                        gross_pnl = (entry_price - price) * qty
+                        gross_pnl = (ep - price) * qty
                         net_pnl = gross_pnl - fee_cost
                         self.balance += margin_required + net_pnl
                         unrealized_pnl = self._calculate_unrealized_pnl(price)
@@ -269,12 +215,30 @@ class GridOrderBacktester:
                             net_pnl, fee_cost, gross_pnl, unrealized_pnl,
                             self._equity(price),
                         ))
-                        self._update_orders_after_trade("short", price)
+                        self.last_short_price = price  # next re-entry anchors above TP
                         break
+                else:
+                    if not short_at_cap:
+                        sell_price = self.last_short_price * (1 + self.short_settings["up_spacing"])
+                        if price >= sell_price:
+                            qty = effective_order_value / price
+                            margin_required = qty * price / self.leverage
+                            fee_cost = qty * price * (self.fee / 2)
+                            if (margin_required + fee_cost) <= available_margin:
+                                tp_price = price * (1 - self.short_settings["down_spacing"])
+                                self.balance -= margin_required + fee_cost
+                                self.short_positions.append((price, qty, margin_required, tp_price))
+                                unrealized_pnl = self._calculate_unrealized_pnl(price)
+                                self.trade_history.append((
+                                    timestamp, "SELL_SHORT", price, qty, "SHORT",
+                                    0.0, fee_cost, 0.0, unrealized_pnl,
+                                    self._equity(price),
+                                ))
+                                self.last_short_price = price  # cascade next entry above
 
             # Equity tracking
-            long_pnl = sum((price - ep) * qty for ep, qty, _ in self.long_positions)
-            short_pnl = sum((ep - price) * qty for ep, qty, _ in self.short_positions)
+            long_pnl = sum((price - ep) * qty for ep, qty, _m, _t in self.long_positions)
+            short_pnl = sum((ep - price) * qty for ep, qty, _m, _t in self.short_positions)
             unrealized_pnl = long_pnl + short_pnl
             equity = self.balance + self._locked_margin() + unrealized_pnl
             self.max_equity = max(self.max_equity, equity)
@@ -295,8 +259,8 @@ class GridOrderBacktester:
     # ------------------------------------------------------------------
 
     def summary(self, final_price: float) -> Dict[str, Any]:
-        long_pnl = sum((final_price - ep) * qty for ep, qty, _ in self.long_positions)
-        short_pnl = sum((ep - final_price) * qty for ep, qty, _ in self.short_positions)
+        long_pnl = sum((final_price - ep) * qty for ep, qty, _m, _t in self.long_positions)
+        short_pnl = sum((ep - final_price) * qty for ep, qty, _m, _t in self.short_positions)
         unrealized_pnl = long_pnl + short_pnl
         realized_pnl = sum(t[5] for t in self.trade_history if t[5] != 0.0)
         final_equity = self.balance + self._locked_margin() + unrealized_pnl
@@ -645,20 +609,21 @@ CONFIG: Dict[str, Any] = {
 
     # ── Account / risk
     "initial_balance": 1000,
-    "order_value": 10,           # USD per grid order
+    "order_value": 100,          # USD per grid order (~10% of balance per level)
     "max_drawdown": 0.9,
-    "max_positions": 2,          # total cap (1 long + 1 short for hedge mode)
-    "max_positions_per_side": 1, # hedge mode: never stack directional exposure
+    "max_positions": 6,          # total cap (3 long + 3 short)
+    "max_positions_per_side": 3, # allow 3 stacked levels per side
     "fee_pct": 0.0006,           # Bitunix taker fee 0.06 %
     "leverage": 1,
-    # direction="both" = market-neutral hedge: profits from oscillation in either direction
+    # direction="both" = market-neutral: profits from oscillation in either direction
     "direction": "both",         # "long" | "short" | "both"
-    "grid_refresh_interval": 10, # minutes between grid re-anchoring
+    "grid_refresh_interval": 10, # minutes between re-anchoring entry levels
 
     # ── Parameter sets to grid-search
-    # Grid spacing = distance between order levels as a fraction of price.
-    # Tighter spacing → more frequent fills but smaller profit per trade.
-    # Wider spacing  → fewer fills but larger profit per trade.
+    # Spacing = distance between levels as a fraction of price.
+    # Tighter → more fills, smaller profit each.  Wider → fewer fills, larger profit each.
+    # With 3 levels per side spacing also determines max deployed capital:
+    #   3 × $100 × 2 sides = $600 max out of $1,000 balance.
     "param_sets": [
         {
             "name": "tight_0.2pct",
@@ -679,6 +644,11 @@ CONFIG: Dict[str, Any] = {
             "name": "wide_0.8pct",
             "long_settings":  {"up_spacing": 0.008, "down_spacing": 0.008},
             "short_settings": {"up_spacing": 0.008, "down_spacing": 0.008},
+        },
+        {
+            "name": "wide_1.0pct",
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
     ],
 }
