@@ -69,6 +69,7 @@ class GridOrderBacktester:
         self.last_refresh_time = None
         self.last_long_price: Optional[float] = None
         self.last_short_price: Optional[float] = None
+        self._max_positions_warned = False
 
         self._init_orders(self.df["close"].iloc[0])
 
@@ -105,11 +106,18 @@ class GridOrderBacktester:
             self._place_short_orders(fill_price)
 
     def _refresh_orders_if_needed(self, price: float, current_time: datetime) -> None:
-        """Periodically re-anchor grid to current price."""
+        """Periodically re-anchor grid to current price.
+
+        Mirrors live bot behaviour: cancel pending (unfilled) orders and place
+        fresh TP + entry at the new price level.  Existing open positions are
+        kept — only the order levels move.
+        """
         if self.last_refresh_time is None or (
             current_time - self.last_refresh_time
             >= timedelta(minutes=self.config["grid_refresh_interval"])
         ):
+            # In the backtester, 'cancelling orders' just means replacing the
+            # order list with levels re-anchored to the current price.
             if self.direction in ["long", "both"]:
                 self._place_long_orders(price)
             if self.direction in ["short", "both"]:
@@ -127,18 +135,17 @@ class GridOrderBacktester:
 
     def run(self) -> Dict[str, Any]:
         for _, row in self.df.iterrows():
-            if (
-                len(self.short_positions) + len(self.long_positions)
-                >= self.config["max_positions"]
-            ):
-                print("⚠️ Max positions reached")
-                break
-
             price: float = row["close"]
             timestamp = row["open_time"]
             effective_order_value = self.config["order_value"] * self.leverage
 
             self._refresh_orders_if_needed(price, timestamp)
+
+            open_position_count = len(self.long_positions) + len(self.short_positions)
+            at_max = open_position_count >= self.config["max_positions"]
+            if at_max and not self._max_positions_warned:
+                print("⚠️ Max positions reached (new entries paused, existing positions continue)")
+                self._max_positions_warned = True
 
             used_margin = sum(pos[2] for pos in self.long_positions + self.short_positions)
             available_margin = self.balance - used_margin
@@ -147,11 +154,13 @@ class GridOrderBacktester:
             if self.direction in ["long", "both"]:
                 for order_price, action in self.orders["long"]:
                     if action == "BUY" and price <= order_price:
+                        if at_max:
+                            break
                         qty = effective_order_value / price
                         margin_required = qty * price / self.leverage
                         fee_cost = qty * price * (self.fee / 2)
                         if (margin_required + fee_cost) > available_margin:
-                            continue
+                            break
                         self.balance -= margin_required + fee_cost
                         self.long_positions.append((price, qty, margin_required))
                         unrealized_pnl = self._calculate_unrealized_pnl(price)
@@ -182,11 +191,13 @@ class GridOrderBacktester:
             if self.direction in ["short", "both"]:
                 for order_price, action in self.orders["short"]:
                     if action == "SELL_SHORT" and price >= order_price:
+                        if at_max:
+                            break
                         qty = effective_order_value / price
                         margin_required = qty * price / self.leverage
                         fee_cost = qty * price * (self.fee / 2)
                         if (margin_required + fee_cost) > available_margin:
-                            continue
+                            break
                         self.balance -= margin_required + fee_cost
                         self.short_positions.append((price, qty, margin_required))
                         unrealized_pnl = self._calculate_unrealized_pnl(price)
