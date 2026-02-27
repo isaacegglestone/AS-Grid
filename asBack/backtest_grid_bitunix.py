@@ -161,6 +161,7 @@ class GridOrderBacktester:
             max_unreal_loss = self.config.get("max_unrealized_loss_per_side", float("inf"))
             sl_multiplier = self.config.get("sl_multiplier", 2.0)
             min_sl_pct    = self.config.get("min_sl_pct", 0.0)  # floor: SL never closer than this % from entry
+            use_sl        = self.config.get("use_sl", True)
             long_unreal  = sum((price - ep) * qty for ep, qty, _m, _t, _s in self.long_positions)
             short_unreal = sum((ep - price) * qty for ep, qty, _m, _t, _s in self.short_positions)
             long_loss_tripped  = long_unreal  < -abs(max_unreal_loss)
@@ -224,8 +225,11 @@ class GridOrderBacktester:
                             fee_cost = qty * price * (self.fee / 2)
                             if (margin_required + fee_cost) <= available_margin:
                                 tp_price = price * (1 + self.long_settings["up_spacing"])
-                                long_sl_pct = max(sl_multiplier * self.long_settings["down_spacing"], min_sl_pct)
-                                sl_price = price * (1 - long_sl_pct)
+                                if use_sl:
+                                    long_sl_pct = max(sl_multiplier * self.long_settings["down_spacing"], min_sl_pct)
+                                    sl_price = price * (1 - long_sl_pct)
+                                else:
+                                    sl_price = 0.0  # sentinel: never triggered (price > 0 always)
                                 self.balance -= margin_required + fee_cost
                                 self.long_positions.append((price, qty, margin_required, tp_price, sl_price))
                                 unrealized_pnl = self._calculate_unrealized_pnl(price)
@@ -276,8 +280,11 @@ class GridOrderBacktester:
                             fee_cost = qty * price * (self.fee / 2)
                             if (margin_required + fee_cost) <= available_margin:
                                 tp_price = price * (1 - self.short_settings["down_spacing"])
-                                short_sl_pct = max(sl_multiplier * self.short_settings["up_spacing"], min_sl_pct)
-                                sl_price = price * (1 + short_sl_pct)
+                                if use_sl:
+                                    short_sl_pct = max(sl_multiplier * self.short_settings["up_spacing"], min_sl_pct)
+                                    sl_price = price * (1 + short_sl_pct)
+                                else:
+                                    sl_price = float("inf")  # sentinel: never triggered
                                 self.balance -= margin_required + fee_cost
                                 self.short_positions.append((price, qty, margin_required, tp_price, sl_price))
                                 unrealized_pnl = self._calculate_unrealized_pnl(price)
@@ -585,6 +592,7 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
             {
                 "long_settings": params["long_settings"],
                 "short_settings": params["short_settings"],
+                "use_sl": params.get("use_sl", True),
             }
         )
 
@@ -683,26 +691,31 @@ CONFIG: Dict[str, Any] = {
     "param_sets": [
         {
             "name": "tight_0.2pct",
+            "use_sl": False,  # SL disabled: rely on circuit breaker only
             "long_settings":  {"up_spacing": 0.002, "down_spacing": 0.002},
             "short_settings": {"up_spacing": 0.002, "down_spacing": 0.002},
         },
         {
             "name": "medium_0.3pct",
+            "use_sl": False,
             "long_settings":  {"up_spacing": 0.003, "down_spacing": 0.003},
             "short_settings": {"up_spacing": 0.003, "down_spacing": 0.003},
         },
         {
             "name": "medium_0.5pct",
+            "use_sl": False,
             "long_settings":  {"up_spacing": 0.005, "down_spacing": 0.005},
             "short_settings": {"up_spacing": 0.005, "down_spacing": 0.005},
         },
         {
             "name": "wide_0.8pct",
+            "use_sl": True,   # SL enabled: 2× spacing = 1.6%, clears noise
             "long_settings":  {"up_spacing": 0.008, "down_spacing": 0.008},
             "short_settings": {"up_spacing": 0.008, "down_spacing": 0.008},
         },
         {
             "name": "wide_1.0pct",
+            "use_sl": True,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
@@ -743,26 +756,31 @@ XRP_CONFIG: Dict[str, Any] = {
     "param_sets": [
         {
             "name": "xrp_ultra_0.1pct",
+            "use_sl": False,  # SL disabled: TP=0.1%, any SL would be inside noise
             "long_settings":  {"up_spacing": 0.001, "down_spacing": 0.001},
             "short_settings": {"up_spacing": 0.001, "down_spacing": 0.001},
         },
         {
             "name": "xrp_tight_0.2pct",
+            "use_sl": False,
             "long_settings":  {"up_spacing": 0.002, "down_spacing": 0.002},
             "short_settings": {"up_spacing": 0.002, "down_spacing": 0.002},
         },
         {
             "name": "xrp_medium_0.3pct",
+            "use_sl": False,
             "long_settings":  {"up_spacing": 0.003, "down_spacing": 0.003},
             "short_settings": {"up_spacing": 0.003, "down_spacing": 0.003},
         },
         {
             "name": "xrp_medium_0.5pct",
+            "use_sl": False,
             "long_settings":  {"up_spacing": 0.005, "down_spacing": 0.005},
             "short_settings": {"up_spacing": 0.005, "down_spacing": 0.005},
         },
         {
             "name": "xrp_wide_0.8pct",
+            "use_sl": True,   # SL enabled: 2× spacing = 1.6%, clears noise
             "long_settings":  {"up_spacing": 0.008, "down_spacing": 0.008},
             "short_settings": {"up_spacing": 0.008, "down_spacing": 0.008},
         },
