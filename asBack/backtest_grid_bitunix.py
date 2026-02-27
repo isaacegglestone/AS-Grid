@@ -654,8 +654,87 @@ CONFIG: Dict[str, Any] = {
 }
 
 # ===========================================================================
+# XRP/USDT config  (target for live deployment)
+# ===========================================================================
+# XRP trades at ~$2–$3 and has higher % daily volatility than BTC (often
+# 3–8% swings per day vs BTC's 1–3%).  Tighter grids fill more frequently.
+# Spacing is the same % concept but we sweep tighter values down to 0.1%.
+XRP_CONFIG: Dict[str, Any] = {
+    # ── Market
+    "symbol": "XRPUSDT",
+    "interval": "1min",
+
+    # ── Date range — full July 2025 (same window as BTC for comparison)
+    "start_date": datetime(2025, 7, 1),
+    "end_date":   datetime(2025, 8, 1),
+
+    # ── Account / risk
+    "initial_balance": 1000,
+    "order_value": 100,          # USD per grid order
+    "max_drawdown": 0.9,
+    "max_positions": 6,          # 3 long + 3 short
+    "max_positions_per_side": 3,
+    "fee_pct": 0.0006,           # Bitunix taker fee 0.06 %
+    "leverage": 1,
+    "direction": "both",
+    "grid_refresh_interval": 10, # minutes
+
+    # ── Parameter sets tuned for XRP's higher % volatility
+    "param_sets": [
+        {
+            "name": "xrp_ultra_0.1pct",
+            "long_settings":  {"up_spacing": 0.001, "down_spacing": 0.001},
+            "short_settings": {"up_spacing": 0.001, "down_spacing": 0.001},
+        },
+        {
+            "name": "xrp_tight_0.2pct",
+            "long_settings":  {"up_spacing": 0.002, "down_spacing": 0.002},
+            "short_settings": {"up_spacing": 0.002, "down_spacing": 0.002},
+        },
+        {
+            "name": "xrp_medium_0.3pct",
+            "long_settings":  {"up_spacing": 0.003, "down_spacing": 0.003},
+            "short_settings": {"up_spacing": 0.003, "down_spacing": 0.003},
+        },
+        {
+            "name": "xrp_medium_0.5pct",
+            "long_settings":  {"up_spacing": 0.005, "down_spacing": 0.005},
+            "short_settings": {"up_spacing": 0.005, "down_spacing": 0.005},
+        },
+        {
+            "name": "xrp_wide_0.8pct",
+            "long_settings":  {"up_spacing": 0.008, "down_spacing": 0.008},
+            "short_settings": {"up_spacing": 0.008, "down_spacing": 0.008},
+        },
+    ],
+}
+
+# ===========================================================================
 # Entry point
 # ===========================================================================
 
 if __name__ == "__main__":
-    grid_search_backtest(CONFIG)
+    import sys
+    symbol = sys.argv[1].upper() if len(sys.argv) > 1 else "ALL"
+
+    if symbol in ("BTCUSDT", "BTC"):
+        print("\n" + "=" * 60)
+        print("  BTCUSDT backtest")
+        print("=" * 60)
+        grid_search_backtest(CONFIG)
+    elif symbol in ("XRPUSDT", "XRP"):
+        print("\n" + "=" * 60)
+        print("  XRPUSDT backtest")
+        print("=" * 60)
+        grid_search_backtest(XRP_CONFIG)
+    else:
+        # Run both
+        print("\n" + "=" * 60)
+        print("  BTCUSDT backtest")
+        print("=" * 60)
+        grid_search_backtest(CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  XRPUSDT backtest  ← live target")
+        print("=" * 60)
+        grid_search_backtest(XRP_CONFIG)

@@ -1,22 +1,27 @@
-name: CI
+name: Deploy
 
 on:
-  push:
-    branches: ["**"]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "test-ec2 = ephemeral EC2 tests + destroy | live = EC2 tests then deploy bot"
+        required: true
+        type: choice
+        options:
+          - test-ec2
+          - live
 
-# Prevent parallel runs on the same ref
+# Prevent parallel deploys of the same mode
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: deploy-${{ github.event.inputs.mode }}
+  cancel-in-progress: false
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Stage 1: Tests on free GitHub runner — runs on every push / PR
+  # 1. Tests on free GitHub-hosted runner (no AWS needed)
   # ---------------------------------------------------------------------------
-  tests:
-    name: "Stage 1: Tests (GitHub runner)"
+  runner-tests:
+    name: Tests (GitHub runner)
     runs-on: ubuntu-latest
 
     steps:
@@ -33,19 +38,18 @@ jobs:
       - name: Unit tests
         run: python -m pytest --tb=short -q
 
-      - name: Backtest XRP/USDT (live target)
+      - name: Backtest (integration)
         run: python asBack/backtest_grid_bitunix.py XRP
 
   # ---------------------------------------------------------------------------
-  # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
-  #          GitHub Environment (Settings → Environments → ec2 → Required reviewers)
-  #          Spins up t4g.nano in ap-southeast-1, runs tests, then destroys it.
+  # 2. Spin up an ephemeral EC2, run the same tests there, then destroy.
+  #    Validates the actual AL2023/ARM64 runtime environment.
+  #    Uses a unique name_prefix per run_id to avoid conflicts with the live bot.
   # ---------------------------------------------------------------------------
   ec2-tests:
-    name: "Stage 2: Tests (ephemeral EC2)"
+    name: Tests (ephemeral EC2)
     runs-on: ubuntu-latest
-    needs: tests
-    environment: ec2
+    needs: runner-tests
 
     steps:
       - uses: actions/checkout@v4
@@ -59,17 +63,15 @@ jobs:
           ssh-keygen -t ed25519 -f /tmp/test_key -N ""
           echo "TEST_PUBLIC_KEY=$(cat /tmp/test_key.pub)" >> $GITHUB_ENV
           echo "NAME_PREFIX=ci-${{ github.run_id }}" >> $GITHUB_ENV
-          echo "RUNNER_CIDR=$(curl -sf https://checkip.amazonaws.com)/32" >> $GITHUB_ENV
 
       - name: Terraform init & apply
+        id: tf-apply
         run: |
           cd infra
           terraform init
           terraform apply -auto-approve \
             -var="ssh_public_key=${{ env.TEST_PUBLIC_KEY }}" \
-            -var="name_prefix=${{ env.NAME_PREFIX }}" \
-            -var="repo_branch=${{ github.head_ref || github.ref_name }}" \
-            -var="allowed_ssh_cidr=${{ env.RUNNER_CIDR }}"
+            -var="name_prefix=${{ env.NAME_PREFIX }}"
           echo "INSTANCE_IP=$(terraform output -raw instance_ip)" >> $GITHUB_ENV
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -111,21 +113,20 @@ jobs:
           cd infra
           terraform destroy -auto-approve \
             -var="ssh_public_key=${{ env.TEST_PUBLIC_KEY || 'placeholder' }}" \
-            -var="name_prefix=${{ env.NAME_PREFIX || 'ci-cleanup' }}" \
-            -var="repo_branch=${{ github.head_ref || github.ref_name }}" \
-            -var="allowed_ssh_cidr=${{ env.RUNNER_CIDR || '0.0.0.0/0' }}"
+            -var="name_prefix=${{ env.NAME_PREFIX || 'ci-cleanup' }}"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   # ---------------------------------------------------------------------------
-  # Stage 3: Deploy live bot — only on main branch after EC2 tests pass
+  # 3. Deploy live bot to the persistent EC2 (only for mode=live)
+  #    The persistent EC2 is provisioned once manually via: cd infra && terraform apply
   # ---------------------------------------------------------------------------
   deploy:
-    name: "Stage 3: Deploy live bot"
+    name: Deploy live bot
     runs-on: ubuntu-latest
     needs: ec2-tests
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.event.inputs.mode == 'live'
 
     steps:
       - name: Deploy via SSH
