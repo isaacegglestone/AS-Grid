@@ -73,3 +73,14 @@ SERVICE
 systemctl daemon-reload
 systemctl enable bitunix-bot
 # Do NOT start yet — secrets are empty until first GitHub Actions deploy
+
+# ---------------------------------------------------------------------------
+# 5. Run backtest on first boot (no API keys needed — uses public klines)
+#    Output saved to ~/AS-Grid/backtest.log for review
+# ---------------------------------------------------------------------------
+su - ec2-user -c "
+  cd '$BOT_DIR'
+  echo '=== Backtest started at '\$(date)' ===' > backtest.log
+  .venv/bin/python asBack/backtest_grid_bitunix.py >> backtest.log 2>&1
+  echo '=== Backtest finished at '\$(date)' ===' >> backtest.log
+" || true   # don't fail the boot if backtest errors

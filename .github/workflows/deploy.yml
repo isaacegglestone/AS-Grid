@@ -1,89 +1,133 @@
 name: Deploy
 
 on:
-  push:
-    branches: [main]
+    # Manual trigger only — prevents accidental deploys.
+    # Set confirm=yes and provide all secrets before running.
+    workflow_dispatch:
+        inputs:
+            confirm:
+                description: 'Type "yes" to confirm deploy to production'
+                required: true
+                default: ""
 
 # Only one deploy at a time
 concurrency:
-  group: deploy-production
-  cancel-in-progress: false
+    group: deploy-production
+    cancel-in-progress: false
 
 jobs:
-  # -------------------------------------------------------------------------
-  # 1. Run tests first — never deploy broken code
-  # -------------------------------------------------------------------------
-  test:
-    name: Run tests before deploy
-    runs-on: ubuntu-latest
+    # ---------------------------------------------------------------------------
+    # Guard — abort immediately if confirm input is wrong
+    # ---------------------------------------------------------------------------
+    confirm-check:
+        name: Confirm deploy intent
+        runs-on: ubuntu-latest
+        steps:
+            - name: Check confirmation
+              run: |
+                  if [ "${{ github.event.inputs.confirm }}" != "yes" ]; then
+                    echo "::error::Deploy not confirmed. Set confirm=yes to proceed."
+                    exit 1
+                  fi
 
-    steps:
-      - uses: actions/checkout@v4
+    # ---------------------------------------------------------------------------
+    # 1. Unit tests
+    # ---------------------------------------------------------------------------
+    unit-tests:
+        name: Unit tests
+        runs-on: ubuntu-latest
+        needs: confirm-check
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
+        steps:
+            - uses: actions/checkout@v4
 
-      - run: pip install -r requirements.txt
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.13"
+                  cache: pip
 
-      - run: python -m pytest --tb=short -q
+            - name: Install dependencies
+              run: pip install -r requirements.txt
 
-  # -------------------------------------------------------------------------
-  # 2. Deploy to EC2
-  # -------------------------------------------------------------------------
-  deploy:
-    name: Deploy to EC2
-    runs-on: ubuntu-latest
-    needs: test  # Only runs if tests pass
+            - name: Run unit tests
+              run: python -m pytest --tb=short -q
 
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
-          # Pass bot config as env vars so we can write .env on the remote
-          envs: BITUNIX_API_KEY,BITUNIX_API_SECRET,COIN_NAME,GRID_SPACING,INITIAL_QUANTITY,LEVERAGE,ENABLE_NOTIFICATIONS,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID
-          script: |
-            set -euo pipefail
-            cd ~/AS-Grid
+    # ---------------------------------------------------------------------------
+    # 2. Integration test — backtest must pass before any deploy
+    # ---------------------------------------------------------------------------
+    integration-test:
+        name: Backtest (integration)
+        runs-on: ubuntu-latest
+        needs: unit-tests
 
-            echo "==> Pulling latest code..."
-            git fetch origin main
-            git reset --hard origin/main
+        steps:
+            - uses: actions/checkout@v4
 
-            echo "==> Writing .env..."
-            cat > .env << EOF
-            API_KEY=${BITUNIX_API_KEY}
-            API_SECRET=${BITUNIX_API_SECRET}
-            COIN_NAME=${COIN_NAME:-XRP}
-            GRID_SPACING=${GRID_SPACING:-0.004}
-            INITIAL_QUANTITY=${INITIAL_QUANTITY:-1}
-            LEVERAGE=${LEVERAGE:-20}
-            ENABLE_NOTIFICATIONS=${ENABLE_NOTIFICATIONS:-false}
-            TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-            TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
-            EOF
-            chmod 600 .env
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.13"
+                  cache: pip
 
-            echo "==> Installing/updating Python dependencies..."
-            .venv/bin/pip install -r requirements.txt -q
+            - name: Install dependencies
+              run: pip install -r requirements.txt
 
-            echo "==> Restarting bot service..."
-            sudo systemctl restart bitunix-bot
+            - name: Run backtest
+              run: python asBack/backtest_grid_bitunix.py
 
-            echo "==> Checking service status..."
-            sleep 3
-            sudo systemctl status bitunix-bot --no-pager
-        env:
-          BITUNIX_API_KEY: ${{ secrets.BITUNIX_API_KEY }}
-          BITUNIX_API_SECRET: ${{ secrets.BITUNIX_API_SECRET }}
-          COIN_NAME: ${{ vars.COIN_NAME }}
-          GRID_SPACING: ${{ vars.GRID_SPACING }}
-          INITIAL_QUANTITY: ${{ vars.INITIAL_QUANTITY }}
-          LEVERAGE: ${{ vars.LEVERAGE }}
-          ENABLE_NOTIFICATIONS: ${{ vars.ENABLE_NOTIFICATIONS }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    # ---------------------------------------------------------------------------
+    # 3. Deploy to EC2
+    # ---------------------------------------------------------------------------
+    deploy:
+        name: Deploy to EC2
+        runs-on: ubuntu-latest
+        needs: integration-test # only runs if both test jobs pass
+
+        steps:
+            - name: Deploy via SSH
+              uses: appleboy/ssh-action@v1.2.0
+              with:
+                  host: ${{ secrets.EC2_HOST }}
+                  username: ec2-user
+                  key: ${{ secrets.EC2_SSH_KEY }}
+                  envs: BITUNIX_API_KEY,BITUNIX_API_SECRET,COIN_NAME,GRID_SPACING,INITIAL_QUANTITY,LEVERAGE,ENABLE_NOTIFICATIONS,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID
+                  script: |
+                      set -euo pipefail
+                      cd ~/AS-Grid
+
+                      echo "==> Pulling latest code..."
+                      git fetch origin main
+                      git reset --hard origin/main
+
+                      echo "==> Writing .env..."
+                      cat > .env << EOF
+                      API_KEY=${BITUNIX_API_KEY}
+                      API_SECRET=${BITUNIX_API_SECRET}
+                      COIN_NAME=${COIN_NAME:-XRP}
+                      GRID_SPACING=${GRID_SPACING:-0.004}
+                      INITIAL_QUANTITY=${INITIAL_QUANTITY:-1}
+                      LEVERAGE=${LEVERAGE:-20}
+                      ENABLE_NOTIFICATIONS=${ENABLE_NOTIFICATIONS:-false}
+                      TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+                      TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+                      EOF
+                      chmod 600 .env
+
+                      echo "==> Installing/updating Python dependencies..."
+                      .venv/bin/pip install -r requirements.txt -q
+
+                      echo "==> Restarting bot service..."
+                      sudo systemctl restart bitunix-bot
+
+                      echo "==> Checking service status..."
+                      sleep 3
+                      sudo systemctl status bitunix-bot --no-pager
+              env:
+                  BITUNIX_API_KEY: ${{ secrets.BITUNIX_API_KEY }}
+                  BITUNIX_API_SECRET: ${{ secrets.BITUNIX_API_SECRET }}
+                  COIN_NAME: ${{ vars.COIN_NAME }}
+                  GRID_SPACING: ${{ vars.GRID_SPACING }}
+                  INITIAL_QUANTITY: ${{ vars.INITIAL_QUANTITY }}
+                  LEVERAGE: ${{ vars.LEVERAGE }}
+                  ENABLE_NOTIFICATIONS: ${{ vars.ENABLE_NOTIFICATIONS }}
+                  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+                  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
