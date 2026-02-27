@@ -6,17 +6,17 @@ on:
   pull_request:
     branches: [main]
 
-# Prevent parallel deploys on main
+# Prevent parallel runs on the same ref
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 1. Tests on free GitHub-hosted runner — runs on every push / PR
+  # Stage 1: Tests on free GitHub runner — runs on every push / PR
   # ---------------------------------------------------------------------------
   tests:
-    name: Tests (GitHub runner)
+    name: "Stage 1: Tests (GitHub runner)"
     runs-on: ubuntu-latest
 
     steps:
@@ -37,13 +37,89 @@ jobs:
         run: python asBack/backtest_grid_bitunix.py
 
   # ---------------------------------------------------------------------------
-  # 2. Deploy live bot — only on pushes to main after tests pass.
-  #    EC2 testing is done separately via ec2.yml (manually triggered).
+  # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
+  #          GitHub Environment (Settings → Environments → ec2 → Required reviewers)
+  #          Spins up t4g.nano in ap-southeast-1, runs tests, then destroys it.
   # ---------------------------------------------------------------------------
-  deploy:
-    name: Deploy live bot
+  ec2-tests:
+    name: "Stage 2: Tests (ephemeral EC2)"
     runs-on: ubuntu-latest
     needs: tests
+    environment: ec2
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+
+      - name: Generate ephemeral SSH key pair
+        run: |
+          ssh-keygen -t ed25519 -f /tmp/test_key -N ""
+          echo "TEST_PUBLIC_KEY=$(cat /tmp/test_key.pub)" >> $GITHUB_ENV
+          echo "NAME_PREFIX=ci-${{ github.run_id }}" >> $GITHUB_ENV
+
+      - name: Terraform init & apply
+        run: |
+          cd infra
+          terraform init
+          terraform apply -auto-approve \
+            -var="ssh_public_key=${{ env.TEST_PUBLIC_KEY }}" \
+            -var="name_prefix=${{ env.NAME_PREFIX }}"
+          echo "INSTANCE_IP=$(terraform output -raw instance_ip)" >> $GITHUB_ENV
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Wait for SSH to be available
+        run: |
+          echo "Waiting for SSH on ${{ env.INSTANCE_IP }}..."
+          for i in $(seq 1 40); do
+            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+              -i /tmp/test_key ec2-user@${{ env.INSTANCE_IP }} 'echo ready' 2>/dev/null && break
+            echo "Attempt $i/40 failed, retrying in 15s..."
+            sleep 15
+          done
+
+      - name: Wait for cloud-init bootstrap to complete
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/test_key \
+            ec2-user@${{ env.INSTANCE_IP }} \
+            'until [ -f /var/lib/cloud/instance/boot-finished ]; do
+               echo "bootstrap in progress..."; sleep 10
+             done; echo "bootstrap complete"'
+
+      - name: Unit tests on EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/test_key \
+            ec2-user@${{ env.INSTANCE_IP }} \
+            'cd ~/AS-Grid && .venv/bin/python -m pytest --tb=short -q'
+
+      - name: Backtest on EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/test_key \
+            ec2-user@${{ env.INSTANCE_IP }} \
+            'cd ~/AS-Grid && .venv/bin/python asBack/backtest_grid_bitunix.py'
+
+      - name: Terraform destroy (always — prevent orphaned resources)
+        if: always()
+        run: |
+          cd infra
+          terraform destroy -auto-approve \
+            -var="ssh_public_key=${{ env.TEST_PUBLIC_KEY || 'placeholder' }}" \
+            -var="name_prefix=${{ env.NAME_PREFIX || 'ci-cleanup' }}"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  # ---------------------------------------------------------------------------
+  # Stage 3: Deploy live bot — only on main branch after EC2 tests pass
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: "Stage 3: Deploy live bot"
+    runs-on: ubuntu-latest
+    needs: ec2-tests
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
