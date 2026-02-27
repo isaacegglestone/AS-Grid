@@ -9,7 +9,7 @@ Differences from the Binance version
   (no local CSV files required).
 - Default fee rate reflects Bitunix taker fee (0.06 %).
 - Interval names use Bitunix conventions (1min, 5min, 1hour …).
-- Data is fetched in 1 000-candle chunks to work around the API limit.
+- Data is fetched in 200-candle chunks (Bitunix API hard limit per request).
 
 Usage
 -----
@@ -303,13 +303,15 @@ async def fetch_klines_as_df(
 
     print(f"Fetching {symbol} {interval} klines from {start_dt.date()} to {end_dt.date()} …")
 
+    CHUNK_SIZE = 200  # Bitunix API hard limit per request
+
     while chunk_start < end_ms:
         candles = await exchange.get_klines(
             symbol=symbol,
             interval=interval,
             start_time=chunk_start,
             end_time=end_ms,
-            limit=1000,
+            limit=CHUNK_SIZE,
         )
         if not candles:
             break
@@ -322,8 +324,8 @@ async def fetch_klines_as_df(
             break  # Guard against infinite loop if API returns old data
         chunk_start = last_time + 1
 
-        # Respect the API's max-1000 chunk; if we got fewer we've reached the end.
-        if len(candles) < 1000:
+        # If fewer candles than requested, we've reached the end of the range.
+        if len(candles) < CHUNK_SIZE:
             break
 
     if not all_candles:
@@ -403,7 +405,8 @@ def plot_equity_curve(bt: GridOrderBacktester) -> None:
 
 def visualize_results(df_results: pd.DataFrame) -> None:
     plt.figure(figsize=(10, 5))
-    sns.barplot(data=df_results, x="strategy_name", y="return_pct", palette="Blues_d")
+    sns.barplot(data=df_results, x="strategy_name", y="return_pct",
+                hue="strategy_name", palette="Blues_d", legend=False)
     plt.title("Return by Strategy (Bitunix)")
     plt.xlabel("Strategy")
     plt.ylabel("Return (%)")

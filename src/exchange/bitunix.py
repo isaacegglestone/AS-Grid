@@ -545,12 +545,12 @@ class BitunixExchange:
         interval: str = "1min",
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
-        limit: int = 1000,
+        limit: int = 200,
     ) -> List[Dict[str, Any]]:
         """
         Fetch OHLCV klines from Bitunix public endpoint.
 
-        GET /api/v1/futures/market/klines
+        GET /api/v1/futures/market/kline
 
         Parameters
         ----------
@@ -558,7 +558,7 @@ class BitunixExchange:
         interval   : one of ``1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M``
         start_time : start of range in milliseconds (inclusive)
         end_time   : end of range in milliseconds (inclusive)
-        limit      : number of candles to return (max 1000)
+        limit      : number of candles to return (max 200 — Bitunix API hard limit)
 
         Returns
         -------
