@@ -6,12 +6,17 @@ on:
     pull_request:
         branches: [main]
 
+# Prevent parallel deploys on main
+concurrency:
+    group: ci-${{ github.ref }}
+    cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
     # ---------------------------------------------------------------------------
-    # 1. Unit tests — fast, no network calls
+    # 1. Tests on free GitHub-hosted runner — runs on every push / PR
     # ---------------------------------------------------------------------------
-    unit-tests:
-        name: Unit tests
+    tests:
+        name: Tests (GitHub runner)
         runs-on: ubuntu-latest
 
         steps:
@@ -25,28 +30,146 @@ jobs:
             - name: Install dependencies
               run: python -m pip install -r requirements.txt
 
-            - name: Run unit tests
+            - name: Unit tests
               run: python -m pytest --tb=short -q
 
+            - name: Backtest (integration)
+              run: python asBack/backtest_grid_bitunix.py
+
     # ---------------------------------------------------------------------------
-    # 2. Integration test — runs backtest against live Bitunix public klines API
-    #    (no API key needed, kline data is public)
+    # 2. Tests on ephemeral EC2 — requires approval via the "ec2" GitHub
+    #    Environment (Settings → Environments → ec2 → Required reviewers).
+    #    Spins up a t4g.nano in ap-southeast-1, runs tests, then destroys it.
     # ---------------------------------------------------------------------------
-    integration-test:
-        name: Backtest (integration)
+    ec2-tests:
+        name: Tests (ephemeral EC2)
         runs-on: ubuntu-latest
-        needs: unit-tests # only run if unit tests pass
+        needs: tests
+        environment: ec2  # <-- triggers approval gate
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
 
         steps:
             - uses: actions/checkout@v4
 
-            - uses: actions/setup-python@v5
+            - uses: hashicorp/setup-terraform@v3
               with:
-                  python-version: "3.11"
-                  cache: pip
+                  terraform_version: "~1.9"
 
-            - name: Install dependencies
-              run: python -m pip install -r requirements.txt
+            - name: Generate ephemeral SSH key pair
+              run: |
+                  ssh-keygen -t ed25519 -f /tmp/test_key -N ""
+                  echo "TEST_PUBLIC_KEY=$(cat /tmp/test_key.pub)" >> $GITHUB_ENV
+                  echo "NAME_PREFIX=ci-${{ github.run_id }}" >> $GITHUB_ENV
 
-            - name: Run backtest
-              run: python asBack/backtest_grid_bitunix.py
+            - name: Terraform init & apply
+              id: tf-apply
+              run: |
+                  cd infra
+                  terraform init
+                  terraform apply -auto-approve \
+                    -var="ssh_public_key=${{ env.TEST_PUBLIC_KEY }}" \
+                    -var="name_prefix=${{ env.NAME_PREFIX }}"
+                  echo "INSTANCE_IP=$(terraform output -raw instance_ip)" >> $GITHUB_ENV
+              env:
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            - name: Wait for SSH to be available
+              run: |
+                  echo "Waiting for SSH on ${{ env.INSTANCE_IP }}..."
+                  for i in $(seq 1 40); do
+                    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                      -i /tmp/test_key ec2-user@${{ env.INSTANCE_IP }} 'echo ready' 2>/dev/null && break
+                    echo "Attempt $i/40 failed, retrying in 15s..."
+                    sleep 15
+                  done
+
+            - name: Wait for cloud-init bootstrap to complete
+              run: |
+                  ssh -o StrictHostKeyChecking=no -i /tmp/test_key \
+                    ec2-user@${{ env.INSTANCE_IP }} \
+                    'until [ -f /var/lib/cloud/instance/boot-finished ]; do
+                       echo "bootstrap in progress..."; sleep 10
+                     done; echo "bootstrap complete"'
+
+            - name: Unit tests on EC2
+              run: |
+                  ssh -o StrictHostKeyChecking=no -i /tmp/test_key \
+                    ec2-user@${{ env.INSTANCE_IP }} \
+                    'cd ~/AS-Grid && .venv/bin/python -m pytest --tb=short -q'
+
+            - name: Backtest on EC2
+              run: |
+                  ssh -o StrictHostKeyChecking=no -i /tmp/test_key \
+                    ec2-user@${{ env.INSTANCE_IP }} \
+                    'cd ~/AS-Grid && .venv/bin/python asBack/backtest_grid_bitunix.py'
+
+            - name: Terraform destroy (always — prevent orphaned resources)
+              if: always()
+              run: |
+                  cd infra
+                  terraform destroy -auto-approve \
+                    -var="ssh_public_key=${{ env.TEST_PUBLIC_KEY || 'placeholder' }}" \
+                    -var="name_prefix=${{ env.NAME_PREFIX || 'ci-cleanup' }}"
+              env:
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    # ---------------------------------------------------------------------------
+    # 3. Deploy live bot — only on pushes to main after EC2 tests pass
+    # ---------------------------------------------------------------------------
+    deploy:
+        name: Deploy live bot
+        runs-on: ubuntu-latest
+        needs: ec2-tests
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+        steps:
+            - name: Deploy via SSH
+              uses: appleboy/ssh-action@v1.2.0
+              with:
+                  host: ${{ secrets.EC2_HOST }}
+                  username: ec2-user
+                  key: ${{ secrets.EC2_SSH_KEY }}
+                  envs: BITUNIX_API_KEY,BITUNIX_API_SECRET,COIN_NAME,GRID_SPACING,INITIAL_QUANTITY,LEVERAGE,ENABLE_NOTIFICATIONS,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID
+                  script: |
+                      set -euo pipefail
+                      cd ~/AS-Grid
+
+                      echo "==> Pulling latest code..."
+                      git fetch origin main
+                      git reset --hard origin/main
+
+                      echo "==> Writing .env..."
+                      cat > .env << EOF
+                      API_KEY=${BITUNIX_API_KEY}
+                      API_SECRET=${BITUNIX_API_SECRET}
+                      COIN_NAME=${COIN_NAME:-XRP}
+                      GRID_SPACING=${GRID_SPACING:-0.004}
+                      INITIAL_QUANTITY=${INITIAL_QUANTITY:-1}
+                      LEVERAGE=${LEVERAGE:-20}
+                      ENABLE_NOTIFICATIONS=${ENABLE_NOTIFICATIONS:-false}
+                      TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+                      TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+                      EOF
+                      chmod 600 .env
+
+                      echo "==> Installing/updating Python dependencies..."
+                      .venv/bin/pip install -r requirements.txt -q
+
+                      echo "==> Restarting bot service..."
+                      sudo systemctl restart bitunix-bot
+
+                      echo "==> Service status..."
+                      sleep 3
+                      sudo systemctl status bitunix-bot --no-pager
+              env:
+                  BITUNIX_API_KEY: ${{ secrets.BITUNIX_API_KEY }}
+                  BITUNIX_API_SECRET: ${{ secrets.BITUNIX_API_SECRET }}
+                  COIN_NAME: ${{ vars.COIN_NAME }}
+                  GRID_SPACING: ${{ vars.GRID_SPACING }}
+                  INITIAL_QUANTITY: ${{ vars.INITIAL_QUANTITY }}
+                  LEVERAGE: ${{ vars.LEVERAGE }}
+                  ENABLE_NOTIFICATIONS: ${{ vars.ENABLE_NOTIFICATIONS }}
+                  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+                  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
