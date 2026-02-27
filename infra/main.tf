@@ -94,10 +94,10 @@ resource "aws_instance" "bot" {
     repo_branch = var.repo_branch
   })
 
-  # Small root volume — 8 GB is plenty
+  # AL2023 AMI snapshot requires >= 30 GB
   root_block_device {
     volume_type = "gp3"
-    volume_size = 8
+    volume_size = 30
   }
 
   tags = {
