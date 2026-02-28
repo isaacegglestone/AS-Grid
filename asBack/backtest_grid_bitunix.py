@@ -992,37 +992,10 @@ XRP_CONFIG: Dict[str, Any] = {
     "trend_capture_velocity_pct": 0.06, # entry only on strong moves ≥6% (not every 4% blip)
     "trend_force_close_grid": False,    # default: DON'T force-close grid (override per-set)
 
-    # ── Push absolute ceiling — l8 confirmed bad, l10 is optimal, continue size ramp
+    # ── Ceiling probe (s90 control) + find hard ceiling at s100/s110
     "param_sets": [
         {
-            "name": "s60_l10",            # control repeat — confirmed +23.87%
-            "use_sl": True, "trend_detection": True, "trend_capture": True,
-            "trend_force_close_grid": True, "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.60,
-            "trend_lookback_candles": 10,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "s70_l10",
-            "use_sl": True, "trend_detection": True, "trend_capture": True,
-            "trend_force_close_grid": True, "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.70,
-            "trend_lookback_candles": 10,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "s80_l10",
-            "use_sl": True, "trend_detection": True, "trend_capture": True,
-            "trend_force_close_grid": True, "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.80,
-            "trend_lookback_candles": 10,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "s90_l10",
+            "name": "s90_l10",            # control — confirmed +38.33%
             "use_sl": True, "trend_detection": True, "trend_capture": True,
             "trend_force_close_grid": True, "trend_confirm_candles": 3,
             "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.90,
@@ -1030,8 +1003,60 @@ XRP_CONFIG: Dict[str, Any] = {
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
+        {
+            "name": "s100_l10",
+            "use_sl": True, "trend_detection": True, "trend_capture": True,
+            "trend_force_close_grid": True, "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 1.00,
+            "trend_lookback_candles": 10,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "s110_l10",           # over-allocate — expect saturation/failure
+            "use_sl": True, "trend_detection": True, "trend_capture": True,
+            "trend_force_close_grid": True, "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 1.10,
+            "trend_lookback_candles": 10,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
     ],
 }
+
+# ---------------------------------------------------------------------------
+# Robustness check: run the best known params on an earlier, more ranging
+# window (May–Aug 2025) to validate against overfitting to the Aug-Feb bull run.
+# ---------------------------------------------------------------------------
+XRP_VALIDATE_CONFIG = dict(XRP_CONFIG)
+XRP_VALIDATE_CONFIG["start_date"] = datetime(2025, 5, 1)
+XRP_VALIDATE_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_VALIDATE_CONFIG["param_sets"] = [
+    {
+        "name": "val_s90_l10",
+        "use_sl": True, "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.90,
+        "trend_lookback_candles": 10,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+    {
+        "name": "val_s40_l10",  # conservative sizing for comparison
+        "use_sl": True, "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.40,
+        "trend_lookback_candles": 10,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+    {
+        "name": "val_trend_off",  # baseline: grid only
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
 
 # ===========================================================================
 # Entry point
@@ -1048,9 +1073,14 @@ if __name__ == "__main__":
         grid_search_backtest(CONFIG)
     elif symbol in ("XRPUSDT", "XRP"):
         print("\n" + "=" * 60)
-        print("  XRPUSDT backtest")
+        print("  XRPUSDT forward test  (Aug 2025 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  XRPUSDT robustness check  (May 2025 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_VALIDATE_CONFIG)
     else:
         # Run both
         print("\n" + "=" * 60)
