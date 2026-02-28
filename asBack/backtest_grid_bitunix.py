@@ -991,40 +991,63 @@ XRP_CONFIG: Dict[str, Any] = {
     "trend_capture_velocity_pct": 0.06, # entry only on strong moves ≥6% (not every 4% blip)
     "trend_force_close_grid": False,    # default: DON'T force-close grid (override per-set)
 
-    # ── 6-month validation: baseline vs protect-only vs capture-soft vs capture-hard
+    # ── Fine-sweep: confirm_candles (1/2/3) x trail_stop_pct (4%/5%/6%)
+    # All variants: force_close_grid=True, capture_velocity_pct=0.06, size=15%
     "param_sets": [
+        # — Vary confirmation window (trail fixed at 4%) —
         {
-            "name": "xrp_trend_off",
-            "use_sl": True,
-            "trend_detection": False,        # baseline: grid only, no trend logic
-            "trend_capture": False,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "xrp_protect_only",
-            "use_sl": True,
-            "trend_detection": True,
-            "trend_capture": False,          # block entries on losing side only
-            "trend_force_close_grid": False,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "xrp_capture_soft",
+            "name": "hard_c1_t4",          # confirm=1 → acts immediately like v1 but with wider trail
             "use_sl": True,
             "trend_detection": True,
             "trend_capture": True,
-            "trend_force_close_grid": False, # keep grid open, just ADD trend position
+            "trend_force_close_grid": True,
+            "trend_confirm_candles": 1,
+            "trend_trailing_stop_pct": 0.04,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
         {
-            "name": "xrp_capture_hard",
+            "name": "hard_c2_t4",          # confirm=2
             "use_sl": True,
             "trend_detection": True,
             "trend_capture": True,
-            "trend_force_close_grid": True,  # force-close losing side + ride trend
+            "trend_force_close_grid": True,
+            "trend_confirm_candles": 2,
+            "trend_trailing_stop_pct": 0.04,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "hard_c3_t4",          # confirm=3 — current winner (+2.01%)
+            "use_sl": True,
+            "trend_detection": True,
+            "trend_capture": True,
+            "trend_force_close_grid": True,
+            "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        # — Vary trail stop (confirm fixed at 3) —
+        {
+            "name": "hard_c3_t5",          # trail=5%
+            "use_sl": True,
+            "trend_detection": True,
+            "trend_capture": True,
+            "trend_force_close_grid": True,
+            "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.05,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "hard_c3_t6",          # trail=6%
+            "use_sl": True,
+            "trend_detection": True,
+            "trend_capture": True,
+            "trend_force_close_grid": True,
+            "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.06,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
