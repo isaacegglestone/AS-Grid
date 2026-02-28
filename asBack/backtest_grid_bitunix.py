@@ -837,7 +837,7 @@ XRP_CONFIG: Dict[str, Any] = {
     "direction": "both",
     "grid_refresh_interval": 10, # minutes
     # ── Trend detection + side liquidation
-    "trend_detection": True,
+    "trend_detection": False,       # PROBE: disabled — check ceiling before tuning further
     "trend_lookback_candles": 15,   # XRP moves fast — 15min window catches early
     "trend_velocity_pct": 0.04,     # 4.0% in 15min = strong trend for XRP (3% → +1.49%, pushing higher)
     "trend_cooldown_candles": 30,   # 30 quiet candles before resuming hedge mode
