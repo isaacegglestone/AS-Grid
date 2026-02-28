@@ -6,10 +6,12 @@ on:
   pull_request:
     branches: [main]
 
-# Prevent parallel runs on the same ref
+# Allow at most one run per ref at a time, but queue rather than cancel.
+# cancel-in-progress: false means a new push will wait for the current run
+# to finish before starting — critical for the sequential feature backtest chain.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: false
 
 jobs:
   # ---------------------------------------------------------------------------
