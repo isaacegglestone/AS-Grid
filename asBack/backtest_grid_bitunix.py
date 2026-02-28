@@ -120,6 +120,15 @@ class GridOrderBacktester:
         else:
             self.vol_avg_series = pd.Series(1.0, index=self.df.index)
 
+        # Pre-compute swing high / swing low series (used by market structure filter)
+        ms_lookback = self.config.get("ms_lookback", 20)
+        self.swing_high_series = self._compute_swing_high(
+            self.df["high"].astype(float), lookback=ms_lookback
+        )
+        self.swing_low_series = self._compute_swing_low(
+            self.df["low"].astype(float), lookback=ms_lookback
+        )
+
         self._init_anchors(self.df["close"].iloc[0])
 
     # ------------------------------------------------------------------
@@ -281,6 +290,26 @@ class GridOrderBacktester:
         avg = series.rolling(window=period).mean()
         return avg.bfill().fillna(1)
 
+    @staticmethod
+    def _compute_swing_high(series: pd.Series, lookback: int = 20) -> pd.Series:
+        """Rolling max of (shifted) highs over the past `lookback` candles.
+
+        Shift(1) excludes the current candle so the value represents the
+        highest high seen in the *preceding* N bars — i.e. the resistance level
+        a breakout must clear to qualify as a Higher-High market structure confirmation.
+        """
+        return series.shift(1).rolling(window=lookback).max().bfill().fillna(series)
+
+    @staticmethod
+    def _compute_swing_low(series: pd.Series, lookback: int = 20) -> pd.Series:
+        """Rolling min of (shifted) lows over the past `lookback` candles.
+
+        Shift(1) excludes the current candle — the value represents the
+        lowest low in the preceding N bars.  A breakdown below this level
+        confirms Lower-Low (bearish) market structure.
+        """
+        return series.shift(1).rolling(window=lookback).min().bfill().fillna(series)
+
     # ------------------------------------------------------------------
     # Main simulation loop
     # ------------------------------------------------------------------
@@ -441,6 +470,20 @@ class GridOrderBacktester:
                 vol_confirms = vol_now >= vol_mult * vol_avg_now
             else:
                 vol_confirms = True
+            # ── Market structure filter ─────────────────────────────────────
+            # ms_filter=True: only fire trend-capture when the current close
+            # breaks above the recent swing high (bullish HH — allow long) or
+            # below the recent swing low (bearish LL — allow short).
+            # Prevents entering a trend capture in the middle of a range.
+            ms_filter = self.config.get("ms_filter", False)
+            if ms_filter:
+                swing_high_prev  = float(self.swing_high_series.iloc[idx])
+                swing_low_prev   = float(self.swing_low_series.iloc[idx])
+                ms_allows_long   = price > swing_high_prev   # HH breakout
+                ms_allows_short  = price < swing_low_prev    # LL breakdown
+            else:
+                ms_allows_long   = True
+                ms_allows_short  = True
             long_blocked_by_trend  = False
             short_blocked_by_trend = False
 
@@ -535,7 +578,7 @@ class GridOrderBacktester:
                         print(f"\U0001f4c8 [{timestamp}] Trend UP confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} short(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_long and bb_allows_trend and rsi_allows_long and vol_confirms:
+                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_long and bb_allows_trend and rsi_allows_long and vol_confirms and ms_allows_long:
                         if velocity >= cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * cap_size_pct * bb_size_boost
@@ -577,7 +620,7 @@ class GridOrderBacktester:
                         print(f"\U0001f4c9 [{timestamp}] Trend DOWN confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} long(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_short and bb_allows_trend and rsi_allows_short and vol_confirms:
+                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_short and bb_allows_trend and rsi_allows_short and vol_confirms and ms_allows_short:
                         if velocity <= -cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * cap_size_pct * bb_size_boost
@@ -1058,6 +1101,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "rsi_momentum",
                     # Volume confirmation params
                     "vol_filter", "vol_period", "vol_multiplier",
+                    # Market structure params
+                    "ms_filter", "ms_lookback",
                 ) if k in params}),
             }
         )
