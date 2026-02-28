@@ -670,6 +670,9 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                 "long_settings": params["long_settings"],
                 "short_settings": params["short_settings"],
                 "use_sl": params.get("use_sl", True),
+                # Per-strategy overrides (fall back to global config value)
+                **({"trend_detection": params["trend_detection"]}
+                   if "trend_detection" in params else {}),
             }
         )
 
@@ -836,10 +839,10 @@ XRP_CONFIG: Dict[str, Any] = {
     "leverage": 1,
     "direction": "both",
     "grid_refresh_interval": 10, # minutes
-    # ── Trend detection + side liquidation
-    "trend_detection": False,       # PROBE: disabled — check ceiling before tuning further
+    # ── Trend detection + side liquidation (can be overridden per param_set)
+    "trend_detection": True,        # default ON for tight strategies; wide disables it per-set
     "trend_lookback_candles": 15,   # XRP moves fast — 15min window catches early
-    "trend_velocity_pct": 0.04,     # 4.0% in 15min = strong trend for XRP (3% → +1.49%, pushing higher)
+    "trend_velocity_pct": 0.04,     # 4.0% in 15min = strong trend for XRP
     "trend_cooldown_candles": 30,   # 30 quiet candles before resuming hedge mode
 
     # ── Parameter sets tuned for XRP's higher % volatility
@@ -870,7 +873,8 @@ XRP_CONFIG: Dict[str, Any] = {
         },
         {
             "name": "xrp_wide_0.8pct",
-            "use_sl": True,   # SL enabled: 2× spacing = 1.6%, clears noise
+            "use_sl": True,             # SL enabled: 2× spacing = 1.6%, clears noise
+            "trend_detection": False,   # Wide spacing is its own trend filter — detection costs +0.43%
             "long_settings":  {"up_spacing": 0.008, "down_spacing": 0.008},
             "short_settings": {"up_spacing": 0.008, "down_spacing": 0.008},
         },
