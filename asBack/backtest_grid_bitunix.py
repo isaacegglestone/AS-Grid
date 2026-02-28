@@ -25,6 +25,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -77,6 +78,12 @@ class GridOrderBacktester:
         self.trend_pending_dir: Optional[str] = None  # "up"|"down" awaiting confirmation
         # Trend capture position: {"side", "entry", "qty", "margin", "peak"}
         self.trend_position: Optional[Dict] = None
+
+        # Pre-compute ADX series for the full dataset (used by ADX filter)
+        self.adx_series = self._compute_adx(
+            self.df,
+            period=self.config.get("adx_period", 14),
+        )
 
         self._init_anchors(self.df["close"].iloc[0])
 
@@ -135,6 +142,44 @@ class GridOrderBacktester:
     def _equity(self, price: float) -> float:
         """True portfolio equity = cash + locked margin + unrealised P&L."""
         return self.balance + self._locked_margin() + self._calculate_unrealized_pnl(price)
+
+    # ------------------------------------------------------------------
+    # Technical indicator helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Compute Wilder's ADX (Average Directional Index) for a OHLC DataFrame.
+
+        Returns a Series aligned to df.index with values 0–100.
+        Higher = stronger trend; < 20 = ranging, > 25 = trending.
+        """
+        high  = df["high"].astype(float)
+        low   = df["low"].astype(float)
+        close = df["close"].astype(float)
+
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+            axis=1,
+        ).max(axis=1)
+
+        up_move   = high.diff()
+        down_move = -(low.diff())
+        plus_dm  = np.where((up_move > down_move) & (up_move > 0),   up_move.values,   0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move.values, 0.0)
+
+        alpha = 1.0 / period
+        tr_s    = pd.Series(tr.values,    index=df.index).ewm(alpha=alpha, adjust=False).mean()
+        pdi_s   = pd.Series(plus_dm,      index=df.index).ewm(alpha=alpha, adjust=False).mean()
+        mdi_s   = pd.Series(minus_dm,     index=df.index).ewm(alpha=alpha, adjust=False).mean()
+
+        plus_di  = 100.0 * pdi_s / tr_s.replace(0, np.nan)
+        minus_di = 100.0 * mdi_s / tr_s.replace(0, np.nan)
+        di_sum   = (plus_di + minus_di).replace(0, np.nan)
+        dx       = 100.0 * (plus_di - minus_di).abs() / di_sum
+        adx      = dx.fillna(0).ewm(alpha=alpha, adjust=False).mean()
+        return adx.fillna(0)
 
     # ------------------------------------------------------------------
     # Main simulation loop
@@ -215,6 +260,20 @@ class GridOrderBacktester:
             confirm_candles   = self.config.get("trend_confirm_candles", 1)
             cap_size_pct      = self.config.get("trend_capture_size_pct", 0.15)
             trail_stop_pct    = self.config.get("trend_trailing_stop_pct", 0.04)
+            # ── ADX filter ─────────────────────────────────────────────
+            # adx_filter=True gates trend-capture entries on ADX strength.
+            # adx_grid_pause (optional): pause new grid orders entirely when
+            # ADX > threshold — prevents piling in during strong trends.
+            adx_filter      = self.config.get("adx_filter", False)
+            adx_min_trend   = self.config.get("adx_min_trend", 25.0)
+            adx_grid_pause  = self.config.get("adx_grid_pause", None)
+            if adx_filter:
+                current_adx = float(self.adx_series.iloc[idx])
+            else:
+                current_adx = 0.0
+            adx_allows_trend = (not adx_filter) or (current_adx >= adx_min_trend)
+            adx_pauses_grid  = (adx_filter and adx_grid_pause is not None
+                                and current_adx >= adx_grid_pause)
             long_blocked_by_trend  = False
             short_blocked_by_trend = False
 
@@ -309,7 +368,7 @@ class GridOrderBacktester:
                         print(f"\U0001f4c8 [{timestamp}] Trend UP confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} short(s)")
-                    if trend_capture and self.trend_position is None:
+                    if trend_capture and self.trend_position is None and adx_allows_trend:
                         if velocity >= cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * cap_size_pct
@@ -326,8 +385,9 @@ class GridOrderBacktester:
                                     0.0, fee_cost, 0.0,
                                     self._calculate_unrealized_pnl(price), self._equity(price),
                                 ))
+                                adx_info = f" ADX={current_adx:.1f}" if adx_filter else ""
                                 print(f"\U0001f3af [{timestamp}] Trend LONG opened "
-                                      f"at {price:.4f} size=${cap_margin:.0f}")
+                                      f"at {price:.4f} size=${cap_margin:.0f}{adx_info}")
 
                 elif confirmed_down and self.trend_mode != "down":
                     self.trend_mode = "down"
@@ -348,7 +408,7 @@ class GridOrderBacktester:
                         print(f"\U0001f4c9 [{timestamp}] Trend DOWN confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} long(s)")
-                    if trend_capture and self.trend_position is None:
+                    if trend_capture and self.trend_position is None and adx_allows_trend:
                         if velocity <= -cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * cap_size_pct
@@ -365,8 +425,9 @@ class GridOrderBacktester:
                                     0.0, fee_cost, 0.0,
                                     self._calculate_unrealized_pnl(price), self._equity(price),
                                 ))
+                                adx_info = f" ADX={current_adx:.1f}" if adx_filter else ""
                                 print(f"\U0001f3af [{timestamp}] Trend SHORT opened "
-                                      f"at {price:.4f} size=${cap_margin:.0f}")
+                                      f"at {price:.4f} size=${cap_margin:.0f}{adx_info}")
 
                 elif self.trend_mode is not None and self.trend_position is None:
                     if abs(velocity) < vel_threshold * 0.5:
@@ -381,9 +442,9 @@ class GridOrderBacktester:
                     else:
                         self.trend_cooldown_counter = 0
 
-            # Gate new grid entries when a trend is active
-            long_blocked_by_trend  = (self.trend_mode == "down")
-            short_blocked_by_trend = (self.trend_mode == "up")
+            # Gate new grid entries when a trend is active or ADX signals strong directional move
+            long_blocked_by_trend  = (self.trend_mode == "down") or adx_pauses_grid
+            short_blocked_by_trend = (self.trend_mode == "up")  or adx_pauses_grid
             used_margin = sum(pos[2] for pos in self.long_positions + self.short_positions)
             available_margin = self.balance - used_margin
 
@@ -812,6 +873,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "trend_capture_size_pct", "trend_trailing_stop_pct",
                     "trend_capture_velocity_pct", "trend_velocity_pct",
                     "trend_lookback_candles",
+                    # ADX filter params
+                    "adx_filter", "adx_period", "adx_min_trend", "adx_grid_pause",
                 ) if k in params}),
             }
         )
@@ -1120,6 +1183,66 @@ XRP_MAX_CONFIG["param_sets"]  = [
 ]
 
 # ===========================================================================
+# v2 — ADX filter sweep
+# Gate trend-capture entries on ADX strength to reduce false signals.
+# Sweep: no ADX gate vs thresholds 20/25/30, plus an ADX+grid-pause variant.
+# Also run the 2-year walk-forward with the same sweep to see if it fixes the
+# -11.45% bear-market bleed.
+# ===========================================================================
+
+def _adx_set(name: str, adx_on: bool, adx_min: float = 25.0,
+             grid_pause: float = None, size: float = 0.90) -> Dict[str, Any]:
+    """Helper to build an ADX-sweep param set from the s90_l10 baseline."""
+    d: Dict[str, Any] = {
+        "name": name,
+        "use_sl": True,
+        "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": size,
+        "trend_lookback_candles": 10,
+        "adx_filter": adx_on,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    }
+    if adx_on:
+        d["adx_min_trend"] = adx_min
+    if grid_pause is not None:
+        d["adx_grid_pause"] = grid_pause
+    return d
+
+
+XRP_ADX_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_ADX_CONFIG["param_sets"] = [
+    _adx_set("adx_off",         adx_on=False),                        # baseline
+    _adx_set("adx_t20",         adx_on=True,  adx_min=20.0),
+    _adx_set("adx_t25",         adx_on=True,  adx_min=25.0),
+    _adx_set("adx_t30",         adx_on=True,  adx_min=30.0),
+    _adx_set("adx_t25_gp35",   adx_on=True,  adx_min=25.0, grid_pause=35.0),
+    {   # grid-only control (no trend capture)
+        "name": "adx_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_ADX_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_ADX_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_ADX_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_ADX_2Y_CONFIG["param_sets"] = [
+    _adx_set("2y_adx_off",       adx_on=False),           # 2y baseline
+    _adx_set("2y_adx_t25",       adx_on=True, adx_min=25.0),
+    _adx_set("2y_adx_t25_gp35",  adx_on=True, adx_min=25.0, grid_pause=35.0),
+    {   # grid-only 2y baseline
+        "name": "2y_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+
+# ===========================================================================
 # Entry point
 # ===========================================================================
 
@@ -1152,6 +1275,16 @@ if __name__ == "__main__":
         print("  XRPUSDT max history  (Apr 2022 → Feb 2026  ~3y 10m)")
         print("=" * 60)
         grid_search_backtest(XRP_MAX_CONFIG)
+    elif symbol in ("XRPADX", "ADX"):
+        print("\n" + "=" * 60)
+        print("  v2 ADX filter sweep — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_ADX_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v2 ADX filter sweep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_ADX_2Y_CONFIG)
     else:
         # Run both
         print("\n" + "=" * 60)
