@@ -97,6 +97,13 @@ class GridOrderBacktester:
             period=self.config.get("ema_slow_period", 50),
         )
 
+        # Pre-compute Bollinger Band width series (used by BB squeeze filter)
+        self.bb_width_series = self._compute_bb_width(
+            self.df["close"],
+            period=self.config.get("bb_period", 20),
+            mult=self.config.get("bb_mult", 2.0),
+        )
+
         self._init_anchors(self.df["close"].iloc[0])
 
     # ------------------------------------------------------------------
@@ -218,6 +225,18 @@ class GridOrderBacktester:
     def _compute_ema(series: pd.Series, period: int) -> pd.Series:
         """Standard exponential moving average (span=period, alpha=2/(period+1))."""
         return series.ewm(span=period, adjust=False).mean().fillna(series)
+
+    @staticmethod
+    def _compute_bb_width(series: pd.Series, period: int = 20, mult: float = 2.0) -> pd.Series:
+        """Compute Bollinger Band relative width = (upper - lower) / mid.
+
+        Low width = squeeze (consolidation). Expanding from low = breakout.
+        Returns a Series aligned to df.index with fractional values (0–0.2+ typical).
+        """
+        mid = series.rolling(window=period).mean()
+        std = series.rolling(window=period).std(ddof=0)
+        width = (2.0 * mult * std) / mid.replace(0, np.nan)
+        return width.bfill().fillna(0)
 
     # ------------------------------------------------------------------
     # Main simulation loop
@@ -418,10 +437,12 @@ class GridOrderBacktester:
                         print(f"\U0001f4c8 [{timestamp}] Trend UP confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} short(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_long:
+                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_long and bb_allows_trend:
                         if velocity >= cap_vel_threshold:
                             current_equity = self._equity(price)
-                            cap_margin = current_equity * cap_size_pct
+                            cap_margin = current_equity * cap_size_pct * bb_size_boost
+                            # Respect the s100 hard cap (can't deploy more than 90% balance)
+                            cap_margin = min(cap_margin, current_equity * 0.90)
                             cap_qty = (cap_margin * self.leverage) / price
                             fee_cost = cap_qty * price * (self.fee / 2)
                             if cap_margin + fee_cost <= self.balance:
@@ -458,10 +479,11 @@ class GridOrderBacktester:
                         print(f"\U0001f4c9 [{timestamp}] Trend DOWN confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} long(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_short:
+                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_short and bb_allows_trend:
                         if velocity <= -cap_vel_threshold:
                             current_equity = self._equity(price)
-                            cap_margin = current_equity * cap_size_pct
+                            cap_margin = current_equity * cap_size_pct * bb_size_boost
+                            cap_margin = min(cap_margin, current_equity * 0.90)
                             cap_qty = (cap_margin * self.leverage) / price
                             fee_cost = cap_qty * price * (self.fee / 2)
                             if cap_margin + fee_cost <= self.balance:
@@ -930,6 +952,9 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "atr_trail_min", "atr_trail_max",
                     # EMA bias filter params
                     "ema_bias_filter", "ema_slow_period",
+                    # BB squeeze filter params
+                    "bb_squeeze_gate", "bb_squeeze_boost", "bb_period", "bb_mult",
+                    "bb_squeeze_threshold", "bb_squeeze_boost_mult",
                 ) if k in params}),
             }
         )
@@ -1414,6 +1439,66 @@ XRP_EMA_2Y_CONFIG["param_sets"] = [
 
 
 # ===========================================================================
+# v5 — Bollinger Band squeeze filter
+# Two modes:
+#   bb_squeeze_gate=True  — skip trend entries when bands are in a squeeze
+#                           (low-vol noise → wait for expansion)
+#   bb_squeeze_boost=True — multiply position size when bands are just
+#                           expanding from a squeeze (cleaner breakouts)
+# ===========================================================================
+
+def _bb_set(name: str, gate: bool = False, boost: bool = False,
+            boost_mult: float = 1.5, threshold: float = 0.02,
+            size: float = 0.90) -> Dict[str, Any]:
+    """Build a param set with the s90_l10/confirm baseline + BB squeeze options."""
+    return {
+        "name": name,
+        "use_sl": True,
+        "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": size,
+        "trend_lookback_candles": 10,
+        "bb_squeeze_gate":      gate,
+        "bb_squeeze_boost":     boost,
+        "bb_squeeze_threshold": threshold,
+        "bb_squeeze_boost_mult": boost_mult,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    }
+
+
+XRP_BB_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_BB_CONFIG["param_sets"] = [
+    _bb_set("bb_off",           gate=False, boost=False),         # baseline
+    _bb_set("bb_gate",          gate=True,  boost=False),         # skip entries in squeeze
+    _bb_set("bb_boost_1.5x",    gate=False, boost=True, boost_mult=1.5),   # boost on breakout
+    _bb_set("bb_boost_2x",      gate=False, boost=True, boost_mult=2.0),
+    _bb_set("bb_gate_boost",    gate=True,  boost=True, boost_mult=1.5),   # gate + boost combo
+    {   # grid-only control
+        "name": "bb_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_BB_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_BB_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_BB_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_BB_2Y_CONFIG["param_sets"] = [
+    _bb_set("2y_bb_off",        gate=False, boost=False),
+    _bb_set("2y_bb_gate",       gate=True,  boost=False),
+    _bb_set("2y_bb_boost_1.5x", gate=False, boost=True, boost_mult=1.5),
+    {   # grid-only 2y baseline
+        "name": "2y_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+
+# ===========================================================================
 # Entry point
 # ===========================================================================
 
@@ -1476,6 +1561,16 @@ if __name__ == "__main__":
         print("  v4 EMA bias filter — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_EMA_2Y_CONFIG)
+    elif symbol in ("XRPBB", "BB"):
+        print("\n" + "=" * 60)
+        print("  v5 BB squeeze filter — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_BB_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v5 BB squeeze filter — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_BB_2Y_CONFIG)
     else:
         # Run both
         print("\n" + "=" * 60)
