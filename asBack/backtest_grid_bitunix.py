@@ -110,6 +110,16 @@ class GridOrderBacktester:
             period=self.config.get("rsi_period", 14),
         )
 
+        # Pre-compute volume average series (used by volume confirmation filter)
+        # Falls back to a constant-1 series when the DataFrame has no volume column.
+        if "volume" in self.df.columns:
+            self.vol_avg_series = self._compute_vol_avg(
+                self.df["volume"].astype(float),
+                period=self.config.get("vol_period", 20),
+            )
+        else:
+            self.vol_avg_series = pd.Series(1.0, index=self.df.index)
+
         self._init_anchors(self.df["close"].iloc[0])
 
     # ------------------------------------------------------------------
@@ -244,6 +254,33 @@ class GridOrderBacktester:
         width = (2.0 * mult * std) / mid.replace(0, np.nan)
         return width.bfill().fillna(0)
 
+    @staticmethod
+    def _compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+        """Wilder's RSI (0–100).  Uses EWM with alpha=1/period (Wilder smoothing).
+
+        Returns 50 for the warm-up period (neutral — neither overbought nor oversold).
+        """
+        delta = series.diff()
+        gain  = delta.clip(lower=0)
+        loss  = (-delta).clip(lower=0)
+        alpha = 1.0 / period
+        avg_gain = gain.ewm(alpha=alpha, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=alpha, adjust=False).mean()
+        rs  = avg_gain / avg_loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.fillna(50)
+
+    @staticmethod
+    def _compute_vol_avg(series: pd.Series, period: int = 20) -> pd.Series:
+        """Rolling simple moving average of volume.
+
+        Used to determine whether the current candle's volume is above-average
+        (confirming breakout / trend momentum).  Backfills the warm-up period
+        so iloc[0] always returns a usable value.
+        """
+        avg = series.rolling(window=period).mean()
+        return avg.bfill().fillna(1)
+
     # ------------------------------------------------------------------
     # Main simulation loop
     # ------------------------------------------------------------------
@@ -349,6 +386,61 @@ class GridOrderBacktester:
             adx_allows_trend = (not adx_filter) or (current_adx >= adx_min_trend)
             adx_pauses_grid  = (adx_filter and adx_grid_pause is not None
                                 and current_adx >= adx_grid_pause)
+            # ── EMA bias filter ─────────────────────────────────────────────
+            # ema_bias_filter=True: long capture only when price >= slow EMA,
+            # short capture only when price <= slow EMA.  Avoids counter-trend trades.
+            ema_bias       = self.config.get("ema_bias_filter", False)
+            ema_slow_val   = float(self.ema_slow_series.iloc[idx]) if ema_bias else price
+            ema_bias_long  = (not ema_bias) or (price >= ema_slow_val)
+            ema_bias_short = (not ema_bias) or (price <= ema_slow_val)
+            # ── BB squeeze filter ───────────────────────────────────────────
+            # bb_squeeze_gate=True: skip trend entries while bands are tight.
+            # bb_squeeze_boost=True: increase position size on the first breakout
+            # candle that exits a squeeze (expanding from below threshold).
+            bb_squeeze_gate  = self.config.get("bb_squeeze_gate", False)
+            bb_squeeze_boost = self.config.get("bb_squeeze_boost", False)
+            bb_sq_threshold  = self.config.get("bb_squeeze_threshold", 0.035)
+            bb_boost_mult    = self.config.get("bb_squeeze_boost_mult", 1.5)
+            if bb_squeeze_gate or bb_squeeze_boost:
+                current_bb_w = float(self.bb_width_series.iloc[idx])
+                prev_bb_w    = float(self.bb_width_series.iloc[max(0, idx - 1)])
+            else:
+                current_bb_w = 1.0
+                prev_bb_w    = 1.0
+            in_squeeze      = current_bb_w < bb_sq_threshold
+            expanding       = current_bb_w > prev_bb_w
+            just_broke      = (not in_squeeze) and expanding and (prev_bb_w < bb_sq_threshold)
+            bb_allows_trend = (not bb_squeeze_gate) or (not in_squeeze)
+            bb_size_boost   = bb_boost_mult if (bb_squeeze_boost and just_broke) else 1.0
+            # ── RSI filter ──────────────────────────────────────────────────
+            # rsi_filter=True: block long entries when overbought (RSI > ob),
+            # block short entries when oversold (RSI < os).
+            # rsi_momentum=True: additionally require RSI > 50 for longs, < 50 for shorts.
+            rsi_filter     = self.config.get("rsi_filter", False)
+            rsi_overbought = self.config.get("rsi_overbought", 70.0)
+            rsi_oversold   = self.config.get("rsi_oversold", 30.0)
+            rsi_momentum   = self.config.get("rsi_momentum", False)
+            current_rsi    = float(self.rsi_series.iloc[idx]) if rsi_filter else 50.0
+            rsi_allows_long  = (
+                ((not rsi_filter) or (current_rsi < rsi_overbought)) and
+                ((not rsi_momentum) or (current_rsi > 50.0))
+            )
+            rsi_allows_short = (
+                ((not rsi_filter) or (current_rsi > rsi_oversold)) and
+                ((not rsi_momentum) or (current_rsi < 50.0))
+            )
+            # ── Volume confirmation filter ──────────────────────────────────
+            # vol_filter=True: only fire trend-capture when the current candle's
+            # volume exceeds vol_multiplier × the rolling average volume.
+            # Filters out low-conviction false breakouts during thin markets.
+            vol_filter      = self.config.get("vol_filter", False)
+            vol_mult        = self.config.get("vol_multiplier", 1.5)
+            if vol_filter and "volume" in self.df.columns:
+                vol_now      = float(self.df["volume"].iloc[idx])
+                vol_avg_now  = float(self.vol_avg_series.iloc[idx])
+                vol_confirms = vol_now >= vol_mult * vol_avg_now
+            else:
+                vol_confirms = True
             long_blocked_by_trend  = False
             short_blocked_by_trend = False
 
@@ -443,7 +535,7 @@ class GridOrderBacktester:
                         print(f"\U0001f4c8 [{timestamp}] Trend UP confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} short(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_long and bb_allows_trend and rsi_allows_long:
+                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_long and bb_allows_trend and rsi_allows_long and vol_confirms:
                         if velocity >= cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * cap_size_pct * bb_size_boost
@@ -485,7 +577,7 @@ class GridOrderBacktester:
                         print(f"\U0001f4c9 [{timestamp}] Trend DOWN confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} long(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_short and bb_allows_trend and rsi_allows_short:
+                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_short and bb_allows_trend and rsi_allows_short and vol_confirms:
                         if velocity <= -cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * cap_size_pct * bb_size_boost
@@ -964,6 +1056,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     # RSI filter params
                     "rsi_filter", "rsi_period", "rsi_overbought", "rsi_oversold",
                     "rsi_momentum",
+                    # Volume confirmation params
+                    "vol_filter", "vol_period", "vol_multiplier",
                 ) if k in params}),
             }
         )
@@ -1562,6 +1656,60 @@ XRP_RSI_2Y_CONFIG["param_sets"] = [
 
 
 # ===========================================================================
+# v7 — Volume confirmation filter
+# Only fire trend-capture when candle volume exceeds the rolling average
+# by a configurable multiple.  Filters low-conviction false breakouts.
+#   vol_filter=True     →  open trend trade only when vol >= N × avg_vol
+#   vol_multiplier=1.5  →  require 1.5× above-average volume (default)
+#   vol_period=20       →  rolling window for average volume
+# ===========================================================================
+
+def _vol_set(name: str, vol_on: bool, mult: float = 1.5, period: int = 20,
+             size: float = 0.90) -> Dict[str, Any]:
+    return {
+        "name": name,
+        "use_sl": True,
+        "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": size,
+        "trend_lookback_candles": 10,
+        "vol_filter": vol_on, "vol_multiplier": mult, "vol_period": period,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    }
+
+
+XRP_VOL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_VOL_CONFIG["param_sets"] = [
+    _vol_set("vol_off",       vol_on=False),                # baseline (no vol filter)
+    _vol_set("vol_1.5x",      vol_on=True, mult=1.5),       # 1.5× avg volume required
+    _vol_set("vol_2.0x",      vol_on=True, mult=2.0),       # 2× avg volume required
+    _vol_set("vol_2.5x",      vol_on=True, mult=2.5),       # 2.5× avg volume required
+    {   # grid-only control
+        "name": "vol_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_VOL_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_VOL_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_VOL_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_VOL_2Y_CONFIG["param_sets"] = [
+    _vol_set("2y_vol_off",   vol_on=False),
+    _vol_set("2y_vol_1.5x",  vol_on=True, mult=1.5),
+    _vol_set("2y_vol_2.0x",  vol_on=True, mult=2.0),
+    {   # grid-only 2y baseline
+        "name": "2y_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+
+# ===========================================================================
 # Entry point
 # ===========================================================================
 
@@ -1634,6 +1782,26 @@ if __name__ == "__main__":
         print("  v5 BB squeeze filter — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_BB_2Y_CONFIG)
+    elif symbol in ("XRPRSI", "RSI"):
+        print("\n" + "=" * 60)
+        print("  v6 RSI filter — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_RSI_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v6 RSI filter — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_RSI_2Y_CONFIG)
+    elif symbol in ("XRPVOL", "VOL"):
+        print("\n" + "=" * 60)
+        print("  v7 Volume confirmation — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_VOL_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v7 Volume confirmation — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_VOL_2Y_CONFIG)
     else:
         # Run both
         print("\n" + "=" * 60)
