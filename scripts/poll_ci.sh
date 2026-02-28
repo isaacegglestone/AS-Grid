@@ -27,7 +27,10 @@ else
   echo "Using run ID: $RUN_ID"
 fi
 
-LOG_FILE="/tmp/poll_ci_${RUN_ID}.log"
+REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+LOG_DIR="${REPO_ROOT}/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="${LOG_DIR}/poll_ci_${RUN_ID}.log"
 echo "Logging to: $LOG_FILE"
 echo "" > "$LOG_FILE"
 

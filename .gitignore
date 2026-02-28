@@ -207,3 +207,5 @@ htmlcov/
 *.pyc
 *.pyo
 *.pyd
+# CI chain logs
+logs/

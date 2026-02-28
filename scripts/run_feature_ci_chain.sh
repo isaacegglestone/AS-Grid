@@ -17,15 +17,17 @@
 #   3. Commits and pushes.
 #   4. Gets the new run ID and repeats.
 #
-# Results are logged to /tmp/chain_ci_<SYMBOL>.log for each feature.
-# A summary of best strategies is appended to /tmp/chain_results_summary.txt
+# Results are logged to logs/chain_ci_<SYMBOL>.log for each feature.
+# A summary of best strategies is appended to logs/chain_results_summary.txt
 # =============================================================================
 set -euo pipefail
 
 BRANCH="feat/bitunix-exchange-adapter"
 REPO="isaacegglestone/AS-Grid"
 POLL_INTERVAL=90  # seconds between GitHub API polls
-LOG_DIR="/tmp"
+REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+LOG_DIR="${REPO_ROOT}/logs"
+mkdir -p "$LOG_DIR"
 SUMMARY_FILE="${LOG_DIR}/chain_results_summary.txt"
 
 # Feature push sequence (ATR is already pushed / running, start from EMA)
@@ -163,8 +165,8 @@ echo "Feature CI chain started at $(date)" > "$SUMMARY_FILE"
 
 # Wait for the currently running CI (ATR or later) to complete
 log "=== Waiting for current in-progress CI run to finish ==="
-wait_for_current_run > /tmp/_current_run_id.txt
-LAST_RUN_ID=$(cat /tmp/_current_run_id.txt)
+wait_for_current_run > "${LOG_DIR}/_current_run_id.txt"
+LAST_RUN_ID=$(cat "${LOG_DIR}/_current_run_id.txt")
 extract_results "$LAST_RUN_ID" "ATR"
 
 # Now iterate through remaining features
@@ -179,12 +181,12 @@ for feature in "${FEATURES[@]}"; do
   log "========================================================="
   log "  Pushing feature: ${feature} (${FEATURE_SYMBOLS[$feature]})"
   log "========================================================="
-  push_next_feature "$feature" > /tmp/_new_run_id.txt
-  NEW_RUN_ID=$(cat /tmp/_new_run_id.txt)
+  push_next_feature "$feature" > "${LOG_DIR}/_new_run_id.txt"
+  NEW_RUN_ID=$(cat "${LOG_DIR}/_new_run_id.txt")
 
   log "Waiting for ${feature} CI run ${NEW_RUN_ID} to complete..."
-  wait_for_current_run > /tmp/_current_run_id.txt
-  LAST_RUN_ID=$(cat /tmp/_current_run_id.txt)
+  wait_for_current_run > "${LOG_DIR}/_current_run_id.txt"
+  LAST_RUN_ID=$(cat "${LOG_DIR}/_current_run_id.txt")
   extract_results "$LAST_RUN_ID" "$feature"
 done
 
@@ -192,5 +194,5 @@ log ""
 log "========================================================="
 log "  ALL FEATURES COMPLETE"
 log "========================================================="
-log "Results summary: ${SUMMARY_FILE}"
+log "Results summary: ${SUMMARY_FILE}  (relative: logs/chain_results_summary.txt)"
 cat "$SUMMARY_FILE"
