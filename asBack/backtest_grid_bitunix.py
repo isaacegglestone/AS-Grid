@@ -85,6 +85,12 @@ class GridOrderBacktester:
             period=self.config.get("adx_period", 14),
         )
 
+        # Pre-compute ATR series (used by dynamic trail)
+        self.atr_series = self._compute_atr(
+            self.df,
+            period=self.config.get("atr_period", 14),
+        )
+
         self._init_anchors(self.df["close"].iloc[0])
 
     # ------------------------------------------------------------------
@@ -181,6 +187,27 @@ class GridOrderBacktester:
         adx      = dx.fillna(0).ewm(alpha=alpha, adjust=False).mean()
         return adx.fillna(0)
 
+    @staticmethod
+    def _compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Compute Wilder's ATR (Average True Range) for a OHLC DataFrame.
+
+        Returns a Series aligned to df.index with price-unit values.
+        Divide by price to get ATR as a fraction of current price.
+        """
+        high  = df["high"].astype(float)
+        low   = df["low"].astype(float)
+        close = df["close"].astype(float)
+
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+            axis=1,
+        ).max(axis=1)
+
+        alpha = 1.0 / period
+        atr = tr.ewm(alpha=alpha, adjust=False).mean()
+        return atr.fillna(0)
+
     # ------------------------------------------------------------------
     # Main simulation loop
     # ------------------------------------------------------------------
@@ -260,6 +287,18 @@ class GridOrderBacktester:
             confirm_candles   = self.config.get("trend_confirm_candles", 1)
             cap_size_pct      = self.config.get("trend_capture_size_pct", 0.15)
             trail_stop_pct    = self.config.get("trend_trailing_stop_pct", 0.04)
+            # ── ATR dynamic trail ────────────────────────────────────
+            # Replace fixed trail_stop_pct with N × ATR / price each candle.
+            # Adapts to volatility: wider in high-vol (lets trend breathe),
+            # tighter in low-vol (locks in gains quickly).
+            atr_trail         = self.config.get("atr_trail", False)
+            atr_trail_mult    = self.config.get("atr_trail_multiplier", 2.0)
+            atr_trail_min     = self.config.get("atr_trail_min", 0.015)  # floor 1.5%
+            atr_trail_max     = self.config.get("atr_trail_max", 0.12)   # cap 12%
+            if atr_trail and price > 0:
+                atr_now = float(self.atr_series.iloc[idx])
+                dyn_trail = atr_now * atr_trail_mult / price
+                trail_stop_pct = max(atr_trail_min, min(atr_trail_max, dyn_trail))
             # ── ADX filter ─────────────────────────────────────────────
             # adx_filter=True gates trend-capture entries on ADX strength.
             # adx_grid_pause (optional): pause new grid orders entirely when
@@ -875,6 +914,9 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "trend_lookback_candles",
                     # ADX filter params
                     "adx_filter", "adx_period", "adx_min_trend", "adx_grid_pause",
+                    # ATR dynamic trail params
+                    "atr_trail", "atr_period", "atr_trail_multiplier",
+                    "atr_trail_min", "atr_trail_max",
                 ) if k in params}),
             }
         )
@@ -1243,6 +1285,64 @@ XRP_ADX_2Y_CONFIG["param_sets"] = [
 
 
 # ===========================================================================
+# v3 — ATR dynamic trail sweep
+# Replace fixed 4% trail with N × ATR / price, adapting to volatility regime.
+# High-vol candles widen the stop (let trends breathe); low-vol tighten it
+# (lock in gains quickly). Sweep multipliers 1×/2×/3× vs fixed 4% baseline.
+# ===========================================================================
+
+def _atr_set(name: str, atr_on: bool, mult: float = 2.0, size: float = 0.90,
+             fixed_trail: float = 0.04) -> Dict[str, Any]:
+    """Build a param set using the s90_l10/confirm=3/force_close baseline + ATR trail."""
+    d: Dict[str, Any] = {
+        "name": name,
+        "use_sl": True,
+        "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": fixed_trail,
+        "trend_capture_size_pct": size,
+        "trend_lookback_candles": 10,
+        "atr_trail": atr_on,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    }
+    if atr_on:
+        d["atr_trail_multiplier"] = mult
+    return d
+
+
+XRP_ATR_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_ATR_CONFIG["param_sets"] = [
+    _atr_set("atr_off_4pct",  atr_on=False, fixed_trail=0.04),   # baseline (matches s90)
+    _atr_set("atr_1x",        atr_on=True,  mult=1.0),
+    _atr_set("atr_2x",        atr_on=True,  mult=2.0),
+    _atr_set("atr_3x",        atr_on=True,  mult=3.0),
+    _atr_set("atr_2x_6pct",   atr_on=False, fixed_trail=0.06),   # fixed-6% control
+    {   # grid-only control
+        "name": "atr_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_ATR_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_ATR_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_ATR_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_ATR_2Y_CONFIG["param_sets"] = [
+    _atr_set("2y_atr_off",   atr_on=False, fixed_trail=0.04),
+    _atr_set("2y_atr_2x",    atr_on=True,  mult=2.0),
+    _atr_set("2y_atr_3x",    atr_on=True,  mult=3.0),
+    {   # grid-only 2y baseline
+        "name": "2y_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+
+# ===========================================================================
 # Entry point
 # ===========================================================================
 
@@ -1277,14 +1377,24 @@ if __name__ == "__main__":
         grid_search_backtest(XRP_MAX_CONFIG)
     elif symbol in ("XRPADX", "ADX"):
         print("\n" + "=" * 60)
-        print("  v2 ADX filter sweep — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("  v2 ADX filter sweep \u2014 6-month OOS  (Aug 2025 \u2192 Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_ADX_CONFIG)
 
         print("\n" + "=" * 60)
-        print("  v2 ADX filter sweep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("  v2 ADX filter sweep \u2014 2-year walk-forward  (Feb 2024 \u2192 Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_ADX_2Y_CONFIG)
+    elif symbol in ("XRPATR", "ATR"):
+        print("\n" + "=" * 60)
+        print("  v3 ATR dynamic trail \u2014 6-month OOS  (Aug 2025 \u2192 Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_ATR_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v3 ATR dynamic trail \u2014 2-year walk-forward  (Feb 2024 \u2192 Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_ATR_2Y_CONFIG)
     else:
         # Run both
         print("\n" + "=" * 60)
