@@ -995,7 +995,7 @@ XRP_CONFIG: Dict[str, Any] = {
     # ── Ceiling probe (s90 control) + find hard ceiling at s100/s110
     "param_sets": [
         {
-            "name": "s90_l10",            # control — confirmed +38.33%
+            "name": "FINAL_s90_l10",      # ★ confirmed optimal — +38.33% on 6-month OOS
             "use_sl": True, "trend_detection": True, "trend_capture": True,
             "trend_force_close_grid": True, "trend_confirm_candles": 3,
             "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.90,
@@ -1004,20 +1004,17 @@ XRP_CONFIG: Dict[str, Any] = {
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
         {
-            "name": "s100_l10",
+            "name": "FINAL_s40_l10",      # conservative variant (+14.32%)
             "use_sl": True, "trend_detection": True, "trend_capture": True,
             "trend_force_close_grid": True, "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 1.00,
+            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.40,
             "trend_lookback_candles": 10,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
         {
-            "name": "s110_l10",           # over-allocate — expect saturation/failure
-            "use_sl": True, "trend_detection": True, "trend_capture": True,
-            "trend_force_close_grid": True, "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 1.10,
-            "trend_lookback_candles": 10,
+            "name": "FINAL_trend_off",    # grid-only baseline (-3.95% on 6-month OOS)
+            "use_sl": True, "trend_detection": False, "trend_capture": False,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
@@ -1058,6 +1055,70 @@ XRP_VALIDATE_CONFIG["param_sets"] = [
     },
 ]
 
+# ---------------------------------------------------------------------------
+# Long-term walk-forward: 2 years (Feb 28 2024 → Feb 28 2026)
+# Covers the full 2024 bear/recovery cycle + 2025 XRP bull run.
+# Uses best-known params only — data fetch is ~5,256 chunks (≈9 min of CI)
+# ---------------------------------------------------------------------------
+_LONGTERM_PARAM_SETS = [
+    {
+        "name": "lt_s90_l10",         # ★ optimised
+        "use_sl": True, "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.90,
+        "trend_lookback_candles": 10,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+    {
+        "name": "lt_s40_l10",         # conservative
+        "use_sl": True, "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.40,
+        "trend_lookback_candles": 10,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+    {
+        "name": "lt_trend_off",       # grid-only baseline
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_2Y_CONFIG = dict(XRP_CONFIG)
+XRP_2Y_CONFIG["start_date"]  = datetime(2024, 2, 28)
+XRP_2Y_CONFIG["end_date"]    = datetime(2026, 2, 28)
+XRP_2Y_CONFIG["param_sets"]  = _LONGTERM_PARAM_SETS
+
+# ---------------------------------------------------------------------------
+# Maximum-available history: Apr 20 2022 → Feb 28 2026 (~3y 10m)
+# Bitunix XRPUSDT 1min data confirmed available from ~Apr 19 2022.
+# Covers: 2022 crash, 2023 range, 2024 recovery, 2025 bull run.
+# Data fetch ~9,800 chunks (≈17 min of CI); simulation ≈ same again per set.
+# ---------------------------------------------------------------------------
+XRP_MAX_CONFIG = dict(XRP_CONFIG)
+XRP_MAX_CONFIG["start_date"]  = datetime(2022, 4, 20)
+XRP_MAX_CONFIG["end_date"]    = datetime(2026, 2, 28)
+XRP_MAX_CONFIG["param_sets"]  = [
+    {
+        "name": "max_s90_l10",        # ★ optimised at max history
+        "use_sl": True, "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.90,
+        "trend_lookback_candles": 10,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+    {
+        "name": "max_trend_off",      # grid-only across full history
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
 # ===========================================================================
 # Entry point
 # ===========================================================================
@@ -1073,7 +1134,7 @@ if __name__ == "__main__":
         grid_search_backtest(CONFIG)
     elif symbol in ("XRPUSDT", "XRP"):
         print("\n" + "=" * 60)
-        print("  XRPUSDT forward test  (Aug 2025 → Feb 2026)")
+        print("  XRPUSDT 6-month OOS  (Aug 2025 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_CONFIG)
 
@@ -1081,6 +1142,16 @@ if __name__ == "__main__":
         print("  XRPUSDT robustness check  (May 2025 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_VALIDATE_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  XRPUSDT 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  XRPUSDT max history  (Apr 2022 → Feb 2026  ~3y 10m)")
+        print("=" * 60)
+        grid_search_backtest(XRP_MAX_CONFIG)
     else:
         # Run both
         print("\n" + "=" * 60)
