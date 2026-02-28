@@ -50,33 +50,40 @@ declare -A FEATURE_NAMES=(
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 wait_for_current_run() {
-  # Poll the most recent run on the branch until it completes.
-  # Returns the run_id via stdout.
+  # Poll the most recent *active or successful* run on the branch until it completes.
+  # Returns the run_id via stdout; all log() output goes to stderr (→ chain_run.log).
   local run_id
   local status
   local conclusion
   local poll_count=0
 
-  log "Fetching current in-progress run on ${BRANCH}..."
-  run_id=$(gh api "repos/${REPO}/actions/runs?branch=${BRANCH}&per_page=1" \
-    | python3 -c "import sys,json; r=json.load(sys.stdin)['workflow_runs'][0]; print(r['id'])")
-  log "Monitoring run ${run_id}..."
+  log "Fetching active run on ${BRANCH} (skipping cancelled)..." >&2
+  run_id=$(gh api "repos/${REPO}/actions/runs?branch=${BRANCH}&per_page=10" \
+    | python3 -c "
+import sys, json
+runs = json.load(sys.stdin)['workflow_runs']
+for r in runs:
+    if r.get('conclusion') != 'cancelled':
+        print(r['id'])
+        break
+")
+  log "Monitoring run ${run_id}..." >&2
 
   while true; do
     poll_count=$((poll_count + 1))
-    status=$(gh api "repos/${REPO}/actions/runs/${run_id}" \
-      | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['status'])")
-    conclusion=$(gh api "repos/${REPO}/actions/runs/${run_id}" \
-      | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('conclusion') or 'none')")
+    local run_json
+    run_json=$(gh api "repos/${REPO}/actions/runs/${run_id}")
+    status=$(echo "$run_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+    conclusion=$(echo "$run_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('conclusion') or 'none')")
 
-    log "[${poll_count}] run=${run_id} ${status}/${conclusion}"
+    log "[${poll_count}] run=${run_id} ${status}/${conclusion}" >&2
 
     if [[ "$status" == "completed" ]]; then
       if [[ "$conclusion" != "success" ]]; then
-        log "⚠️  Run ${run_id} concluded: ${conclusion} — stopping chain"
+        log "⚠️  Run ${run_id} concluded: ${conclusion} — stopping chain" >&2
         exit 1
       fi
-      log "✅ Run ${run_id} succeeded"
+      log "✅ Run ${run_id} succeeded" >&2
       echo "$run_id"
       return 0
     fi
@@ -127,7 +134,7 @@ push_next_feature() {
   local symbol="${FEATURE_SYMBOLS[$feature]}"
   local name="${FEATURE_NAMES[$feature]}"
 
-  log "Updating ci.yml to run ${symbol} (${name})"
+  log "Updating ci.yml to run ${symbol} (${name})" >&2
   sed -i '' \
     "s/- name: Backtest XRP.*$/- name: Backtest XRP\/USDT — ${name}/" \
     .github/workflows/ci.yml
@@ -137,15 +144,15 @@ push_next_feature() {
 
   git add .github/workflows/ci.yml
   git commit -m "ci: run ${name} sweep (${symbol})"
-  git push
+  git push >&2
 
-  log "Pushed ${symbol} — waiting for new run to register..."
+  log "Pushed ${symbol} — waiting for new run to register..." >&2
   sleep 15
 
   local new_run_id
   new_run_id=$(gh api "repos/${REPO}/actions/runs?branch=${BRANCH}&per_page=1" \
     | python3 -c "import sys,json; r=json.load(sys.stdin)['workflow_runs'][0]; print(r['id'])")
-  log "New run: ${new_run_id}"
+  log "New run: ${new_run_id}" >&2
   echo "$new_run_id"
 }
 
