@@ -878,6 +878,27 @@ XRP_CONFIG: Dict[str, Any] = {
             "long_settings":  {"up_spacing": 0.008, "down_spacing": 0.008},
             "short_settings": {"up_spacing": 0.008, "down_spacing": 0.008},
         },
+        {
+            "name": "xrp_wider_1.0pct",
+            "use_sl": True,             # SL: 2× spacing = 2.0%
+            "trend_detection": False,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "xrp_wider_1.2pct",
+            "use_sl": True,             # SL: 2× spacing = 2.4%
+            "trend_detection": False,
+            "long_settings":  {"up_spacing": 0.012, "down_spacing": 0.012},
+            "short_settings": {"up_spacing": 0.012, "down_spacing": 0.012},
+        },
+        {
+            "name": "xrp_wider_1.5pct",
+            "use_sl": True,             # SL: 2× spacing = 3.0%
+            "trend_detection": False,
+            "long_settings":  {"up_spacing": 0.015, "down_spacing": 0.015},
+            "short_settings": {"up_spacing": 0.015, "down_spacing": 0.015},
+        },
     ],
 }
 
