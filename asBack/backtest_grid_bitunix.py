@@ -992,81 +992,52 @@ XRP_CONFIG: Dict[str, Any] = {
     "trend_capture_velocity_pct": 0.06, # entry only on strong moves ≥6% (not every 4% blip)
     "trend_force_close_grid": False,    # default: DON'T force-close grid (override per-set)
 
-    # ── Fine-sweep: position size and lookback — all use confirm=3, trail=4%, force_close=True
+    # ── Fine-sweep: cross best size × best lookback, push size ceiling
+    # Baseline winner: confirm=3, trail=4%, force_close=True, lookback=15, size=25% (+6.08%)
+    # l10 outperforms l15 — now combine l10 with the size ramp
     "param_sets": [
-        # — Vary capture size (confirm=3, trail=4%, lookback=15) —
         {
-            "name": "c3_t4_s10",          # size=10%
-            "use_sl": True,
-            "trend_detection": True,
-            "trend_capture": True,
-            "trend_force_close_grid": True,
-            "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04,
-            "trend_capture_size_pct": 0.10,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "c3_t4_s15",          # size=15% — baseline (+2.01%)
-            "use_sl": True,
-            "trend_detection": True,
-            "trend_capture": True,
-            "trend_force_close_grid": True,
-            "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04,
-            "trend_capture_size_pct": 0.15,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "c3_t4_s20",          # size=20%
-            "use_sl": True,
-            "trend_detection": True,
-            "trend_capture": True,
-            "trend_force_close_grid": True,
-            "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04,
-            "trend_capture_size_pct": 0.20,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "c3_t4_s25",          # size=25%
-            "use_sl": True,
-            "trend_detection": True,
-            "trend_capture": True,
-            "trend_force_close_grid": True,
-            "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04,
-            "trend_capture_size_pct": 0.25,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        # — Vary lookback window (confirm=3, trail=4%, size=15%) —
-        {
-            "name": "c3_t4_l10",          # lookback=10 candles
-            "use_sl": True,
-            "trend_detection": True,
-            "trend_capture": True,
-            "trend_force_close_grid": True,
-            "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04,
-            "trend_capture_size_pct": 0.15,
+            "name": "s20_l10",
+            "use_sl": True, "trend_detection": True, "trend_capture": True,
+            "trend_force_close_grid": True, "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.20,
             "trend_lookback_candles": 10,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
         {
-            "name": "c3_t4_l20",          # lookback=20 candles
-            "use_sl": True,
-            "trend_detection": True,
-            "trend_capture": True,
-            "trend_force_close_grid": True,
-            "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04,
-            "trend_capture_size_pct": 0.15,
-            "trend_lookback_candles": 20,
+            "name": "s25_l10",            # combine best from each sweep
+            "use_sl": True, "trend_detection": True, "trend_capture": True,
+            "trend_force_close_grid": True, "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.25,
+            "trend_lookback_candles": 10,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "s30_l10",            # push size higher
+            "use_sl": True, "trend_detection": True, "trend_capture": True,
+            "trend_force_close_grid": True, "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.30,
+            "trend_lookback_candles": 10,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "s35_l10",            # push further
+            "use_sl": True, "trend_detection": True, "trend_capture": True,
+            "trend_force_close_grid": True, "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.35,
+            "trend_lookback_candles": 10,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "s40_l10",            # ceiling probe
+            "use_sl": True, "trend_detection": True, "trend_capture": True,
+            "trend_force_close_grid": True, "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.40,
+            "trend_lookback_candles": 10,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
