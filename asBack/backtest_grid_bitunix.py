@@ -845,59 +845,43 @@ XRP_CONFIG: Dict[str, Any] = {
     "trend_velocity_pct": 0.04,     # 4.0% in 15min = strong trend for XRP
     "trend_cooldown_candles": 30,   # 30 quiet candles before resuming hedge mode
 
-    # ── Parameter sets tuned for XRP's higher % volatility
+    # ── Fine-tuning sweep around 1.0% peak (0.8→1.2 confirmed, now filling gaps)
+    # Known results (Jul 2025): 0.8%→+1.92%, 1.0%→+2.70%, 1.2%→+1.74%, 1.5%→-0.05%
     "param_sets": [
         {
-            "name": "xrp_ultra_0.1pct",
-            "use_sl": False,  # SL disabled: TP=0.1%, any SL would be inside noise
-            "long_settings":  {"up_spacing": 0.001, "down_spacing": 0.001},
-            "short_settings": {"up_spacing": 0.001, "down_spacing": 0.001},
-        },
-        {
-            "name": "xrp_tight_0.2pct",
-            "use_sl": False,
-            "long_settings":  {"up_spacing": 0.002, "down_spacing": 0.002},
-            "short_settings": {"up_spacing": 0.002, "down_spacing": 0.002},
-        },
-        {
-            "name": "xrp_medium_0.3pct",
-            "use_sl": False,
-            "long_settings":  {"up_spacing": 0.003, "down_spacing": 0.003},
-            "short_settings": {"up_spacing": 0.003, "down_spacing": 0.003},
-        },
-        {
-            "name": "xrp_medium_0.5pct",
-            "use_sl": False,
-            "long_settings":  {"up_spacing": 0.005, "down_spacing": 0.005},
-            "short_settings": {"up_spacing": 0.005, "down_spacing": 0.005},
-        },
-        {
             "name": "xrp_wide_0.8pct",
-            "use_sl": True,             # SL enabled: 2× spacing = 1.6%, clears noise
-            "trend_detection": False,   # Wide spacing is its own trend filter — detection costs +0.43%
+            "use_sl": True,
+            "trend_detection": False,
             "long_settings":  {"up_spacing": 0.008, "down_spacing": 0.008},
             "short_settings": {"up_spacing": 0.008, "down_spacing": 0.008},
         },
         {
+            "name": "xrp_wide_0.9pct",
+            "use_sl": True,
+            "trend_detection": False,
+            "long_settings":  {"up_spacing": 0.009, "down_spacing": 0.009},
+            "short_settings": {"up_spacing": 0.009, "down_spacing": 0.009},
+        },
+        {
             "name": "xrp_wider_1.0pct",
-            "use_sl": True,             # SL: 2× spacing = 2.0%
+            "use_sl": True,
             "trend_detection": False,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
         {
+            "name": "xrp_wider_1.1pct",
+            "use_sl": True,
+            "trend_detection": False,
+            "long_settings":  {"up_spacing": 0.011, "down_spacing": 0.011},
+            "short_settings": {"up_spacing": 0.011, "down_spacing": 0.011},
+        },
+        {
             "name": "xrp_wider_1.2pct",
-            "use_sl": True,             # SL: 2× spacing = 2.4%
+            "use_sl": True,
             "trend_detection": False,
             "long_settings":  {"up_spacing": 0.012, "down_spacing": 0.012},
             "short_settings": {"up_spacing": 0.012, "down_spacing": 0.012},
-        },
-        {
-            "name": "xrp_wider_1.5pct",
-            "use_sl": True,             # SL: 2× spacing = 3.0%
-            "trend_detection": False,
-            "long_settings":  {"up_spacing": 0.015, "down_spacing": 0.015},
-            "short_settings": {"up_spacing": 0.015, "down_spacing": 0.015},
         },
     ],
 }
