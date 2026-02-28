@@ -992,28 +992,10 @@ XRP_CONFIG: Dict[str, Any] = {
     "trend_capture_velocity_pct": 0.06, # entry only on strong moves ≥6% (not every 4% blip)
     "trend_force_close_grid": False,    # default: DON'T force-close grid (override per-set)
 
-    # ── Push size ceiling (l10, confirm=3, trail=4%) + probe l8
+    # ── Push absolute ceiling — l8 confirmed bad, l10 is optimal, continue size ramp
     "param_sets": [
         {
-            "name": "s45_l10",
-            "use_sl": True, "trend_detection": True, "trend_capture": True,
-            "trend_force_close_grid": True, "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.45,
-            "trend_lookback_candles": 10,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "s50_l10",
-            "use_sl": True, "trend_detection": True, "trend_capture": True,
-            "trend_force_close_grid": True, "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.50,
-            "trend_lookback_candles": 10,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "s60_l10",
+            "name": "s60_l10",            # control repeat — confirmed +23.87%
             "use_sl": True, "trend_detection": True, "trend_capture": True,
             "trend_force_close_grid": True, "trend_confirm_candles": 3,
             "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.60,
@@ -1022,20 +1004,29 @@ XRP_CONFIG: Dict[str, Any] = {
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
         {
-            "name": "s40_l8",             # l8: even shorter lookback
+            "name": "s70_l10",
             "use_sl": True, "trend_detection": True, "trend_capture": True,
             "trend_force_close_grid": True, "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.40,
-            "trend_lookback_candles": 8,
+            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.70,
+            "trend_lookback_candles": 10,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
         {
-            "name": "s50_l8",             # combine
+            "name": "s80_l10",
             "use_sl": True, "trend_detection": True, "trend_capture": True,
             "trend_force_close_grid": True, "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.50,
-            "trend_lookback_candles": 8,
+            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.80,
+            "trend_lookback_candles": 10,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "s90_l10",
+            "use_sl": True, "trend_detection": True, "trend_capture": True,
+            "trend_force_close_grid": True, "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.90,
+            "trend_lookback_candles": 10,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
