@@ -847,11 +847,20 @@ XRP_CONFIG: Dict[str, Any] = {
     "trend_cooldown_candles": 30,   # 30 quiet candles before resuming hedge mode
 
     # ── 6-month validation with confirmed peak spacing (1.0% = +2.70% on Jul 2025)
+    # Note: trend_detection=False hurt on 6-month window (trending Q4 2025 → -3.95%)
+    # Re-testing with trend_detection=True to see if it protects the longer period
     "param_sets": [
         {
-            "name": "xrp_wider_1.0pct",
+            "name": "xrp_1.0pct_trend_off",
             "use_sl": True,
             "trend_detection": False,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "xrp_1.0pct_trend_on",
+            "use_sl": True,
+            "trend_detection": True,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
