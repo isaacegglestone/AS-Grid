@@ -811,6 +811,7 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "trend_force_close_grid", "trend_confirm_candles",
                     "trend_capture_size_pct", "trend_trailing_stop_pct",
                     "trend_capture_velocity_pct", "trend_velocity_pct",
+                    "trend_lookback_candles",
                 ) if k in params}),
             }
         )
@@ -991,63 +992,81 @@ XRP_CONFIG: Dict[str, Any] = {
     "trend_capture_velocity_pct": 0.06, # entry only on strong moves ≥6% (not every 4% blip)
     "trend_force_close_grid": False,    # default: DON'T force-close grid (override per-set)
 
-    # ── Fine-sweep: confirm_candles (1/2/3) x trail_stop_pct (4%/5%/6%)
-    # All variants: force_close_grid=True, capture_velocity_pct=0.06, size=15%
+    # ── Fine-sweep: position size and lookback — all use confirm=3, trail=4%, force_close=True
     "param_sets": [
-        # — Vary confirmation window (trail fixed at 4%) —
+        # — Vary capture size (confirm=3, trail=4%, lookback=15) —
         {
-            "name": "hard_c1_t4",          # confirm=1 → acts immediately like v1 but with wider trail
-            "use_sl": True,
-            "trend_detection": True,
-            "trend_capture": True,
-            "trend_force_close_grid": True,
-            "trend_confirm_candles": 1,
-            "trend_trailing_stop_pct": 0.04,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "hard_c2_t4",          # confirm=2
-            "use_sl": True,
-            "trend_detection": True,
-            "trend_capture": True,
-            "trend_force_close_grid": True,
-            "trend_confirm_candles": 2,
-            "trend_trailing_stop_pct": 0.04,
-            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
-            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "hard_c3_t4",          # confirm=3 — current winner (+2.01%)
+            "name": "c3_t4_s10",          # size=10%
             "use_sl": True,
             "trend_detection": True,
             "trend_capture": True,
             "trend_force_close_grid": True,
             "trend_confirm_candles": 3,
             "trend_trailing_stop_pct": 0.04,
+            "trend_capture_size_pct": 0.10,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
-        # — Vary trail stop (confirm fixed at 3) —
         {
-            "name": "hard_c3_t5",          # trail=5%
+            "name": "c3_t4_s15",          # size=15% — baseline (+2.01%)
             "use_sl": True,
             "trend_detection": True,
             "trend_capture": True,
             "trend_force_close_grid": True,
             "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.05,
+            "trend_trailing_stop_pct": 0.04,
+            "trend_capture_size_pct": 0.15,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
         {
-            "name": "hard_c3_t6",          # trail=6%
+            "name": "c3_t4_s20",          # size=20%
             "use_sl": True,
             "trend_detection": True,
             "trend_capture": True,
             "trend_force_close_grid": True,
             "trend_confirm_candles": 3,
-            "trend_trailing_stop_pct": 0.06,
+            "trend_trailing_stop_pct": 0.04,
+            "trend_capture_size_pct": 0.20,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "c3_t4_s25",          # size=25%
+            "use_sl": True,
+            "trend_detection": True,
+            "trend_capture": True,
+            "trend_force_close_grid": True,
+            "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04,
+            "trend_capture_size_pct": 0.25,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        # — Vary lookback window (confirm=3, trail=4%, size=15%) —
+        {
+            "name": "c3_t4_l10",          # lookback=10 candles
+            "use_sl": True,
+            "trend_detection": True,
+            "trend_capture": True,
+            "trend_force_close_grid": True,
+            "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04,
+            "trend_capture_size_pct": 0.15,
+            "trend_lookback_candles": 10,
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "c3_t4_l20",          # lookback=20 candles
+            "use_sl": True,
+            "trend_detection": True,
+            "trend_capture": True,
+            "trend_force_close_grid": True,
+            "trend_confirm_candles": 3,
+            "trend_trailing_stop_pct": 0.04,
+            "trend_capture_size_pct": 0.15,
+            "trend_lookback_candles": 20,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
