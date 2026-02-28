@@ -73,6 +73,8 @@ class GridOrderBacktester:
         # Trend detection state
         self.trend_mode: Optional[str] = None  # "up" | "down" | None
         self.trend_cooldown_counter: int = 0
+        # Trend capture position: {"side", "entry", "qty", "margin", "peak"}
+        self.trend_position: Optional[Dict] = None
 
         self._init_anchors(self.df["close"].iloc[0])
 
@@ -112,12 +114,21 @@ class GridOrderBacktester:
         add this back or each open position looks like a phantom loss equal
         to the order size (≈ $10 on a $1,000 account).
         """
-        return sum(m for _, _, m, _, _ in self.long_positions + self.short_positions)
+        grid_margin = sum(m for _, _, m, _, _ in self.long_positions + self.short_positions)
+        trend_margin = self.trend_position["margin"] if self.trend_position else 0.0
+        return grid_margin + trend_margin
 
     def _calculate_unrealized_pnl(self, price: float) -> float:
         long_pnl = sum((price - ep) * qty for ep, qty, _m, _t, _s in self.long_positions)
         short_pnl = sum((ep - price) * qty for ep, qty, _m, _t, _s in self.short_positions)
-        return long_pnl + short_pnl
+        trend_pnl = 0.0
+        if self.trend_position:
+            tp = self.trend_position
+            if tp["side"] == "long":
+                trend_pnl = (price - tp["entry"]) * tp["qty"]
+            else:
+                trend_pnl = (tp["entry"] - price) * tp["qty"]
+        return long_pnl + short_pnl + trend_pnl
 
     def _equity(self, price: float) -> float:
         """True portfolio equity = cash + locked margin + unrealised P&L."""
@@ -183,75 +194,169 @@ class GridOrderBacktester:
                       f"(${short_unreal:+.2f} < -${abs(max_unreal_loss):.0f}) — no new shorts")
                 self._short_loss_warned = True
             # ------------------------------------------------------------------
-            # Trend detection + side liquidation
-            # Detect runaway moves via rolling price velocity. When price has
-            # moved >trend_velocity_pct in the last trend_lookback_candles candles:
-            #   • Close ALL positions on the losing side at market (realise the
-            #     loss now rather than let it compound).
-            #   • Freeze new entries on that side (trend_mode blocks opens).
-            #   • Let the profitable side continue adding levels normally.
-            # Resume hedge mode after trend_cooldown_candles of subdued velocity.
+            # Trend detection + capture
+            # When velocity > threshold:
+            #   1. Force-close all positions on the losing side immediately.
+            #   2. Open a single directional "trend position" sized at
+            #      trend_capture_size_pct of current balance.
+            #   3. Trail a stop (trend_trailing_stop_pct) behind the peak.
+            #   4. Close the trend position + resume grid when trail fires or
+            #      momentum fades.
             # ------------------------------------------------------------------
-            trend_detection   = self.config.get("trend_detection", False)
-            trend_lookback    = self.config.get("trend_lookback_candles", 15)
-            vel_threshold     = self.config.get("trend_velocity_pct", 0.01)
-            cooldown_candles  = self.config.get("trend_cooldown_candles", 30)
+            trend_detection  = self.config.get("trend_detection", False)
+            trend_capture    = self.config.get("trend_capture", False)
+            trend_lookback   = self.config.get("trend_lookback_candles", 15)
+            vel_threshold    = self.config.get("trend_velocity_pct", 0.01)
+            cooldown_candles = self.config.get("trend_cooldown_candles", 30)
+            cap_size_pct     = self.config.get("trend_capture_size_pct", 0.30)
+            trail_stop_pct   = self.config.get("trend_trailing_stop_pct", 0.015)
             long_blocked_by_trend  = False
             short_blocked_by_trend = False
 
             if trend_detection and len(self.equity_curve) >= trend_lookback:
-                past_price = self.equity_curve[-trend_lookback][1]  # price N candles ago
+                past_price = self.equity_curve[-trend_lookback][1]
                 velocity   = (price - past_price) / past_price
-
                 trending_up   = velocity >  vel_threshold
                 trending_down = velocity < -vel_threshold
 
+                # ── Manage existing trend position (trailing stop) ──────────
+                if self.trend_position is not None:
+                    tp = self.trend_position
+                    if tp["side"] == "long":
+                        if price > tp["peak"]:
+                            tp["peak"] = price
+                        trail_stop = tp["peak"] * (1 - trail_stop_pct)
+                        close_trend = price <= trail_stop or (
+                            not trending_up and abs(velocity) < vel_threshold * 0.5
+                        )
+                        if close_trend:
+                            fee_cost = tp["qty"] * price * (self.fee / 2)
+                            gross_pnl = (price - tp["entry"]) * tp["qty"]
+                            net_pnl = gross_pnl - fee_cost
+                            self.balance += tp["margin"] + net_pnl
+                            self.trade_history.append((
+                                timestamp, "TREND_SELL", price, tp["qty"], "TREND_LONG",
+                                net_pnl, fee_cost, gross_pnl,
+                                self._calculate_unrealized_pnl(price), self._equity(price),
+                            ))
+                            print(f"\U0001f3af [{timestamp}] Trend LONG closed "
+                                  f"entry={tp['entry']:.4f} exit={price:.4f} pnl={net_pnl:+.2f}")
+                            self.trend_position = None
+                    else:  # short
+                        if price < tp["peak"]:
+                            tp["peak"] = price
+                        trail_stop = tp["peak"] * (1 + trail_stop_pct)
+                        close_trend = price >= trail_stop or (
+                            not trending_down and abs(velocity) < vel_threshold * 0.5
+                        )
+                        if close_trend:
+                            fee_cost = tp["qty"] * price * (self.fee / 2)
+                            gross_pnl = (tp["entry"] - price) * tp["qty"]
+                            net_pnl = gross_pnl - fee_cost
+                            self.balance += tp["margin"] + net_pnl
+                            self.trade_history.append((
+                                timestamp, "TREND_BUY", price, tp["qty"], "TREND_SHORT",
+                                net_pnl, fee_cost, gross_pnl,
+                                self._calculate_unrealized_pnl(price), self._equity(price),
+                            ))
+                            print(f"\U0001f3af [{timestamp}] Trend SHORT closed "
+                                  f"entry={tp['entry']:.4f} exit={price:.4f} pnl={net_pnl:+.2f}")
+                            self.trend_position = None
+
+                # ── Detect new trend ────────────────────────────────────────
                 if trending_up and self.trend_mode != "up":
-                    # Block new short entries during uptrend — let existing
-                    # shorts ride to their own TP or SL rather than force-
-                    # closing them (forced closures cause churn on volatile days).
-                    self.last_short_price = price  # re-anchor for when trend ends
                     self.trend_mode = "up"
                     self.trend_cooldown_counter = 0
-                    n_open_shorts = len(self.short_positions)
-                    print(
-                        f"\U0001f4c8 [{timestamp}] Trend UP detected "
-                        f"(vel={velocity * 100:.2f}% over {trend_lookback}min) "
-                        f"\u2014 new short entries blocked ({n_open_shorts} existing short(s) ride to TP/SL)"
-                    )
+                    self.last_short_price = price
+                    # Force-close all short grid positions
+                    if self.short_positions:
+                        n = len(self.short_positions)
+                        for ep, qty, margin_req, _tp, _sl in self.short_positions:
+                            fee_cost = qty * price * (self.fee / 2)
+                            gross_pnl = (ep - price) * qty
+                            net_pnl = gross_pnl - fee_cost
+                            self.balance += margin_req + net_pnl
+                            self.trade_history.append((
+                                timestamp, "TREND_FORCE_CLOSE", price, qty, "SHORT",
+                                net_pnl, fee_cost, gross_pnl, 0.0, self._equity(price),
+                            ))
+                        self.short_positions.clear()
+                        print(f"\U0001f4c8 [{timestamp}] Trend UP (vel={velocity*100:.2f}%) "
+                              f"— force-closed {n} short(s)")
+                    # Open trend capture long
+                    if trend_capture and self.trend_position is None:
+                        current_equity = self._equity(price)
+                        cap_margin = current_equity * cap_size_pct
+                        cap_qty = (cap_margin * self.leverage) / price
+                        fee_cost = cap_qty * price * (self.fee / 2)
+                        if cap_margin + fee_cost <= self.balance:
+                            self.balance -= cap_margin + fee_cost
+                            self.trend_position = {
+                                "side": "long", "entry": price, "qty": cap_qty,
+                                "margin": cap_margin, "peak": price,
+                            }
+                            self.trade_history.append((
+                                timestamp, "TREND_BUY", price, cap_qty, "TREND_LONG",
+                                0.0, fee_cost, 0.0,
+                                self._calculate_unrealized_pnl(price), self._equity(price),
+                            ))
+                            print(f"\U0001f3af [{timestamp}] Trend LONG opened "
+                                  f"at {price:.4f} size=${cap_margin:.0f}")
 
                 elif trending_down and self.trend_mode != "down":
-                    # Block new long entries during downtrend — let existing
-                    # longs ride to their own TP or SL.
-                    self.last_long_price = price  # re-anchor for when trend ends
                     self.trend_mode = "down"
                     self.trend_cooldown_counter = 0
-                    n_open_longs = len(self.long_positions)
-                    print(
-                        f"\U0001f4c9 [{timestamp}] Trend DOWN detected "
-                        f"(vel={velocity * 100:.2f}% over {trend_lookback}min) "
-                        f"\u2014 new long entries blocked ({n_open_longs} existing long(s) ride to TP/SL)"
-                    )
+                    self.last_long_price = price
+                    # Force-close all long grid positions
+                    if self.long_positions:
+                        n = len(self.long_positions)
+                        for ep, qty, margin_req, _tp, _sl in self.long_positions:
+                            fee_cost = qty * price * (self.fee / 2)
+                            gross_pnl = (price - ep) * qty
+                            net_pnl = gross_pnl - fee_cost
+                            self.balance += margin_req + net_pnl
+                            self.trade_history.append((
+                                timestamp, "TREND_FORCE_CLOSE", price, qty, "LONG",
+                                net_pnl, fee_cost, gross_pnl, 0.0, self._equity(price),
+                            ))
+                        self.long_positions.clear()
+                        print(f"\U0001f4c9 [{timestamp}] Trend DOWN (vel={velocity*100:.2f}%) "
+                              f"— force-closed {n} long(s)")
+                    # Open trend capture short
+                    if trend_capture and self.trend_position is None:
+                        current_equity = self._equity(price)
+                        cap_margin = current_equity * cap_size_pct
+                        cap_qty = (cap_margin * self.leverage) / price
+                        fee_cost = cap_qty * price * (self.fee / 2)
+                        if cap_margin + fee_cost <= self.balance:
+                            self.balance -= cap_margin + fee_cost
+                            self.trend_position = {
+                                "side": "short", "entry": price, "qty": cap_qty,
+                                "margin": cap_margin, "peak": price,
+                            }
+                            self.trade_history.append((
+                                timestamp, "TREND_SELL", price, cap_qty, "TREND_SHORT",
+                                0.0, fee_cost, 0.0,
+                                self._calculate_unrealized_pnl(price), self._equity(price),
+                            ))
+                            print(f"\U0001f3af [{timestamp}] Trend SHORT opened "
+                                  f"at {price:.4f} size=${cap_margin:.0f}")
 
-                elif self.trend_mode is not None:
+                elif self.trend_mode is not None and self.trend_position is None:
+                    # Trend active, no capture position — cooldown to resume grid
                     if abs(velocity) < vel_threshold * 0.5:
-                        # Velocity has faded — count down to resuming hedge mode
                         self.trend_cooldown_counter += 1
                         if self.trend_cooldown_counter >= cooldown_candles:
-                            print(
-                                f"\U0001f504 [{timestamp}] Trend {self.trend_mode.upper()} ended "
-                                f"\u2014 resuming hedge mode after {cooldown_candles} quiet candles"
-                            )
+                            print(f"\U0001f504 [{timestamp}] Trend {self.trend_mode.upper()} ended "
+                                  f"\u2014 resuming hedge mode")
                             self.trend_mode = None
                             self.trend_cooldown_counter = 0
-                            # Re-anchor both sides at current price
                             self.last_long_price  = price
                             self.last_short_price = price
                     else:
-                        # Trend still elevated — reset the cooldown timer
                         self.trend_cooldown_counter = 0
 
-            # Gate new entries when a trend is active
+            # Gate new grid entries when a trend is active
             long_blocked_by_trend  = (self.trend_mode == "down")
             short_blocked_by_trend = (self.trend_mode == "up")
             used_margin = sum(pos[2] for pos in self.long_positions + self.short_positions)
@@ -395,7 +500,12 @@ class GridOrderBacktester:
     def summary(self, final_price: float) -> Dict[str, Any]:
         long_pnl = sum((final_price - ep) * qty for ep, qty, _m, _t, _s in self.long_positions)
         short_pnl = sum((ep - final_price) * qty for ep, qty, _m, _t, _s in self.short_positions)
-        unrealized_pnl = long_pnl + short_pnl
+        trend_pnl = 0.0
+        if self.trend_position:
+            tp = self.trend_position
+            trend_pnl = ((final_price - tp["entry"]) if tp["side"] == "long"
+                         else (tp["entry"] - final_price)) * tp["qty"]
+        unrealized_pnl = long_pnl + short_pnl + trend_pnl
         realized_pnl = sum(t[5] for t in self.trade_history if t[5] != 0.0)
         final_equity = self.balance + self._locked_margin() + unrealized_pnl
         return {
@@ -671,8 +781,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                 "short_settings": params["short_settings"],
                 "use_sl": params.get("use_sl", True),
                 # Per-strategy overrides (fall back to global config value)
-                **({"trend_detection": params["trend_detection"]}
-                   if "trend_detection" in params else {}),
+                **({k: params[k] for k in ("trend_detection", "trend_capture")
+                    if k in params}),
             }
         )
 
@@ -840,27 +950,37 @@ XRP_CONFIG: Dict[str, Any] = {
     "leverage": 1,
     "direction": "both",
     "grid_refresh_interval": 10, # minutes
-    # ── Trend detection + side liquidation (can be overridden per param_set)
+    # ── Trend detection + capture (can be overridden per param_set)
     "trend_detection": True,        # default ON for tight strategies; wide disables it per-set
+    "trend_capture": True,          # open a directional position when trend fires
     "trend_lookback_candles": 15,   # XRP moves fast — 15min window catches early
     "trend_velocity_pct": 0.04,     # 4.0% in 15min = strong trend for XRP
     "trend_cooldown_candles": 30,   # 30 quiet candles before resuming hedge mode
+    "trend_capture_size_pct": 0.30, # use 30% of equity for the trend position
+    "trend_trailing_stop_pct": 0.015, # trail stop 1.5% behind peak
 
-    # ── 6-month validation with confirmed peak spacing (1.0% = +2.70% on Jul 2025)
-    # Note: trend_detection=False hurt on 6-month window (trending Q4 2025 → -3.95%)
-    # Re-testing with trend_detection=True to see if it protects the longer period
+    # ── 6-month validation: compare trend off vs protect-only vs capture
     "param_sets": [
         {
             "name": "xrp_1.0pct_trend_off",
             "use_sl": True,
-            "trend_detection": False,
+            "trend_detection": False,       # baseline: no protection, no capture
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
         {
-            "name": "xrp_1.0pct_trend_on",
+            "name": "xrp_1.0pct_protect_only",
             "use_sl": True,
             "trend_detection": True,
+            "trend_capture": False,         # block entries on losing side, no directional trade
+            "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+            "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        },
+        {
+            "name": "xrp_1.0pct_trend_capture",
+            "use_sl": True,
+            "trend_detection": True,
+            "trend_capture": True,          # NEW: force-close losing side + ride trend
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
         },
