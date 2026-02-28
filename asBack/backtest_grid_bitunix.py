@@ -821,9 +821,10 @@ XRP_CONFIG: Dict[str, Any] = {
     "symbol": "XRPUSDT",
     "interval": "1min",
 
-    # ── Date range — full July 2025 (same window as BTC for comparison)
-    "start_date": datetime(2025, 7, 1),
-    "end_date":   datetime(2025, 8, 1),
+    # ── Date range — 6-month out-of-sample validation (Aug 2025 → Feb 2026)
+    # Tuning was done on Jul 2025; this is a forward, unseen window.
+    "start_date": datetime(2025, 8, 1),
+    "end_date":   datetime(2026, 2, 1),
 
     # ── Account / risk
     "initial_balance": 1000,
@@ -845,43 +846,14 @@ XRP_CONFIG: Dict[str, Any] = {
     "trend_velocity_pct": 0.04,     # 4.0% in 15min = strong trend for XRP
     "trend_cooldown_candles": 30,   # 30 quiet candles before resuming hedge mode
 
-    # ── Fine-tuning sweep around 1.0% peak (0.8→1.2 confirmed, now filling gaps)
-    # Known results (Jul 2025): 0.8%→+1.92%, 1.0%→+2.70%, 1.2%→+1.74%, 1.5%→-0.05%
+    # ── 6-month validation with confirmed peak spacing (1.0% = +2.70% on Jul 2025)
     "param_sets": [
-        {
-            "name": "xrp_wide_0.8pct",
-            "use_sl": True,
-            "trend_detection": False,
-            "long_settings":  {"up_spacing": 0.008, "down_spacing": 0.008},
-            "short_settings": {"up_spacing": 0.008, "down_spacing": 0.008},
-        },
-        {
-            "name": "xrp_wide_0.9pct",
-            "use_sl": True,
-            "trend_detection": False,
-            "long_settings":  {"up_spacing": 0.009, "down_spacing": 0.009},
-            "short_settings": {"up_spacing": 0.009, "down_spacing": 0.009},
-        },
         {
             "name": "xrp_wider_1.0pct",
             "use_sl": True,
             "trend_detection": False,
             "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
             "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
-        },
-        {
-            "name": "xrp_wider_1.1pct",
-            "use_sl": True,
-            "trend_detection": False,
-            "long_settings":  {"up_spacing": 0.011, "down_spacing": 0.011},
-            "short_settings": {"up_spacing": 0.011, "down_spacing": 0.011},
-        },
-        {
-            "name": "xrp_wider_1.2pct",
-            "use_sl": True,
-            "trend_detection": False,
-            "long_settings":  {"up_spacing": 0.012, "down_spacing": 0.012},
-            "short_settings": {"up_spacing": 0.012, "down_spacing": 0.012},
         },
     ],
 }
