@@ -104,6 +104,12 @@ class GridOrderBacktester:
             mult=self.config.get("bb_mult", 2.0),
         )
 
+        # Pre-compute RSI series (used by RSI filter)
+        self.rsi_series = self._compute_rsi(
+            self.df["close"],
+            period=self.config.get("rsi_period", 14),
+        )
+
         self._init_anchors(self.df["close"].iloc[0])
 
     # ------------------------------------------------------------------
@@ -437,7 +443,7 @@ class GridOrderBacktester:
                         print(f"\U0001f4c8 [{timestamp}] Trend UP confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} short(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_long and bb_allows_trend:
+                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_long and bb_allows_trend and rsi_allows_long:
                         if velocity >= cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * cap_size_pct * bb_size_boost
@@ -479,7 +485,7 @@ class GridOrderBacktester:
                         print(f"\U0001f4c9 [{timestamp}] Trend DOWN confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} long(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_short and bb_allows_trend:
+                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_short and bb_allows_trend and rsi_allows_short:
                         if velocity <= -cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * cap_size_pct * bb_size_boost
@@ -955,6 +961,9 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     # BB squeeze filter params
                     "bb_squeeze_gate", "bb_squeeze_boost", "bb_period", "bb_mult",
                     "bb_squeeze_threshold", "bb_squeeze_boost_mult",
+                    # RSI filter params
+                    "rsi_filter", "rsi_period", "rsi_overbought", "rsi_oversold",
+                    "rsi_momentum",
                 ) if k in params}),
             }
         )
@@ -1489,6 +1498,60 @@ XRP_BB_2Y_CONFIG["param_sets"] = [
     _bb_set("2y_bb_off",        gate=False, boost=False),
     _bb_set("2y_bb_gate",       gate=True,  boost=False),
     _bb_set("2y_bb_boost_1.5x", gate=False, boost=True, boost_mult=1.5),
+    {   # grid-only 2y baseline
+        "name": "2y_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+
+# ===========================================================================
+# v6 — RSI filter
+# Prevents chasing exhausted trends:
+#   rsi_filter=True  →  long blocked if RSI > 70 (overbought),
+#                        short blocked if RSI < 30 (oversold)
+#   rsi_momentum=True → also requires RSI > 50 for longs, < 50 for shorts
+# ===========================================================================
+
+def _rsi_set(name: str, rsi_on: bool, ob: float = 70.0, os_: float = 30.0,
+             momentum: bool = False, size: float = 0.90) -> Dict[str, Any]:
+    return {
+        "name": name,
+        "use_sl": True,
+        "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": size,
+        "trend_lookback_candles": 10,
+        "rsi_filter": rsi_on, "rsi_overbought": ob, "rsi_oversold": os_,
+        "rsi_momentum": momentum,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    }
+
+
+XRP_RSI_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_RSI_CONFIG["param_sets"] = [
+    _rsi_set("rsi_off",          rsi_on=False),                          # baseline
+    _rsi_set("rsi_ob70_os30",    rsi_on=True, ob=70, os_=30),            # classic
+    _rsi_set("rsi_ob65_os35",    rsi_on=True, ob=65, os_=35),            # tighter
+    _rsi_set("rsi_momentum",     rsi_on=True, ob=70, os_=30, momentum=True),  # + RSI > 50 gate
+    {   # grid-only control
+        "name": "rsi_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_RSI_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_RSI_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_RSI_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_RSI_2Y_CONFIG["param_sets"] = [
+    _rsi_set("2y_rsi_off",      rsi_on=False),
+    _rsi_set("2y_rsi_ob70",     rsi_on=True, ob=70, os_=30),
+    _rsi_set("2y_rsi_momentum", rsi_on=True, ob=70, os_=30, momentum=True),
     {   # grid-only 2y baseline
         "name": "2y_trend_off",
         "use_sl": True, "trend_detection": False, "trend_capture": False,
