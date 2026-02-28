@@ -91,6 +91,12 @@ class GridOrderBacktester:
             period=self.config.get("atr_period", 14),
         )
 
+        # Pre-compute slow EMA series (used by EMA bias filter)
+        self.ema_slow_series = self._compute_ema(
+            self.df["close"],
+            period=self.config.get("ema_slow_period", 50),
+        )
+
         self._init_anchors(self.df["close"].iloc[0])
 
     # ------------------------------------------------------------------
@@ -207,6 +213,11 @@ class GridOrderBacktester:
         alpha = 1.0 / period
         atr = tr.ewm(alpha=alpha, adjust=False).mean()
         return atr.fillna(0)
+
+    @staticmethod
+    def _compute_ema(series: pd.Series, period: int) -> pd.Series:
+        """Standard exponential moving average (span=period, alpha=2/(period+1))."""
+        return series.ewm(span=period, adjust=False).mean().fillna(series)
 
     # ------------------------------------------------------------------
     # Main simulation loop
@@ -407,7 +418,7 @@ class GridOrderBacktester:
                         print(f"\U0001f4c8 [{timestamp}] Trend UP confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} short(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend:
+                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_long:
                         if velocity >= cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * cap_size_pct
@@ -447,7 +458,7 @@ class GridOrderBacktester:
                         print(f"\U0001f4c9 [{timestamp}] Trend DOWN confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} long(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend:
+                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_short:
                         if velocity <= -cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * cap_size_pct
@@ -917,6 +928,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     # ATR dynamic trail params
                     "atr_trail", "atr_period", "atr_trail_multiplier",
                     "atr_trail_min", "atr_trail_max",
+                    # EMA bias filter params
+                    "ema_bias_filter", "ema_slow_period",
                 ) if k in params}),
             }
         )
@@ -1343,6 +1356,64 @@ XRP_ATR_2Y_CONFIG["param_sets"] = [
 
 
 # ===========================================================================
+# v4 — EMA bias filter sweep
+# Gate trend-capture direction by slow EMA: long capture only when price >
+# slow EMA (local uptrend), short only when price < slow EMA (downtrend).
+# Prevents taking short trends during up-trending markets and vice versa.
+# Sweep EMA periods: 50/100/200 candles (50-min / 100-min / 200-min bias).
+# ===========================================================================
+
+def _ema_set(name: str, ema_on: bool, slow_period: int = 50,
+            size: float = 0.90) -> Dict[str, Any]:
+    """Build a param set using s90_l10/confirm=3/force_close baseline + EMA bias."""
+    d: Dict[str, Any] = {
+        "name": name,
+        "use_sl": True,
+        "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04,
+        "trend_capture_size_pct": size,
+        "trend_lookback_candles": 10,
+        "ema_bias_filter": ema_on,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    }
+    if ema_on:
+        d["ema_slow_period"] = slow_period
+    return d
+
+
+XRP_EMA_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_EMA_CONFIG["param_sets"] = [
+    _ema_set("ema_off",    ema_on=False),                  # baseline
+    _ema_set("ema_50",     ema_on=True,  slow_period=50),   # ~50-min bias
+    _ema_set("ema_100",    ema_on=True,  slow_period=100),  # ~100-min bias
+    _ema_set("ema_200",    ema_on=True,  slow_period=200),  # ~3.5h bias (classic)
+    {   # grid-only control
+        "name": "ema_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_EMA_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_EMA_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_EMA_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_EMA_2Y_CONFIG["param_sets"] = [
+    _ema_set("2y_ema_off",  ema_on=False),
+    _ema_set("2y_ema_50",   ema_on=True, slow_period=50),
+    _ema_set("2y_ema_200",  ema_on=True, slow_period=200),
+    {   # grid-only 2y baseline
+        "name": "2y_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+
+# ===========================================================================
 # Entry point
 # ===========================================================================
 
@@ -1395,6 +1466,16 @@ if __name__ == "__main__":
         print("  v3 ATR dynamic trail \u2014 2-year walk-forward  (Feb 2024 \u2192 Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_ATR_2Y_CONFIG)
+    elif symbol in ("XRPEMA", "EMA"):
+        print("\n" + "=" * 60)
+        print("  v4 EMA bias filter — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_EMA_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v4 EMA bias filter — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_EMA_2Y_CONFIG)
     else:
         # Run both
         print("\n" + "=" * 60)
