@@ -35,8 +35,8 @@ jobs:
       - name: Unit tests
         run: python -m pytest --tb=short -q
 
-      - name: Backtest XRP/USDT — v6 RSI filter
-        run: python asBack/backtest_grid_bitunix.py XRPRSI
+      - name: Backtest XRP/USDT — v7 Volume confirmation
+        run: python asBack/backtest_grid_bitunix.py XRPVOL
 
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
