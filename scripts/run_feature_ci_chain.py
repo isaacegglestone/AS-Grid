@@ -131,6 +131,17 @@ def get_active_run_id() -> int:
     raise RuntimeError("No non-cancelled run found on branch")
 
 
+def cancel_run(run_id: int) -> None:
+    """Cancel a run (e.g. to dismiss a stuck Stage 2 EC2 approval)."""
+    subprocess.run(
+        ["gh", "api", "--method", "POST",
+         f"repos/{REPO}/actions/runs/{run_id}/cancel"],
+        capture_output=True, text=True,
+    )
+    log(f"Cancelled run {run_id} (dismissed Stage 2 EC2 approval wait)")
+    time.sleep(5)  # give GitHub a moment to update state
+
+
 # ---------------------------------------------------------------------------
 # Core: poll Stage 1 job until complete
 # ---------------------------------------------------------------------------
@@ -261,8 +272,7 @@ def main() -> None:
     # Wait for currently running CI (ATR) to finish Stage 1
     log("=== Waiting for current in-progress CI run (ATR) to finish Stage 1 ===")
     current_run_id = get_active_run_id()
-    wait_for_stage1(current_run_id)
-    extract_results(current_run_id, "ATR")
+    wait_for_stage1(current_run_id)    cancel_run(current_run_id)  # dismiss EC2 Stage 2 approval to free concurrency queue    extract_results(current_run_id, "ATR")
 
     # Iterate through remaining features
     started = False
@@ -280,6 +290,7 @@ def main() -> None:
         new_run_id = push_feature(feature)
         log(f"Waiting for {feature} CI run {new_run_id} Stage 1 to complete...")
         wait_for_stage1(new_run_id)
+        cancel_run(new_run_id)  # dismiss EC2 Stage 2 approval to free concurrency queue
         extract_results(new_run_id, feature)
 
     log("")
