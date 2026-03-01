@@ -36,6 +36,9 @@ jobs:
         run: python -m pytest --tb=short -q
 
       - name: Backtest XRP/USDT — v8 Market structure filter
+        # klines are read from asBack/klines_cache/XRPUSDT_15min.parquet (committed).
+        # To regenerate: run .github/workflows/cache-klines.yml manually, download
+        # the artifact to asBack/klines_cache/, and commit the parquet file.
         run: python asBack/backtest_grid_bitunix.py XRPMS
 
   # ---------------------------------------------------------------------------

@@ -1,0 +1,40 @@
+name: Generate klines cache
+
+# Run manually whenever the cached date range needs to be refreshed.
+# The artifact (klines-cache) is downloaded by the main CI workflow before
+# running backtests, replacing ~80 min of Bitunix API calls with an instant
+# parquet read.
+#
+# No secrets required — the Bitunix klines endpoint is public.
+on:
+    workflow_dispatch:
+
+jobs:
+    generate:
+        name: Fetch & cache klines parquet
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+                  cache: pip
+
+            - name: Install dependencies
+              run: python -m pip install -r requirements.txt
+
+            - name: Generate klines parquet cache
+              run: python scripts/generate_klines_cache.py
+
+            - name: Upload klines cache artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: klines-cache
+                  # Covers all parquet files under asBack/klines_cache/
+                  path: asBack/klines_cache/
+                  # 90 days is the max retention on GitHub Free plans.
+                  # Re-run this workflow before expiry if the date range changes.
+                  retention-days: 90
+                  if-no-files-found: error

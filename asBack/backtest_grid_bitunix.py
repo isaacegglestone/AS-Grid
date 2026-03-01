@@ -905,6 +905,27 @@ async def fetch_klines_as_df(
     *api_key* / *secret_key* are only required for private endpoints; the
     klines endpoint is public and they can be left as empty strings.
     """
+    # ------------------------------------------------------------------
+    # Disk cache: check for a pre-generated parquet file first.
+    # Files are stored as asBack/klines_cache/{symbol}_{interval}.parquet
+    # and cover the full available history; we slice to the requested range.
+    # Generate the cache file by running: scripts/generate_klines_cache.py
+    # or via the "Generate klines cache" GitHub Actions workflow.
+    # ------------------------------------------------------------------
+    _cache_dir = os.path.join(os.path.dirname(__file__), "klines_cache")
+    _cache_file = os.path.join(_cache_dir, f"{symbol}_{interval}.parquet")
+    if os.path.exists(_cache_file):
+        df_full = pd.read_parquet(_cache_file)
+        if df_full["open_time"].dt.tz is None:
+            df_full["open_time"] = df_full["open_time"].dt.tz_localize("UTC")
+        _start = start_dt if start_dt.tzinfo else start_dt.replace(tzinfo=timezone.utc)
+        _end   = end_dt   if end_dt.tzinfo   else end_dt.replace(tzinfo=timezone.utc)
+        df = df_full[(df_full["open_time"] >= _start) & (df_full["open_time"] < _end)].copy().reset_index(drop=True)
+        if len(df) > 0:
+            print(f"  → Cache hit: {len(df):,} candles for {symbol} {interval} ({start_dt.date()} → {end_dt.date()})")
+            return df
+        print(f"  → Cache file found but no rows in range — falling back to API")
+
     exchange = BitunixExchange(api_key=api_key, secret_key=secret_key)
 
     def _to_ms(dt: datetime) -> int:
