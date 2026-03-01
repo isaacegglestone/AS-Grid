@@ -50,11 +50,12 @@ declare -A FEATURE_NAMES=(
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 wait_for_current_run() {
-  # Poll the most recent *active or successful* run on the branch until it completes.
+  # Poll Stage 1 (GitHub runner) job for the most recent non-cancelled run.
+  # Stage 2 (EC2) requires manual approval — we don't wait for it.
   # Returns the run_id via stdout; all log() output goes to stderr (→ chain_run.log).
   local run_id
-  local status
-  local conclusion
+  local job_status
+  local job_conclusion
   local poll_count=0
 
   log "Fetching active run on ${BRANCH} (skipping cancelled)..." >&2
@@ -67,23 +68,42 @@ for r in runs:
         print(r['id'])
         break
 ")
-  log "Monitoring run ${run_id}..." >&2
+  log "Monitoring Stage 1 of run ${run_id}..." >&2
 
   while true; do
     poll_count=$((poll_count + 1))
-    local run_json
-    run_json=$(gh api "repos/${REPO}/actions/runs/${run_id}")
-    status=$(echo "$run_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
-    conclusion=$(echo "$run_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('conclusion') or 'none')")
+    local job_json
+    job_json=$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs")
+    # Find the Stage 1 job (GitHub runner) by matching name substring
+    job_status=$(echo "$job_json" | python3 -c "
+import sys, json
+jobs = json.load(sys.stdin)['jobs']
+for j in jobs:
+    if 'Stage 1' in j['name'] or 'GitHub runner' in j['name']:
+        print(j['status'])
+        break
+else:
+    print('queued')
+")
+    job_conclusion=$(echo "$job_json" | python3 -c "
+import sys, json
+jobs = json.load(sys.stdin)['jobs']
+for j in jobs:
+    if 'Stage 1' in j['name'] or 'GitHub runner' in j['name']:
+        print(j.get('conclusion') or 'none')
+        break
+else:
+    print('none')
+")
 
-    log "[${poll_count}] run=${run_id} ${status}/${conclusion}" >&2
+    log "[${poll_count}] run=${run_id} Stage1=${job_status}/${job_conclusion}" >&2
 
-    if [[ "$status" == "completed" ]]; then
-      if [[ "$conclusion" != "success" ]]; then
-        log "⚠️  Run ${run_id} concluded: ${conclusion} — stopping chain" >&2
+    if [[ "$job_status" == "completed" ]]; then
+      if [[ "$job_conclusion" != "success" ]]; then
+        log "⚠️  Stage 1 concluded: ${job_conclusion} — stopping chain" >&2
         exit 1
       fi
-      log "✅ Run ${run_id} succeeded" >&2
+      log "✅ Stage 1 succeeded (run ${run_id})" >&2
       echo "$run_id"
       return 0
     fi
