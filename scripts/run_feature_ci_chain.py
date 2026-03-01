@@ -122,13 +122,13 @@ def gh_run_stage1_logs(run_id: int) -> str:
 # Core: find latest non-cancelled run
 # ---------------------------------------------------------------------------
 
-def get_active_run_id() -> int:
-    """Return the run_id of the most recent non-cancelled run on BRANCH."""
+def get_active_run_id() -> int | None:
+    """Return the run_id of the most recent non-cancelled run on BRANCH, or None."""
     data = gh_api(f"actions/runs?branch={BRANCH}&per_page=20")
     for run in data["workflow_runs"]:
         if run.get("conclusion") != "cancelled":
             return run["id"]
-    raise RuntimeError("No non-cancelled run found on branch")
+    return None
 
 
 def cancel_run(run_id: int) -> None:
@@ -243,8 +243,31 @@ def push_feature(feature: str) -> int:
         content,
     )
     ci_yml.write_text(content)
-
     git("add", ".github/workflows/ci.yml")
+
+    # Idempotent: if ci.yml was already at this symbol there's nothing to commit.
+    # In that case the run is already in flight — just return its ID.
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"], cwd=REPO_ROOT
+    )
+    if staged.returncode == 0:
+        log(f"ci.yml already at {symbol} — finding existing in-flight run...")
+        data = gh_api(f"actions/runs?branch={BRANCH}&per_page=10")
+        for run in data["workflow_runs"]:
+            if run.get("conclusion") != "cancelled":
+                log(f"Resuming existing run: {run['id']}")
+                return run["id"]
+        # All runs cancelled — trigger a fresh one via an empty commit
+        log(f"No active run found — triggering new run with empty commit")
+        git("commit", "--allow-empty", "-m", f"ci: re-run {name} sweep ({symbol}) [retry]")
+        git("push")
+        log(f"Re-pushed {symbol} — waiting 20s for run to register...")
+        time.sleep(20)
+        data = gh_api(f"actions/runs?branch={BRANCH}&per_page=1")
+        new_run_id = data["workflow_runs"][0]["id"]
+        log(f"New run: {new_run_id}")
+        return new_run_id
+
     git("commit", "-m", f"ci: run {name} sweep ({symbol})")
     git("push")
     log(f"Pushed {symbol} — waiting 20s for run to register...")
@@ -269,12 +292,24 @@ def main() -> None:
     log(f"Feature CI chain starting from: {args.start}")
     SUMMARY_FILE.write_text(f"Feature CI chain started at {datetime.now()}\n")
 
-    # Wait for currently running CI (ATR) to finish Stage 1
-    log("=== Waiting for current in-progress CI run (ATR) to finish Stage 1 ===")
+    # Detect what ci.yml is currently running so we label it correctly
+    ci_yml = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+    ci_content = ci_yml.read_text()
+    m = re.search(r"backtest_grid_bitunix\.py (XRP[A-Z]+)", ci_content)
+    current_symbol = m.group(1) if m else "UNKNOWN"
+    symbol_to_feature = {v: k for k, v in FEATURE_SYMBOLS.items()}
+    symbol_to_feature["XRPATR"] = "ATR"
+    current_label = symbol_to_feature.get(current_symbol, "ATR")
+
+    # Wait for the current in-progress/pending CI run to finish Stage 1
+    log(f"=== Waiting for current CI run ({current_symbol} / {current_label}) to finish Stage 1 ===")
     current_run_id = get_active_run_id()
-    wait_for_stage1(current_run_id)
-    cancel_run(current_run_id)  # dismiss EC2 Stage 2 approval to free concurrency queue
-    extract_results(current_run_id, "ATR")
+    if current_run_id is not None:
+        wait_for_stage1(current_run_id)
+        cancel_run(current_run_id)  # dismiss EC2 Stage 2 approval to free concurrency queue
+        extract_results(current_run_id, current_label)
+    else:
+        log(f"No active run found — {current_label} results not available, proceeding to next feature")
 
     # Iterate through remaining features
     started = False
