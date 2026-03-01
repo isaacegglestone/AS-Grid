@@ -626,7 +626,7 @@ class BitunixExchange:
                     "high": float(item["high"]),
                     "low": float(item["low"]),
                     "close": float(item["close"]),
-                    "volume": float(item.get("vol") or item.get("volume") or 0),
+                    "volume": float(item.get("baseVol") or item.get("vol") or item.get("volume") or 0),
                 }
             )
         return candles
