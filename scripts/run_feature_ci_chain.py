@@ -89,13 +89,33 @@ def git(*args: str) -> str:
     return result.stdout.strip()
 
 
-def gh_run_view(run_id: int) -> str:
-    """Fetch run logs text (for results extraction)."""
+def gh_run_stage1_logs(run_id: int) -> str:
+    """
+    Fetch Stage 1 job logs by job ID — works while Stage 2 is pending/waiting.
+    """
+    try:
+        jobs_data = gh_api(f"actions/runs/{run_id}/jobs")
+        stage1 = next(
+            (j for j in jobs_data["jobs"]
+             if "Stage 1" in j["name"] or "GitHub runner" in j["name"]),
+            None,
+        )
+        if stage1:
+            job_id = stage1["id"]
+            result = subprocess.run(
+                ["gh", "api", f"repos/{REPO}/actions/jobs/{job_id}/logs"],
+                capture_output=True, text=True, cwd=REPO_ROOT,
+            )
+            if result.returncode == 0:
+                return result.stdout
+    except Exception:
+        pass
+    # Fallback to whole-run log (only works when run fully complete)
     result = subprocess.run(
         ["gh", "run", "view", str(run_id), "--repo", REPO, "--log"],
-        capture_output=True, text=True, cwd=REPO_ROOT
+        capture_output=True, text=True, cwd=REPO_ROOT,
     )
-    return result.stdout  # don't raise — may partially succeed
+    return result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +179,7 @@ def extract_results(run_id: int, feature: str) -> None:
     log_file = LOG_DIR / f"chain_ci_{feature}.log"
     log(f"Fetching run logs for {feature} (run {run_id}) → {log_file.name}")
 
-    raw_logs = gh_run_view(run_id)
+    raw_logs = gh_run_stage1_logs(run_id)
     relevant = [
         line for line in raw_logs.splitlines()
         if any(kw in line for kw in ("Strategy:", "return:", "Best strategy:", "OOS", "walk-forward"))
