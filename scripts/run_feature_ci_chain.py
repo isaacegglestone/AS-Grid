@@ -312,11 +312,19 @@ def main() -> None:
         log(f"No active run found — {current_label} results not available, proceeding to next feature")
 
     # Iterate through remaining features
+    # If the initial block already handled a feature (e.g. --start BB found an in-flight BB
+    # run, waited for it, and cancelled it), skip that feature in the loop to avoid
+    # triggering a second identical run.
+    already_handled = current_label if current_run_id is not None else None
+
     started = False
     for feature in FEATURES:
         if feature == args.start:
             started = True
         if not started:
+            continue
+        if feature == already_handled:
+            log(f"Skipping {feature} — already processed in initial wait block")
             continue
 
         log("")
