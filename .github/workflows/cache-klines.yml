@@ -1,40 +1,64 @@
 name: Generate klines cache
 
-# Run manually whenever the cached date range needs to be refreshed.
-# The artifact (klines-cache) is downloaded by the main CI workflow before
-# running backtests, replacing ~80 min of Bitunix API calls with an instant
-# parquet read.
+# Triggers:
+#   1. push — runs automatically on any branch push so it can be triggered
+#      from feature branches (workflow_dispatch only works from default branch).
+#      A guard step skips the expensive fetch once the parquet is committed.
+#   2. workflow_dispatch — manual re-run to refresh data (works once merged to main).
 #
 # No secrets required — the Bitunix klines endpoint is public.
 on:
-    workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths:
+      # Only re-run when the generator script or this workflow itself changes,
+      # OR when the parquet file is absent (checked inside the job below).
+      - "scripts/generate_klines_cache.py"
+      - ".github/workflows/cache-klines.yml"
+  workflow_dispatch:
 
 jobs:
-    generate:
-        name: Fetch & cache klines parquet
-        runs-on: ubuntu-latest
+  generate:
+    name: Fetch & cache klines parquet
+    runs-on: ubuntu-latest
 
-        steps:
-            - uses: actions/checkout@v4
+    steps:
+      - uses: actions/checkout@v4
 
-            - uses: actions/setup-python@v5
-              with:
-                  python-version: "3.11"
-                  cache: pip
+      # Skip the expensive fetch if the parquet is already committed to the repo.
+      # Once you commit the downloaded artifact, this workflow becomes a no-op
+      # on every push (unless you delete the file or change the generator).
+      - name: Check if parquet already committed
+        id: check
+        run: |
+          if [ -f "asBack/klines_cache/XRPUSDT_15min.parquet" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Parquet already committed — skipping fetch."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Parquet not found — will fetch from Bitunix API."
+          fi
 
-            - name: Install dependencies
-              run: python -m pip install -r requirements.txt
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.skip == 'false'
+        with:
+          python-version: "3.11"
+          cache: pip
 
-            - name: Generate klines parquet cache
-              run: python scripts/generate_klines_cache.py
+      - name: Install dependencies
+        if: steps.check.outputs.skip == 'false'
+        run: python -m pip install -r requirements.txt
 
-            - name: Upload klines cache artifact
-              uses: actions/upload-artifact@v4
-              with:
-                  name: klines-cache
-                  # Covers all parquet files under asBack/klines_cache/
-                  path: asBack/klines_cache/
-                  # 90 days is the max retention on GitHub Free plans.
-                  # Re-run this workflow before expiry if the date range changes.
-                  retention-days: 90
-                  if-no-files-found: error
+      - name: Generate klines parquet cache
+        if: steps.check.outputs.skip == 'false'
+        run: python scripts/generate_klines_cache.py
+
+      - name: Upload klines cache artifact
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: klines-cache
+          path: asBack/klines_cache/
+          # 90 days max on GitHub Free. Re-run workflow to refresh after expiry.
+          retention-days: 90
+          if-no-files-found: error
