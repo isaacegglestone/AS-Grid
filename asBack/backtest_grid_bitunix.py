@@ -341,6 +341,15 @@ class GridOrderBacktester:
             timestamp = row["open_time"]
             effective_order_value = self.config["order_value"] * self.leverage
 
+            # v12 Option C: grid vol scale — shrink grid order size on high-vol candles
+            # (volatile/trending market → smaller orders; quiet/ranging → normal size)
+            if self.config.get("grid_vol_scale", False) and "volume" in self.df.columns:
+                _vol_now = float(self.df["volume"].iloc[idx])
+                _vol_avg = float(self.vol_avg_series.iloc[idx])
+                if _vol_avg > 0 and _vol_now > 0:
+                    # Inversely proportional: floor at 35% of normal, never larger than normal
+                    effective_order_value *= max(0.35, min(1.0, _vol_avg / _vol_now))
+
             self._refresh_orders_if_needed(price, timestamp)
 
             # ------------------------------------------------------------------
@@ -1318,6 +1327,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "crash_cb_halt_candles",
                     "dd_halt", "max_drawdown", "dd_halt_candles",
                     "grid_notional_cap_pct",
+                    # v12 grid vol scale
+                    "grid_vol_scale",
                 ) if k in params}),
             }
         )
@@ -2183,6 +2194,125 @@ XRP_PM_2Y_CONFIG["param_sets"] = [
 ]
 
 
+# ===========================================================================
+# v12 — PM tuning sweep
+#
+# v10 PM mechanics are coded correctly but had near-zero effect because
+# the baseline runs ~14 trend entries in 6 months while the other ~386
+# trades are grid trades.  This sweep widens the conditions so PM
+# actually fires, and adds Option C which targets GRID order sizing:
+#
+# (A) RSI tight trail with looser threshold (ob: 80 → 70 or 75)
+#     Fires more often during trend positions — tighter trail on overbought.
+#     Tests: rsi_ob=70, rsi_ob=75
+#
+# (B) BB squeeze threshold widened (0.02 → 0.04 or 0.06)
+#     More candles count as 'just_broke' → more trend entries get boosted.
+#     Tests: threshold=0.04, threshold=0.06
+#
+# (C) Grid vol scale  (grid_vol_scale=True)
+#     Scales effective_order_value by min(1.0, vol_avg/vol_now) each candle.
+#     On high-vol candles (trending/crash) → smaller grid orders.
+#     On low-vol candles (ranging)         → normal grid orders.
+#     This directly targets the 95%+ of trades that are grid trades.
+# ===========================================================================
+
+def _pm_v2_set(
+    name: str,
+    rsi_trail: bool = False,
+    rsi_trail_ob: float = 80.0,
+    rsi_trail_os: float = 20.0,
+    bb_boost: bool = False,
+    bb_threshold: float = 0.02,
+    grid_vol_scale: bool = False,
+) -> Dict[str, Any]:
+    """v12 PM-tuning param set — exposes RSI threshold, BB threshold, and grid vol scale."""
+    return {
+        "name": name,
+        "use_sl": True,
+        "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.90,
+        "trend_lookback_candles": 10,
+        "adx_filter": True, "adx_min_trend": 25, "adx_grid_pause": 35,
+        "trend_reentry_fast": True,
+        # Option A — RSI tight trail (configurable thresholds)
+        "rsi_tight_trail":     rsi_trail,
+        "rsi_tight_trail_ob":  rsi_trail_ob,
+        "rsi_tight_trail_os":  rsi_trail_os,
+        "rsi_tight_trail_pct": 0.02,
+        # Option B — BB breakout boost (configurable squeeze detection threshold)
+        "bb_squeeze_boost":      bb_boost,
+        "bb_squeeze_threshold":  bb_threshold,
+        "bb_squeeze_boost_mult": 1.35,
+        # Option C — grid order size scaled inversely with volume
+        "grid_vol_scale": grid_vol_scale,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    }
+
+
+XRP_PM_V2_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V2_CONFIG["param_sets"] = [
+    # ── Baseline (control — matches pm_baseline from v10) ───────────────────
+    _pm_v2_set("pm2_baseline"),
+
+    # ── Option A only: RSI trail with looser trigger ─────────────────────────
+    _pm_v2_set("pm2_A_rsi70", rsi_trail=True, rsi_trail_ob=70.0, rsi_trail_os=30.0),
+    _pm_v2_set("pm2_A_rsi75", rsi_trail=True, rsi_trail_ob=75.0, rsi_trail_os=25.0),
+
+    # ── Option B only: BB squeeze threshold widened ───────────────────────────
+    _pm_v2_set("pm2_B_bb04",  bb_boost=True, bb_threshold=0.04),
+    _pm_v2_set("pm2_B_bb06",  bb_boost=True, bb_threshold=0.06),
+
+    # ── Option C only: grid order vol scale ───────────────────────────────────
+    _pm_v2_set("pm2_C_gridvol", grid_vol_scale=True),
+
+    # ── A + B combined ────────────────────────────────────────────────────────
+    _pm_v2_set("pm2_AB_rsi70_bb04",
+               rsi_trail=True, rsi_trail_ob=70.0, rsi_trail_os=30.0,
+               bb_boost=True, bb_threshold=0.04),
+
+    # ── A + B + C (all three) ─────────────────────────────────────────────────
+    _pm_v2_set("pm2_ABC",
+               rsi_trail=True, rsi_trail_ob=70.0, rsi_trail_os=30.0,
+               bb_boost=True, bb_threshold=0.04,
+               grid_vol_scale=True),
+
+    # ── Grid-only (no trend): structural floor ────────────────────────────────
+    {
+        "name": "pm2_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_PM_V2_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V2_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V2_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V2_2Y_CONFIG["param_sets"] = [
+    _pm_v2_set("2y_pm2_baseline"),
+    _pm_v2_set("2y_pm2_A_rsi70",  rsi_trail=True, rsi_trail_ob=70.0, rsi_trail_os=30.0),
+    _pm_v2_set("2y_pm2_A_rsi75",  rsi_trail=True, rsi_trail_ob=75.0, rsi_trail_os=25.0),
+    _pm_v2_set("2y_pm2_B_bb04",   bb_boost=True, bb_threshold=0.04),
+    _pm_v2_set("2y_pm2_B_bb06",   bb_boost=True, bb_threshold=0.06),
+    _pm_v2_set("2y_pm2_C_gridvol", grid_vol_scale=True),
+    _pm_v2_set("2y_pm2_AB_rsi70_bb04",
+               rsi_trail=True, rsi_trail_ob=70.0, rsi_trail_os=30.0,
+               bb_boost=True, bb_threshold=0.04),
+    _pm_v2_set("2y_pm2_ABC",
+               rsi_trail=True, rsi_trail_ob=70.0, rsi_trail_os=30.0,
+               bb_boost=True, bb_threshold=0.04,
+               grid_vol_scale=True),
+    {
+        "name": "2y_pm2_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
 
 # ===========================================================================
 # v11 — Crash protection sweep
@@ -2439,6 +2569,16 @@ if __name__ == "__main__":
         print("  v10 Indicator position management — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_2Y_CONFIG)
+    elif symbol in ("XRPPM2", "PM2"):
+        print("\n" + "=" * 60)
+        print("  v12 PM tuning (A/B/C) — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V2_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v12 PM tuning (A/B/C) — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V2_2Y_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
