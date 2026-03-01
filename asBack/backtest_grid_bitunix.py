@@ -415,6 +415,18 @@ class GridOrderBacktester:
             adx_allows_trend = (not adx_filter) or (current_adx >= adx_min_trend)
             adx_pauses_grid  = (adx_filter and adx_grid_pause is not None
                                 and current_adx >= adx_grid_pause)
+            # ── ADX-adaptive trailing stop ───────────────────────────────────
+            # When ADX is very strong (≥ adx_wide_trail_threshold), widen the
+            # trailing stop so the position can breathe through a minor pullback
+            # and keep riding the larger trend move.
+            adx_wide_trail_threshold = self.config.get("adx_wide_trail_threshold", 9999.0)
+            if adx_filter and current_adx >= adx_wide_trail_threshold:
+                trail_stop_pct = self.config.get("adx_wide_trail_pct", trail_stop_pct)
+            # ── Fast re-entry flag ───────────────────────────────────────────
+            # When True: immediately reset trend_mode on position close so the
+            # confirmation counter can re-fire and capture the next leg without
+            # waiting for the full 30-candle cooldown.
+            trend_reentry_fast = self.config.get("trend_reentry_fast", False)
             # ── EMA bias filter ─────────────────────────────────────────────
             # ema_bias_filter=True: long capture only when price >= slow EMA,
             # short capture only when price <= slow EMA.  Avoids counter-trend trades.
@@ -515,6 +527,11 @@ class GridOrderBacktester:
                             print(f"\U0001f3af [{timestamp}] Trend LONG closed "
                                   f"entry={tp['entry']:.4f} exit={price:.4f} pnl={net_pnl:+.2f}")
                             self.trend_position = None
+                            if trend_reentry_fast:
+                                # Reset mode so the confirmation counter can re-fire immediately
+                                self.trend_mode = None
+                                self.trend_confirm_counter = 0
+                                self.trend_pending_dir = None
                     else:  # short
                         if price < tp["peak"]:
                             tp["peak"] = price
@@ -533,6 +550,10 @@ class GridOrderBacktester:
                             print(f"\U0001f3af [{timestamp}] Trend SHORT closed "
                                   f"entry={tp['entry']:.4f} exit={price:.4f} pnl={net_pnl:+.2f}")
                             self.trend_position = None
+                            if trend_reentry_fast:
+                                self.trend_mode = None
+                                self.trend_confirm_counter = 0
+                                self.trend_pending_dir = None
 
                 # ── Confirmation counter ────────────────────────────────────
                 # Require velocity to remain above threshold for confirm_candles
@@ -1105,6 +1126,9 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "vol_filter", "vol_period", "vol_multiplier",
                     # Market structure params
                     "ms_filter", "ms_lookback",
+                    # v9 re-entry + adaptive trail params
+                    "trend_reentry_fast",
+                    "adx_wide_trail_threshold", "adx_wide_trail_pct",
                 ) if k in params}),
             }
         )
@@ -1811,6 +1835,83 @@ XRP_MS_2Y_CONFIG["param_sets"] = [
 
 
 # ===========================================================================
+# v9 — Fast re-entry + ADX-adaptive trailing stop
+#
+# Two combined improvements to maximise gains during extended bull runs:
+#
+#   trend_reentry_fast=True
+#       After a trailing stop fires, immediately reset trend_mode so the
+#       confirmation counter can re-fire on the next velocity signal.
+#       Replaces the 30-candle "quiet cool-down" with a 3-candle re-confirmation
+#       window, capturing additional trend legs in multi-day breakouts.
+#
+#   adx_wide_trail_threshold + adx_wide_trail_pct
+#       When ADX ≥ threshold (very strong trend), widen the trailing stop so
+#       the position can breathe through minor pullbacks and ride the larger move.
+#       Defaults: threshold=40, wide_pct=0.06 (6% vs 4% default).
+# ===========================================================================
+
+def _re_set(name: str, reentry: bool = False,
+            wide_trail_threshold: float = 9999.0,
+            wide_trail_pct: float = 0.06,
+            size: float = 0.90) -> Dict[str, Any]:
+    """ADX t25/gp35 baseline with optional fast re-entry and wide ADX trail."""
+    return {
+        "name": name,
+        "use_sl": True,
+        "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": size,
+        "trend_lookback_candles": 10,
+        "adx_filter": True, "adx_min_trend": 25, "adx_grid_pause": 35,
+        "trend_reentry_fast": reentry,
+        "adx_wide_trail_threshold": wide_trail_threshold,
+        "adx_wide_trail_pct": wide_trail_pct,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    }
+
+
+XRP_REENTRY_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_REENTRY_CONFIG["param_sets"] = [
+    _re_set("re_baseline",           reentry=False),              # ADX t25/gp35, no changes (control)
+    _re_set("re_reentry",            reentry=True),               # fast re-entry only
+    _re_set("re_wide_trail",         reentry=False,               # wide trail only (ADX≥40 → 6%)
+            wide_trail_threshold=40, wide_trail_pct=0.06),
+    _re_set("re_wide_trail_8",       reentry=False,               # wide trail only (ADX≥40 → 8%)
+            wide_trail_threshold=40, wide_trail_pct=0.08),
+    _re_set("re_reentry_wide_trail", reentry=True,                # combined: reentry + wide trail 6%
+            wide_trail_threshold=40, wide_trail_pct=0.06),
+    _re_set("re_reentry_wider_trail",reentry=True,                # combined: reentry + wide trail 8%
+            wide_trail_threshold=40, wide_trail_pct=0.08),
+    {   # grid-only control
+        "name": "re_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_REENTRY_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_REENTRY_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_REENTRY_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_REENTRY_2Y_CONFIG["param_sets"] = [
+    _re_set("2y_re_baseline",           reentry=False),
+    _re_set("2y_re_reentry",            reentry=True),
+    _re_set("2y_re_reentry_wide",       reentry=True,
+            wide_trail_threshold=40, wide_trail_pct=0.06),
+    _re_set("2y_re_reentry_wider",      reentry=True,
+            wide_trail_threshold=40, wide_trail_pct=0.08),
+    {   # grid-only 2y baseline
+        "name": "2y_re_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+
+# ===========================================================================
 # Entry point
 # ===========================================================================
 
@@ -1913,6 +2014,16 @@ if __name__ == "__main__":
         print("  v7 Volume confirmation — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_VOL_2Y_CONFIG)
+    elif symbol in ("XRPRE", "RE"):
+        print("\n" + "=" * 60)
+        print("  v9 Fast re-entry + ADX-adaptive trail — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_REENTRY_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v9 Fast re-entry + ADX-adaptive trail — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_REENTRY_2Y_CONFIG)
     else:
         # Run both
         print("\n" + "=" * 60)

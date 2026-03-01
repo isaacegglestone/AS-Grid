@@ -36,7 +36,7 @@ REPO = "isaacegglestone/AS-Grid"
 BRANCH = "feat/bitunix-exchange-adapter"
 POLL_INTERVAL = 90  # seconds between GitHub API polls
 
-FEATURES = ["EMA", "BB", "RSI", "VOL", "MS"]
+FEATURES = ["EMA", "BB", "RSI", "VOL", "MS", "RE"]
 
 FEATURE_SYMBOLS = {
     "EMA": "XRPEMA",
@@ -44,6 +44,7 @@ FEATURE_SYMBOLS = {
     "RSI": "XRPRSI",
     "VOL": "XRPVOL",
     "MS":  "XRPMS",
+    "RE":  "XRPRE",
 }
 
 FEATURE_NAMES = {
@@ -52,6 +53,7 @@ FEATURE_NAMES = {
     "RSI": "v6 RSI filter",
     "VOL": "v7 Volume confirmation",
     "MS":  "v8 Market structure filter",
+    "RE":  "v9 Fast re-entry + adaptive trail",
 }
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
