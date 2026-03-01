@@ -79,6 +79,10 @@ class GridOrderBacktester:
         # Trend capture position: {"side", "entry", "qty", "margin", "peak"}
         self.trend_position: Optional[Dict] = None
 
+        # Crash protection state
+        self.crash_halt_counter: int = 0   # candles remaining in velocity CB halt
+        self.dd_halt_counter: int = 0      # candles remaining in DD halt/resume pause
+
         # Pre-compute ADX series for the full dataset (used by ADX filter)
         self.adx_series = self._compute_adx(
             self.df,
@@ -338,6 +342,69 @@ class GridOrderBacktester:
             effective_order_value = self.config["order_value"] * self.leverage
 
             self._refresh_orders_if_needed(price, timestamp)
+
+            # ------------------------------------------------------------------
+            # Crash protection counters — decrement each candle
+            # ------------------------------------------------------------------
+            if self.crash_halt_counter > 0:
+                self.crash_halt_counter -= 1
+            if self.dd_halt_counter > 0:
+                self.dd_halt_counter -= 1
+            halt_grid_longs = self.crash_halt_counter > 0   # velocity CB: blocks new long entries only
+            halt_all        = self.dd_halt_counter > 0      # DD halt: blocks all new entries
+
+            # ------------------------------------------------------------------
+            # Velocity circuit breaker (crash_cb)
+            # Fires when price drops >= crash_cb_drop_pct in crash_cb_lookback_candles.
+            # Immediately closes all open long grid positions + any active trend long.
+            # Halts new long entries for crash_cb_halt_candles.
+            # Short grid + short trend captures intentionally unblocked (can profit).
+            # ------------------------------------------------------------------
+            crash_cb          = self.config.get("crash_cb", False)
+            crash_cb_drop_pct = self.config.get("crash_cb_drop_pct", 0.10)
+            crash_cb_lookback = self.config.get("crash_cb_lookback_candles", 8)
+            crash_cb_halt_len = self.config.get("crash_cb_halt_candles", 48)
+
+            if (crash_cb and self.crash_halt_counter == 0
+                    and len(self.equity_curve) >= crash_cb_lookback):
+                cb_past_price = self.equity_curve[-crash_cb_lookback][1]
+                cb_drop = (price - cb_past_price) / cb_past_price
+                if cb_drop <= -crash_cb_drop_pct:
+                    print(
+                        f"\U0001f6a8 [{timestamp}] Crash CB: -{abs(cb_drop)*100:.1f}%"
+                        f" in {crash_cb_lookback} candles \u2014 closing"
+                        f" {len(self.long_positions)} longs,"
+                        f" halting {crash_cb_halt_len} candles"
+                    )
+                    for ep, qty, margin_req, _tp, _sl in list(self.long_positions):
+                        fee_cost  = qty * price * (self.fee / 2)
+                        gross_pnl = (price - ep) * qty
+                        net_pnl   = gross_pnl - fee_cost
+                        self.balance += margin_req + net_pnl
+                        self.trade_history.append((
+                            timestamp, "CRASH_CB_CLOSE", price, qty, "LONG",
+                            net_pnl, fee_cost, gross_pnl, 0.0, self._equity(price),
+                        ))
+                    self.long_positions.clear()
+                    self.last_long_price = price
+                    if self.trend_position and self.trend_position["side"] == "long":
+                        tp_p = self.trend_position
+                        fee_cost  = tp_p["qty"] * price * (self.fee / 2)
+                        gross_pnl = (price - tp_p["entry"]) * tp_p["qty"]
+                        net_pnl   = gross_pnl - fee_cost
+                        self.balance += tp_p["margin"] + net_pnl
+                        self.trade_history.append((
+                            timestamp, "CRASH_CB_TREND_CLOSE", price, tp_p["qty"],
+                            "TREND_LONG", net_pnl, fee_cost, gross_pnl,
+                            0.0, self._equity(price),
+                        ))
+                        self.trend_position = None
+                        if self.config.get("trend_reentry_fast", False):
+                            self.trend_mode = None
+                            self.trend_confirm_counter = 0
+                            self.trend_pending_dir = None
+                    self.crash_halt_counter = crash_cb_halt_len
+                    halt_grid_longs = True
 
             # Per-side caps: for a hedge strategy use max_positions_per_side=1
             max_per_side = self.config.get("max_positions_per_side", self.config["max_positions"])
@@ -628,7 +695,9 @@ class GridOrderBacktester:
                         print(f"\U0001f4c8 [{timestamp}] Trend UP confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} short(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_long and bb_allows_trend and rsi_allows_long and vol_confirms and ms_allows_long:
+                    if (trend_capture and self.trend_position is None and not halt_all
+                            and adx_allows_trend and ema_bias_long and bb_allows_trend
+                            and rsi_allows_long and vol_confirms and ms_allows_long):
                         if velocity >= cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * used_cap_size_pct * bb_size_boost
@@ -670,7 +739,9 @@ class GridOrderBacktester:
                         print(f"\U0001f4c9 [{timestamp}] Trend DOWN confirmed "
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} long(s)")
-                    if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_short and bb_allows_trend and rsi_allows_short and vol_confirms and ms_allows_short:
+                    if (trend_capture and self.trend_position is None and not halt_all
+                            and adx_allows_trend and ema_bias_short and bb_allows_trend
+                            and rsi_allows_short and vol_confirms and ms_allows_short):
                         if velocity <= -cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * used_cap_size_pct * bb_size_boost
@@ -746,7 +817,15 @@ class GridOrderBacktester:
                         break
                 else:
                     # 2. Open new entry only if no close happened this candle
-                    if not long_at_cap and not long_loss_tripped and not long_blocked_by_trend:
+                    _gnc_pct = self.config.get("grid_notional_cap_pct", None)
+                    long_notional_capped = (
+                        _gnc_pct is not None and
+                        sum(m for _, _, m, _, _ in self.long_positions)
+                        >= _gnc_pct * self._equity(price)
+                    )
+                    if (not long_at_cap and not long_loss_tripped
+                            and not long_blocked_by_trend and not long_notional_capped
+                            and not halt_grid_longs and not halt_all):
                         buy_price = self.last_long_price * (1 - self.long_settings["down_spacing"])
                         if price <= buy_price:
                             qty = effective_order_value / price
@@ -801,7 +880,8 @@ class GridOrderBacktester:
                         self.last_short_price = price  # re-anchor after stop
                         break
                 else:
-                    if not short_at_cap and not short_loss_tripped and not short_blocked_by_trend:
+                    if (not short_at_cap and not short_loss_tripped
+                            and not short_blocked_by_trend and not halt_all):
                         sell_price = self.last_short_price * (1 + self.short_settings["up_spacing"])
                         if price >= sell_price:
                             qty = effective_order_value / price
@@ -836,9 +916,59 @@ class GridOrderBacktester:
                 timestamp, price, equity, realized_pnl_so_far, unrealized_pnl
             ))
 
-            if drawdown >= self.max_drawdown:
-                print(f"⚠️ Max drawdown {drawdown * 100:.2f}% reached – stopping")
-                break
+            dd_halt         = self.config.get("dd_halt", False)
+            dd_halt_candles = self.config.get("dd_halt_candles", 96)
+
+            if drawdown >= self.max_drawdown and self.dd_halt_counter == 0:
+                if dd_halt:
+                    print(
+                        f"\u26a0\ufe0f  [{timestamp}] DD halt FIRED at"
+                        f" {drawdown*100:.1f}% drawdown \u2014 flattening all,"
+                        f" pausing {dd_halt_candles} candles"
+                    )
+                    for ep, qty, margin_req, _tp, _sl in list(self.long_positions):
+                        fee_cost  = qty * price * (self.fee / 2)
+                        gross_pnl = (price - ep) * qty
+                        net_pnl   = gross_pnl - fee_cost
+                        self.balance += margin_req + net_pnl
+                        self.trade_history.append((
+                            timestamp, "DD_HALT_CLOSE", price, qty, "LONG",
+                            net_pnl, fee_cost, gross_pnl, 0.0, self._equity(price),
+                        ))
+                    self.long_positions.clear()
+                    for ep, qty, margin_req, _tp, _sl in list(self.short_positions):
+                        fee_cost  = qty * price * (self.fee / 2)
+                        gross_pnl = (ep - price) * qty
+                        net_pnl   = gross_pnl - fee_cost
+                        self.balance += margin_req + net_pnl
+                        self.trade_history.append((
+                            timestamp, "DD_HALT_CLOSE", price, qty, "SHORT",
+                            net_pnl, fee_cost, gross_pnl, 0.0, self._equity(price),
+                        ))
+                    self.short_positions.clear()
+                    if self.trend_position:
+                        tp_p = self.trend_position
+                        side = tp_p["side"]
+                        gross_pnl = (
+                            (price - tp_p["entry"]) if side == "long"
+                            else (tp_p["entry"] - price)
+                        ) * tp_p["qty"]
+                        fee_cost = tp_p["qty"] * price * (self.fee / 2)
+                        net_pnl  = gross_pnl - fee_cost
+                        self.balance += tp_p["margin"] + net_pnl
+                        self.trade_history.append((
+                            timestamp, "DD_HALT_CLOSE", price, tp_p["qty"],
+                            f"TREND_{side.upper()}",
+                            net_pnl, fee_cost, gross_pnl, 0.0, self._equity(price),
+                        ))
+                        self.trend_position = None
+                    self.last_long_price  = price
+                    self.last_short_price = price
+                    self.max_equity = self._equity(price)   # reset peak — prevents immediate re-trigger
+                    self.dd_halt_counter = dd_halt_candles
+                else:
+                    print(f"\u26a0\ufe0f Max drawdown {drawdown * 100:.2f}% reached \u2013 stopping")
+                    break
 
         return self.summary(price)
 
@@ -1179,6 +1309,15 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     # v9 re-entry + adaptive trail params
                     "trend_reentry_fast",
                     "adx_wide_trail_threshold", "adx_wide_trail_pct",
+                    # v10 position management params
+                    "rsi_tight_trail", "rsi_tight_trail_ob", "rsi_tight_trail_os",
+                    "rsi_tight_trail_pct",
+                    "vol_reentry_scale", "vol_reentry_high_mult", "vol_reentry_low_pct",
+                    # v11 crash protection params
+                    "crash_cb", "crash_cb_drop_pct", "crash_cb_lookback_candles",
+                    "crash_cb_halt_candles",
+                    "dd_halt", "max_drawdown", "dd_halt_candles",
+                    "grid_notional_cap_pct",
                 ) if k in params}),
             }
         )
@@ -2044,6 +2183,139 @@ XRP_PM_2Y_CONFIG["param_sets"] = [
 ]
 
 
+
+# ===========================================================================
+# v11 — Crash protection sweep
+#
+# Three independent mechanisms to limit losses in flash-crash events
+# (LUNA/Terra May 2022, FTX Nov 2022, XRP SEC lawsuit Dec 2020, etc.):
+#
+# (A) Velocity circuit breaker  (crash_cb=True)
+#     Fires when price drops >= crash_cb_drop_pct in crash_cb_lookback_candles.
+#     Immediately closes all open long grid positions + any active trend long.
+#     Halts new long entries for crash_cb_halt_candles.
+#     Short side is intentionally unblocked — it can profit from the drop.
+#
+# (B) Drawdown halt + resume  (dd_halt=True)
+#     Replaces the permanent hard-stop.  When equity falls >= max_drawdown
+#     from peak, flatten ALL positions and pause all trading for
+#     dd_halt_candles.  After the cooldown the bot resumes normally.
+#
+# (C) Grid notional cap  (grid_notional_cap_pct)
+#     Limits total long-side grid margin to X% of current equity.
+#     Prevents cascading ladder-fills ("buying a falling knife") during
+#     sustained one-directional drops.
+#
+# Baseline is the v9 re_reentry winner (ADX t25/gp35 + fast re-entry).
+# Run on the 3.9-year MAX window (Apr 2022 → Feb 2026) which covers:
+#   May 2022 crash (LUNA/Terra collapse) — XRP down ~60%
+#   Nov 2022 crash (FTX collapse)        — XRP down ~45%
+#   2023 sideways grind + 2024–2025 bull run.
+# Also run on the 2Y window for comparison with earlier features.
+# Once the extended Binance cache is available (Oct 2019), re-run on
+# the full 6.5-year dataset to test against the 2020 SEC lawsuit crash.
+# ===========================================================================
+
+def _cb_set(
+    name: str,
+    crash_cb: bool = False,
+    cb_drop: float = 0.10,
+    cb_lookback: int = 8,
+    cb_halt: int = 48,
+    dd_halt: bool = False,
+    dd_halt_pct: float = 0.15,
+    dd_halt_candles: int = 96,
+    grid_cap: Optional[float] = None,
+) -> Dict[str, Any]:
+    """v11 crash-protection param set — inherits v9 re_reentry baseline."""
+    d: Dict[str, Any] = {
+        "name": name,
+        "use_sl": True,
+        "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.90,
+        "trend_lookback_candles": 10,
+        "adx_filter": True, "adx_min_trend": 25, "adx_grid_pause": 35,
+        "trend_reentry_fast": True,
+        # (A) Velocity circuit breaker
+        "crash_cb":                  crash_cb,
+        "crash_cb_drop_pct":         cb_drop,
+        "crash_cb_lookback_candles": cb_lookback,
+        "crash_cb_halt_candles":     cb_halt,
+        # (B) Drawdown halt + resume: max_drawdown doubles as the halt threshold
+        "dd_halt":        dd_halt,
+        "max_drawdown":   dd_halt_pct if dd_halt else 0.9,  # 0.9 = effectively no hard-stop
+        "dd_halt_candles": dd_halt_candles,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    }
+    # (C) Grid notional cap
+    if grid_cap is not None:
+        d["grid_notional_cap_pct"] = grid_cap
+    return d
+
+
+XRP_CB_CONFIG: Dict[str, Any] = dict(XRP_MAX_CONFIG)
+XRP_CB_CONFIG["param_sets"] = [
+    # ── Baseline (no crash protection) ──────────────────────────────────────
+    _cb_set("cb_baseline"),
+
+    # ── (A) Velocity CB only: 3 variants ────────────────────────────────────
+    # A1: 8-candle window (2 h), -10% drop, 48-candle halt (12 h)
+    _cb_set("cb_vel_8_10_48",  crash_cb=True, cb_lookback=8,  cb_drop=0.10, cb_halt=48),
+    # A2: 4-candle window (1 h), -8% drop,  24-candle halt (6 h) — snappier
+    _cb_set("cb_vel_4_8_24",   crash_cb=True, cb_lookback=4,  cb_drop=0.08, cb_halt=24),
+    # A3: 8-candle window (2 h), -12% drop, 96-candle halt (24 h) — conservative
+    _cb_set("cb_vel_8_12_96",  crash_cb=True, cb_lookback=8,  cb_drop=0.12, cb_halt=96),
+
+    # ── (B) DD halt + resume only: 2 variants ───────────────────────────────
+    # B1: halt at 15% drawdown, 96-candle resume (24 h)
+    _cb_set("cb_dd_15_96",  dd_halt=True, dd_halt_pct=0.15, dd_halt_candles=96),
+    # B2: halt at 20% drawdown, 48-candle resume (12 h) — shallower trigger, faster resume
+    _cb_set("cb_dd_20_48",  dd_halt=True, dd_halt_pct=0.20, dd_halt_candles=48),
+
+    # ── (C) Grid notional cap only: 2 variants ──────────────────────────────
+    # C1: limit long grid exposure to 25% of equity
+    _cb_set("cb_cap_25", grid_cap=0.25),
+    # C2: 40% cap — looser but still bounded
+    _cb_set("cb_cap_40", grid_cap=0.40),
+
+    # ── Combined: A1 + B1 + C1 ──────────────────────────────────────────────
+    _cb_set("cb_combined",
+            crash_cb=True, cb_lookback=8, cb_drop=0.10, cb_halt=48,
+            dd_halt=True,  dd_halt_pct=0.15, dd_halt_candles=96,
+            grid_cap=0.25),
+
+    # ── Grid-only (no trend): structural floor ───────────────────────────────
+    {
+        "name": "cb_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_CB_2Y_CONFIG: Dict[str, Any] = dict(XRP_CB_CONFIG)
+XRP_CB_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_CB_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_CB_2Y_CONFIG["param_sets"] = [
+    _cb_set("2y_cb_baseline"),
+    _cb_set("2y_cb_vel_8_10_48", crash_cb=True, cb_lookback=8, cb_drop=0.10, cb_halt=48),
+    _cb_set("2y_cb_dd_15_96",    dd_halt=True,  dd_halt_pct=0.15, dd_halt_candles=96),
+    _cb_set("2y_cb_cap_25",      grid_cap=0.25),
+    _cb_set("2y_cb_combined",
+            crash_cb=True, cb_lookback=8, cb_drop=0.10, cb_halt=48,
+            dd_halt=True,  dd_halt_pct=0.15, dd_halt_candles=96,
+            grid_cap=0.25),
+    {
+        "name": "2y_cb_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+
 # ===========================================================================
 # Entry point
 # ===========================================================================
@@ -2167,6 +2439,16 @@ if __name__ == "__main__":
         print("  v10 Indicator position management — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_2Y_CONFIG)
+    elif symbol in ("XRPCB", "CB"):
+        print("\n" + "=" * 60)
+        print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_CB_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v11 Crash protection — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_CB_2Y_CONFIG)
     else:
         # Run both
         print("\n" + "=" * 60)
