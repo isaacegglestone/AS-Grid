@@ -1847,6 +1847,12 @@ if __name__ == "__main__":
         print("\n" + "=" * 60)
         print("  v2 ADX filter sweep \u2014 6-month OOS  (Aug 2025 \u2192 Feb 2026)")
         print("=" * 60)
+        grid_search_backtest(XRP_ADX_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v2 ADX filter sweep \u2014 2-year walk-forward  (Feb 2024 \u2192 Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_ADX_2Y_CONFIG)
     elif symbol in ("XRPMS", "MS"):
         print("\n" + "=" * 60)
         print("  v8 Market structure filter — 6-month OOS  (Aug 2025 → Feb 2026)")
@@ -1857,12 +1863,6 @@ if __name__ == "__main__":
         print("  v8 Market structure filter — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_MS_2Y_CONFIG)
-        grid_search_backtest(XRP_ADX_CONFIG)
-
-        print("\n" + "=" * 60)
-        print("  v2 ADX filter sweep \u2014 2-year walk-forward  (Feb 2024 \u2192 Feb 2026)")
-        print("=" * 60)
-        grid_search_backtest(XRP_ADX_2Y_CONFIG)
     elif symbol in ("XRPATR", "ATR"):
         print("\n" + "=" * 60)
         print("  v3 ATR dynamic trail \u2014 6-month OOS  (Aug 2025 \u2192 Feb 2026)")
