@@ -46,6 +46,12 @@ DATASETS = [
         datetime(2022, 4, 20),   # earliest date used (XRP_MAX_CONFIG)
         datetime(2026, 2, 28),   # latest date used   (all 2Y + MAX configs)
     ),
+    (
+        "XRPUSDT",
+        "1min",
+        datetime(2022, 4, 20),   # same range — supports any 1min-based configs
+        datetime(2026, 2, 28),
+    ),
 ]
 
 

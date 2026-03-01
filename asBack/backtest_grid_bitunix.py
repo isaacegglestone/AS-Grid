@@ -470,6 +470,19 @@ class GridOrderBacktester:
                 ((not rsi_filter) or (current_rsi > rsi_oversold)) and
                 ((not rsi_momentum) or (current_rsi < 50.0))
             )
+            # ── RSI exhaustion trail tightener (position management v10) ────
+            # Shrinks trail_stop_pct when the existing trend position is in
+            # over-extended territory (RSI ≥ ob for longs, ≤ os for shorts).
+            # Locks in more profit during blow-off tops / capitulation lows.
+            rsi_tight_trail     = self.config.get("rsi_tight_trail", False)
+            rsi_tight_trail_ob  = self.config.get("rsi_tight_trail_ob", 80.0)
+            rsi_tight_trail_os  = self.config.get("rsi_tight_trail_os", 20.0)
+            rsi_tight_trail_pct = self.config.get("rsi_tight_trail_pct", 0.02)
+            if rsi_tight_trail and self.trend_position is not None:
+                rsi_pm = float(self.rsi_series.iloc[idx])
+                if (self.trend_position["side"] == "long"  and rsi_pm >= rsi_tight_trail_ob) or \
+                   (self.trend_position["side"] == "short" and rsi_pm <= rsi_tight_trail_os):
+                    trail_stop_pct = rsi_tight_trail_pct
             # ── Volume confirmation filter ──────────────────────────────────
             # vol_filter=True: only fire trend-capture when the current candle's
             # volume exceeds vol_multiplier × the rolling average volume.
@@ -482,6 +495,22 @@ class GridOrderBacktester:
                 vol_confirms = vol_now >= vol_mult * vol_avg_now
             else:
                 vol_confirms = True
+            # ── Volume-scaled re-entry size (position management v10) ───────
+            # When vol_reentry_scale=True, size each trend capture at full
+            # cap_size_pct only when volume confirms conviction; otherwise
+            # uses vol_reentry_low_pct to limit exposure on weak breakouts.
+            vol_reentry_scale     = self.config.get("vol_reentry_scale", False)
+            vol_reentry_high_mult = self.config.get("vol_reentry_high_mult", 1.5)
+            vol_reentry_low_pct   = self.config.get("vol_reentry_low_pct", 0.45)
+            if vol_reentry_scale and "volume" in self.df.columns:
+                vol_now_pm  = float(self.df["volume"].iloc[idx])
+                vol_avg_pm  = float(self.vol_avg_series.iloc[idx])
+                used_cap_size_pct = (
+                    cap_size_pct if vol_now_pm >= vol_reentry_high_mult * vol_avg_pm
+                    else vol_reentry_low_pct
+                )
+            else:
+                used_cap_size_pct = cap_size_pct
             # ── Market structure filter ─────────────────────────────────────
             # ms_filter=True: only fire trend-capture when the current close
             # breaks above the recent swing high (bullish HH — allow long) or
@@ -602,7 +631,7 @@ class GridOrderBacktester:
                     if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_long and bb_allows_trend and rsi_allows_long and vol_confirms and ms_allows_long:
                         if velocity >= cap_vel_threshold:
                             current_equity = self._equity(price)
-                            cap_margin = current_equity * cap_size_pct * bb_size_boost
+                            cap_margin = current_equity * used_cap_size_pct * bb_size_boost
                             # Respect the s100 hard cap (can't deploy more than 90% balance)
                             cap_margin = min(cap_margin, current_equity * 0.90)
                             cap_qty = (cap_margin * self.leverage) / price
@@ -644,7 +673,7 @@ class GridOrderBacktester:
                     if trend_capture and self.trend_position is None and adx_allows_trend and ema_bias_short and bb_allows_trend and rsi_allows_short and vol_confirms and ms_allows_short:
                         if velocity <= -cap_vel_threshold:
                             current_equity = self._equity(price)
-                            cap_margin = current_equity * cap_size_pct * bb_size_boost
+                            cap_margin = current_equity * used_cap_size_pct * bb_size_boost
                             cap_margin = min(cap_margin, current_equity * 0.90)
                             cap_qty = (cap_margin * self.leverage) / price
                             fee_cost = cap_qty * price * (self.fee / 2)
@@ -1933,6 +1962,89 @@ XRP_REENTRY_2Y_CONFIG["param_sets"] = [
 
 
 # ===========================================================================
+# v10 — Indicator-based position management
+#
+# Instead of using indicators as entry gates (which proved inferior to _off
+# in v5–v8), we use them to dynamically manage trend position exits and sizing:
+#
+#   rsi_tight_trail=True  (RSI exhaustion → tighten trail)
+#       When RSI ≥ 80 on a long or ≤ 20 on a short, shrink trail from 4% → 2%.
+#       Locks in gains faster during blow-off tops / capitulation lows.
+#
+#   vol_reentry_scale=True  (volume-scaled re-entry size)
+#       When re-entering after a trail stop, size at 90% only if volume ≥ 1.5×
+#       average; otherwise fall back to 45% to reduce low-conviction risk.
+#
+#   bb_squeeze_boost=True  (BB breakout → position size boost)
+#       When BB expands from squeeze on entry candle, boost to 1.35× normal size.
+#       Combined with re_reentry for maximum capture on genuine breakouts.
+# ===========================================================================
+
+def _pm_set(name: str, rsi_trail: bool = False, vol_scale: bool = False,
+            bb_boost: bool = False, bb_boost_mult: float = 1.35) -> Dict[str, Any]:
+    """v10 position-management param set — inherits re_reentry baseline."""
+    return {
+        "name": name,
+        "use_sl": True,
+        "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": 0.90,
+        "trend_lookback_candles": 10,
+        "adx_filter": True, "adx_min_trend": 25, "adx_grid_pause": 35,
+        "trend_reentry_fast": True,
+        # RSI tight trail
+        "rsi_tight_trail":     rsi_trail,
+        "rsi_tight_trail_ob":  80.0,
+        "rsi_tight_trail_os":  20.0,
+        "rsi_tight_trail_pct": 0.02,
+        # Volume-scaled re-entry
+        "vol_reentry_scale":     vol_scale,
+        "vol_reentry_high_mult": 1.5,
+        "vol_reentry_low_pct":   0.45,
+        # BB breakout size boost
+        "bb_squeeze_boost":      bb_boost,
+        "bb_squeeze_threshold":  0.02,
+        "bb_squeeze_boost_mult": bb_boost_mult,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    }
+
+
+XRP_PM_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_CONFIG["param_sets"] = [
+    _pm_set("pm_baseline"),                                               # re_reentry control
+    _pm_set("pm_rsi_trail",  rsi_trail=True),                            # RSI → tight trail
+    _pm_set("pm_vol_scale",  vol_scale=True),                            # volume → scaled size
+    _pm_set("pm_bb_boost",   bb_boost=True),                             # BB → 1.35× boost
+    _pm_set("pm_rsi_vol",    rsi_trail=True, vol_scale=True),            # RSI + vol
+    _pm_set("pm_combined",   rsi_trail=True, vol_scale=True, bb_boost=True),  # all 3
+    {   # grid-only control
+        "name": "pm_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_PM_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_2Y_CONFIG["param_sets"] = [
+    _pm_set("2y_pm_baseline"),
+    _pm_set("2y_pm_rsi_trail",  rsi_trail=True),
+    _pm_set("2y_pm_vol_scale",  vol_scale=True),
+    _pm_set("2y_pm_bb_boost",   bb_boost=True),
+    _pm_set("2y_pm_combined",   rsi_trail=True, vol_scale=True, bb_boost=True),
+    {   # grid-only 2y baseline
+        "name": "2y_pm_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+
+# ===========================================================================
 # Entry point
 # ===========================================================================
 
@@ -2045,6 +2157,16 @@ if __name__ == "__main__":
         print("  v9 Fast re-entry + ADX-adaptive trail — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_REENTRY_2Y_CONFIG)
+    elif symbol in ("XRPPM", "PM"):
+        print("\n" + "=" * 60)
+        print("  v10 Indicator position management — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v10 Indicator position management — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_2Y_CONFIG)
     else:
         # Run both
         print("\n" + "=" * 60)

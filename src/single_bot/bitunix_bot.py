@@ -52,6 +52,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from src.exchange.bitunix import BitunixExchange, WS_PUBLIC, WS_PRIVATE  # noqa: E402
+from src.single_bot.indicators import CandleBuffer, Signals  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Load .env
@@ -84,6 +85,26 @@ POSITION_LIMIT: float = 5 * INITIAL_QUANTITY / GRID_SPACING * 2 / 100
 ORDER_COOLDOWN_TIME: int = 60   # s: pause after entering lockdown
 SYNC_TIME: int = 3              # s: REST reconciliation interval
 ORDER_FIRST_TIME: int = 1       # s: pause before placing first grid
+
+# ---------------------------------------------------------------------------
+# Trend-capture configuration
+# ---------------------------------------------------------------------------
+# These values mirror the confirmed-optimal params from XRP_CONFIG / FINAL_s90_l10.
+# They will be locked in after the full backtest chain results are analysed.
+# ---------------------------------------------------------------------------
+TREND_LOOKBACK_CANDLES: int   = 10    # price velocity window (candles)
+TREND_VELOCITY_PCT:     float = 0.04  # 4% move over lookback → trend detected
+TREND_CAP_VEL_PCT:      float = 0.06  # 6% minimum to actually open a capture position
+TREND_CONFIRM_CANDLES:  int   = 3     # consecutive above-threshold candles before acting
+TREND_COOLDOWN_CANDLES: int   = 30    # quiet candles before resuming hedge mode
+TREND_TRAIL_PCT:        float = 0.04  # trailing stop distance (4% from peak)
+TREND_SIZE_PCT:         float = 0.90  # capture position size as fraction of equity
+TREND_FORCE_CLOSE_GRID: bool  = True  # close opposing grid side on trend fire
+
+# ADX gate + fast re-entry (mirrors v9 re_reentry winning config)
+ADX_MIN_TREND:      float = 25.0  # min ADX to allow opening a trend capture position
+ADX_GRID_PAUSE:     float = 35.0  # pause new grid legs when ADX ≥ this threshold
+TREND_REENTRY_FAST: bool  = True  # skip 30-candle cooldown; re-confirm in 3 candles
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -211,6 +232,35 @@ class GridTradingBot(BitunixExchange):
         self.short_threshold_alerted: bool = False
         self.risk_reduction_alerted: bool = False
 
+        # ── Candle buffer + indicator engine ──────────────────────────────
+        # Seeded from REST on startup; kept live via WS kline channel.
+        # All filter parameters are placeholders — will be updated once
+        # backtest results determine the winning configuration.
+        self.candle_buffer: CandleBuffer = CandleBuffer(
+            maxlen=200,
+            interval="15min",
+            adx_period=14,
+            atr_period=14,
+            rsi_period=14,
+            bb_period=20,
+            bb_mult=2.0,
+            ema_fast=9,
+            ema_slow=21,
+            vol_period=20,
+            ms_lookback=20,
+        )
+        # Latest computed indicator snapshot (refreshed on each candle close).
+        self.latest_signals: Optional[Signals] = None
+
+        # ── Trend-capture runtime state ───────────────────────────────────
+        # Mirrors the backtest GridSearch fields of the same names.
+        self.trend_mode: Optional[str] = None           # "up" | "down" | None
+        self.trend_pending_dir: Optional[str] = None    # direction accumulating confirms
+        self.trend_confirm_counter: int = 0             # consecutive above-threshold candles
+        self.trend_cooldown_counter: int = 0            # quiet candles since last trend ended
+        self.trend_position: Optional[Dict[str, Any]] = None
+        # trend_position keys: side, entry, qty, peak
+
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
@@ -227,6 +277,252 @@ class GridTradingBot(BitunixExchange):
         await self.set_leverage(self.symbol, self.leverage)
         logger.info("Setting HEDGE position mode…")
         await self.set_position_mode(hedge_mode=True)
+        logger.info("Seeding candle buffer for %s…", self.symbol)
+        await self.candle_buffer.seed(self, self.symbol)
+        logger.info("Candle buffer ready – %d closed candles loaded", len(self.candle_buffer._closed))
+
+    # ------------------------------------------------------------------
+    # Trend-capture helpers
+    # ------------------------------------------------------------------
+
+    def _equity(self) -> float:
+        """Return a best-effort equity estimate (available + margin USDT)."""
+        usdt = self.balance.get("USDT", {})
+        return float(usdt.get("available", 0.0)) + float(usdt.get("margin", 0.0))
+
+    async def _open_trend_trade(self, side: str, price: float) -> None:
+        """
+        Open a directional trend-capture position.
+
+        Parameters
+        ----------
+        side:
+            ``"long"`` to buy, ``"short"`` to sell.
+        price:
+            Current close price (used for size calculation only — order is MARKET).
+        """
+        equity = self._equity()
+        if equity <= 0 or price <= 0:
+            logger.warning("_open_trend_trade: equity=%.2f price=%.4f — skipping", equity, price)
+            return
+
+        cap_margin = min(equity * TREND_SIZE_PCT, equity * 0.90)
+        cap_qty = (cap_margin * self.leverage) / price
+        qty_contracts = int(cap_qty)
+        if qty_contracts < 1:
+            logger.warning("_open_trend_trade: calculated qty < 1 — skipping (equity=%.2f)", equity)
+            return
+
+        order_side = "buy" if side == "long" else "sell"
+        order = await self.place_market_order(
+            symbol=self.symbol,
+            side=order_side,
+            quantity=qty_contracts,
+            reduce_only=False,
+            position_side=side,
+        )
+        if order:
+            self.trend_position = {
+                "side": side,
+                "entry": price,
+                "qty": qty_contracts,
+                "peak": price,
+            }
+            logger.info(
+                "🎯 Trend %s opened at %.4f  qty=%d  margin≈$%.0f",
+                side.upper(), price, qty_contracts, cap_margin,
+            )
+            await self.send_telegram_message(
+                f"🎯 *Trend {side.upper()} opened*\n"
+                f"Price: `{price:.4f}`  Qty: `{qty_contracts}`  Margin≈`${cap_margin:.0f}`"
+            )
+        else:
+            logger.error("_open_trend_trade: market order failed for %s", side)
+
+    async def _close_trend_trade(self, price: float, reason: str = "trail") -> None:
+        """
+        Close an open trend-capture position with a reduce-only market order.
+
+        Parameters
+        ----------
+        price:
+            Current price (logged only).
+        reason:
+            Human-readable close reason ("trail" | "reversal").
+        """
+        tp = self.trend_position
+        if tp is None:
+            return
+
+        close_side = "sell" if tp["side"] == "long" else "buy"
+        order = await self.place_market_order(
+            symbol=self.symbol,
+            side=close_side,
+            quantity=tp["qty"],
+            reduce_only=True,
+            position_side=tp["side"],
+        )
+        if order:
+            pnl_est = (
+                (price - tp["entry"]) * tp["qty"]
+                if tp["side"] == "long"
+                else (tp["entry"] - price) * tp["qty"]
+            )
+            logger.info(
+                "🎯 Trend %s closed (%s) entry=%.4f exit=%.4f est_pnl=%+.2f",
+                tp["side"].upper(), reason, tp["entry"], price, pnl_est,
+            )
+            await self.send_telegram_message(
+                f"🎯 *Trend {tp['side'].upper()} closed* ({reason})\n"
+                f"Entry: `{tp['entry']:.4f}`  Exit: `{price:.4f}`  Est PnL: `{pnl_est:+.2f}`"
+            )
+            self.trend_position = None
+            if TREND_REENTRY_FAST:
+                # Skip the 30-candle cooldown — reset state so confirmation
+                # counter can re-fire within 3 candles on the next velocity signal.
+                self.trend_mode = None
+                self.trend_confirm_counter = 0
+                self.trend_pending_dir = None
+        else:
+            logger.error("_close_trend_trade: market close order failed for %s", tp["side"])
+
+    async def _evaluate_trend(self, price: float) -> None:
+        """
+        Called on every closed 15-min candle.  Mirrors the trend-detection and
+        trend-capture logic from ``backtest_grid_bitunix.GridSearch`` exactly:
+
+        1. Compute price velocity over ``TREND_LOOKBACK_CANDLES``.
+        2. Manage existing trend position (trailing-stop check).
+        3. Accumulate confirmation counter.
+        4. On confirmation:
+           a. Optionally force-close the opposing grid side.
+           b. Open a directional capture position if velocity ≥ TREND_CAP_VEL_PCT.
+        5. Count down cooldown once trend fades and no position is open.
+        """
+        # ── 1. Velocity ────────────────────────────────────────────────
+        closed = list(self.candle_buffer._closed)
+        if len(closed) < TREND_LOOKBACK_CANDLES:
+            return  # not enough history yet
+
+        past_price = closed[-TREND_LOOKBACK_CANDLES].close
+        if past_price <= 0:
+            return
+        velocity = (price - past_price) / past_price
+        trending_up   = velocity >  TREND_VELOCITY_PCT
+        trending_down = velocity < -TREND_VELOCITY_PCT
+
+        # ── 2. Manage existing position (trailing stop) ─────────────────
+        if self.trend_position is not None:
+            tp = self.trend_position
+            if tp["side"] == "long":
+                if price > tp["peak"]:
+                    tp["peak"] = price
+                trail_stop = tp["peak"] * (1.0 - TREND_TRAIL_PCT)
+                if price <= trail_stop or trending_down:
+                    await self._close_trend_trade(
+                        price, reason="trail" if price <= trail_stop else "reversal"
+                    )
+            else:  # short
+                if price < tp["peak"]:
+                    tp["peak"] = price
+                trail_stop = tp["peak"] * (1.0 + TREND_TRAIL_PCT)
+                if price >= trail_stop or trending_up:
+                    await self._close_trend_trade(
+                        price, reason="trail" if price >= trail_stop else "reversal"
+                    )
+
+        # ── 3. Confirmation counter ─────────────────────────────────────
+        if trending_up:
+            if self.trend_pending_dir == "up":
+                self.trend_confirm_counter += 1
+            else:
+                self.trend_pending_dir = "up"
+                self.trend_confirm_counter = 1
+        elif trending_down:
+            if self.trend_pending_dir == "down":
+                self.trend_confirm_counter += 1
+            else:
+                self.trend_pending_dir = "down"
+                self.trend_confirm_counter = 1
+        else:
+            self.trend_confirm_counter = 0
+            self.trend_pending_dir = None
+
+        confirmed_up   = trending_up   and self.trend_confirm_counter >= TREND_CONFIRM_CANDLES
+        confirmed_down = trending_down and self.trend_confirm_counter >= TREND_CONFIRM_CANDLES
+
+        # ── 4. Act on confirmed trend ───────────────────────────────────
+        if confirmed_up and self.trend_mode != "up":
+            self.trend_mode = "up"
+            self.trend_cooldown_counter = 0
+            logger.info(
+                "📈 Trend UP confirmed (vel=%.2f%%  confirms=%d)",
+                velocity * 100, self.trend_confirm_counter,
+            )
+            # Force-close opposing (short) grid
+            if TREND_FORCE_CLOSE_GRID and self.short_position > 0:
+                logger.info("Trend UP: force-closing short grid (pos=%.4f)", self.short_position)
+                await self.cancel_orders_for_side(self.symbol, "short")
+                await self.place_market_order(
+                    symbol=self.symbol,
+                    side="buy",
+                    quantity=int(self.short_position),
+                    reduce_only=True,
+                    position_side="short",
+                )
+            # Open long capture if velocity strong enough, no position yet,
+            # and ADX confirms a real trend (not just noise).
+            adx_now = self.latest_signals.adx if self.latest_signals else 0.0
+            if (
+                self.trend_position is None
+                and velocity >= TREND_CAP_VEL_PCT
+                and adx_now >= ADX_MIN_TREND
+            ):
+                await self._open_trend_trade("long", price)
+
+        elif confirmed_down and self.trend_mode != "down":
+            self.trend_mode = "down"
+            self.trend_cooldown_counter = 0
+            logger.info(
+                "📉 Trend DOWN confirmed (vel=%.2f%%  confirms=%d)",
+                velocity * 100, self.trend_confirm_counter,
+            )
+            # Force-close opposing (long) grid
+            if TREND_FORCE_CLOSE_GRID and self.long_position > 0:
+                logger.info("Trend DOWN: force-closing long grid (pos=%.4f)", self.long_position)
+                await self.cancel_orders_for_side(self.symbol, "long")
+                await self.place_market_order(
+                    symbol=self.symbol,
+                    side="sell",
+                    quantity=int(self.long_position),
+                    reduce_only=True,
+                    position_side="long",
+                )
+            # Open short capture if velocity strong enough, no position yet,
+            # and ADX confirms a real trend (not just noise).
+            adx_now = self.latest_signals.adx if self.latest_signals else 0.0
+            if (
+                self.trend_position is None
+                and abs(velocity) >= TREND_CAP_VEL_PCT
+                and adx_now >= ADX_MIN_TREND
+            ):
+                await self._open_trend_trade("short", price)
+
+        # ── 5. Cooldown when trend fades (no open position) ─────────────
+        elif self.trend_mode is not None and self.trend_position is None:
+            if abs(velocity) < TREND_VELOCITY_PCT * 0.5:
+                self.trend_cooldown_counter += 1
+                if self.trend_cooldown_counter >= TREND_COOLDOWN_CANDLES:
+                    logger.info(
+                        "🔄 Trend %s ended — resuming hedge mode (cooldown complete)",
+                        self.trend_mode.upper(),
+                    )
+                    self.trend_mode = None
+                    self.trend_cooldown_counter = 0
+                    self.trend_pending_dir = None
+                    self.trend_confirm_counter = 0
+            else:
+                self.trend_cooldown_counter = 0
 
     # ------------------------------------------------------------------
     # Grid price helpers
@@ -378,6 +674,16 @@ class GridTradingBot(BitunixExchange):
     async def place_long_orders(self, latest_price: float) -> None:
         """Manage the long-side grid: cancel stale orders then place fresh TP + entry."""
         try:
+            # ADX grid pause — don't add new legs during strong trending conditions
+            if (
+                self.latest_signals is not None
+                and self.latest_signals.adx >= ADX_GRID_PAUSE
+            ):
+                logger.info(
+                    "⏸️ ADX grid pause long (adx=%.1f ≥ %.1f) — skipping grid refresh",
+                    self.latest_signals.adx, ADX_GRID_PAUSE,
+                )
+                return
             self.get_take_profit_quantity(self.long_position, "long")
             if self.long_position <= 0:
                 return
@@ -412,6 +718,16 @@ class GridTradingBot(BitunixExchange):
     async def place_short_orders(self, latest_price: float) -> None:
         """Manage the short-side grid: cancel stale orders then place fresh TP + entry."""
         try:
+            # ADX grid pause — don't add new legs during strong trending conditions
+            if (
+                self.latest_signals is not None
+                and self.latest_signals.adx >= ADX_GRID_PAUSE
+            ):
+                logger.info(
+                    "⏸️ ADX grid pause short (adx=%.1f ≥ %.1f) — skipping grid refresh",
+                    self.latest_signals.adx, ADX_GRID_PAUSE,
+                )
+                return
             self.get_take_profit_quantity(self.short_position, "short")
             if self.short_position <= 0:
                 return
@@ -585,7 +901,7 @@ class GridTradingBot(BitunixExchange):
                 await asyncio.sleep(5)
 
     async def _public_ws_loop(self) -> None:
-        """Connect to the public WS and subscribe to the ticker channel."""
+        """Connect to the public WS and subscribe to the ticker + kline channels."""
         while True:
             try:
                 async with websockets.connect(WS_PUBLIC) as ws:
@@ -594,7 +910,17 @@ class GridTradingBot(BitunixExchange):
                             self.build_subscribe_payload("ticker", self.symbol)
                         )
                     )
-                    logger.info("Public WS: subscribed ticker for %s", self.symbol)
+                    await ws.send(
+                        json.dumps(
+                            self.build_subscribe_payload(
+                                "market_kline_15min", self.symbol
+                            )
+                        )
+                    )
+                    logger.info(
+                        "Public WS: subscribed ticker + market_kline_15min for %s",
+                        self.symbol,
+                    )
                     await self._recv_loop(ws, private=False)
             except Exception as exc:
                 logger.error("Public WS error: %s – retry in 5 s", exc)
@@ -642,6 +968,8 @@ class GridTradingBot(BitunixExchange):
 
                 if ch == "ticker":
                     await self.handle_ticker_update(data)
+                elif ch == "market_kline_15min":
+                    await self.handle_kline_update(data)
                 elif ch == "position":
                     await self.handle_position_update(data)
                 elif ch == "order":
@@ -704,6 +1032,69 @@ class GridTradingBot(BitunixExchange):
             await self.check_and_notify_risk_reduction()
         except Exception as exc:
             logger.error("handle_ticker_update error: %s", exc)
+
+    async def handle_kline_update(self, data: Dict[str, Any]) -> None:
+        """
+        Handle a ``market_kline_15min`` WS push (~every 500 ms).
+
+        Bitunix kline WS payload::
+
+            {
+              "ch": "market_kline_15min",
+              "symbol": "XRPUSDT",
+              "ts": 1740000000000,        ← candle open-time (ms)
+              "data": {
+                "o": "1.25", "h": "1.27", "l": "1.23", "c": "1.26",
+                "b": "2500000",           ← coin count (quoteVol)
+                "q": "3150000"            ← USDT notional (== REST baseVol)
+              }
+            }
+
+        We store USDT notional (``q``) as volume to match the parquet cache
+        field (confirmed: ``q / b`` ≈ close price).
+
+        A candle closes when the ``ts`` timestamp changes.  On close,
+        ``self.latest_signals`` is refreshed and filter logic can be applied.
+
+        Note
+        ----
+        Trend-capture entry logic is intentionally **not** implemented here
+        yet.  This handler is the scaffolding stub — filter gates will be
+        added once backtest results confirm the winning configuration.
+        """
+        try:
+            kline_data = data.get("data", {})
+            ts_ms = int(data.get("ts", 0))
+            if not ts_ms or not kline_data:
+                return
+
+            candle_closed = self.candle_buffer.update(
+                o=float(kline_data.get("o", 0)),
+                h=float(kline_data.get("h", 0)),
+                l=float(kline_data.get("l", 0)),
+                c=float(kline_data.get("c", 0)),
+                volume=float(kline_data.get("q", 0)),   # USDT notional
+                ts_ms=ts_ms,
+            )
+
+            if candle_closed:
+                self.latest_signals = self.candle_buffer.signals()
+                if self.latest_signals:
+                    logger.debug(
+                        "Candle closed | close=%.4f  adx=%.1f  rsi=%.1f  "
+                        "bb_w=%.4f  vol_ratio=%.2f  ema_bias=%s",
+                        self.latest_signals.close,
+                        self.latest_signals.adx,
+                        self.latest_signals.rsi,
+                        self.latest_signals.bb_width,
+                        self.latest_signals.vol_ratio,
+                        "long" if self.latest_signals.ema_bias_long else
+                        "short" if self.latest_signals.ema_bias_short else "flat",
+                    )
+                    await self._evaluate_trend(self.latest_signals.close)
+
+        except Exception as exc:
+            logger.error("handle_kline_update error: %s", exc)
 
     async def handle_position_update(self, data: Dict[str, Any]) -> None:
         """

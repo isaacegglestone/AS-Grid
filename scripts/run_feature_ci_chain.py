@@ -36,7 +36,7 @@ REPO = "isaacegglestone/AS-Grid"
 BRANCH = "feat/bitunix-exchange-adapter"
 POLL_INTERVAL = 90  # seconds between GitHub API polls
 
-FEATURES = ["EMA", "BB", "RSI", "VOL", "MS", "RE"]
+FEATURES = ["EMA", "BB", "RSI", "VOL", "MS", "RE", "PM"]
 
 FEATURE_SYMBOLS = {
     "EMA": "XRPEMA",
@@ -45,6 +45,7 @@ FEATURE_SYMBOLS = {
     "VOL": "XRPVOL",
     "MS":  "XRPMS",
     "RE":  "XRPRE",
+    "PM":  "XRPPM",
 }
 
 FEATURE_NAMES = {
@@ -54,6 +55,7 @@ FEATURE_NAMES = {
     "VOL": "v7 Volume confirmation",
     "MS":  "v8 Market structure filter",
     "RE":  "v9 Fast re-entry + adaptive trail",
+    "PM":  "v10 Indicator position management",
 }
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -125,10 +127,11 @@ def gh_run_stage1_logs(run_id: int) -> str:
 # ---------------------------------------------------------------------------
 
 def get_active_run_id() -> int | None:
-    """Return the run_id of the most recent non-cancelled run on BRANCH, or None."""
+    """Return the run_id of the most recent in-progress/queued CI run on BRANCH, or None.
+    Ignores completed runs (success or failure) — nothing to wait for there."""
     data = gh_api(f"actions/runs?branch={BRANCH}&per_page=20")
     for run in data["workflow_runs"]:
-        if run.get("conclusion") != "cancelled":
+        if run.get("name") == "CI" and run.get("status") in ("in_progress", "queued", "waiting"):
             return run["id"]
     return None
 
@@ -253,10 +256,10 @@ def push_feature(feature: str) -> int:
         ["git", "diff", "--cached", "--quiet"], cwd=REPO_ROOT
     )
     if staged.returncode == 0:
-        log(f"ci.yml already at {symbol} — finding existing in-flight run...")
+        log(f"ci.yml already at {symbol} — finding existing in-flight CI run...")
         data = gh_api(f"actions/runs?branch={BRANCH}&per_page=10")
         for run in data["workflow_runs"]:
-            if run.get("conclusion") != "cancelled":
+            if run.get("conclusion") != "cancelled" and run.get("name") == "CI":
                 log(f"Resuming existing run: {run['id']}")
                 return run["id"]
         # All runs cancelled — trigger a fresh one via an empty commit
