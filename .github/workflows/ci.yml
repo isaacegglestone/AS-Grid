@@ -35,8 +35,8 @@ jobs:
       - name: Unit tests
         run: python -m pytest --tb=short -q
 
-      - name: Backtest XRP/USDT — v3 ATR dynamic trail sweep
-        run: python asBack/backtest_grid_bitunix.py XRPATR
+      - name: Backtest XRP/USDT — v4 EMA bias filter
+        run: python asBack/backtest_grid_bitunix.py XRPEMA
 
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
