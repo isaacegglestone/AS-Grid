@@ -272,7 +272,9 @@ def main() -> None:
     # Wait for currently running CI (ATR) to finish Stage 1
     log("=== Waiting for current in-progress CI run (ATR) to finish Stage 1 ===")
     current_run_id = get_active_run_id()
-    wait_for_stage1(current_run_id)    cancel_run(current_run_id)  # dismiss EC2 Stage 2 approval to free concurrency queue    extract_results(current_run_id, "ATR")
+    wait_for_stage1(current_run_id)
+    cancel_run(current_run_id)  # dismiss EC2 Stage 2 approval to free concurrency queue
+    extract_results(current_run_id, "ATR")
 
     # Iterate through remaining features
     started = False
