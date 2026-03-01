@@ -35,8 +35,8 @@ jobs:
       - name: Unit tests
         run: python -m pytest --tb=short -q
 
-      - name: Backtest XRP/USDT — v5 BB squeeze filter
-        run: python asBack/backtest_grid_bitunix.py XRPBB
+      - name: Backtest XRP/USDT — v6 RSI filter
+        run: python asBack/backtest_grid_bitunix.py XRPRSI
 
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
