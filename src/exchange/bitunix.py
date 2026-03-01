@@ -27,6 +27,7 @@ References
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -192,16 +193,53 @@ class BitunixRestClient:
     async def get_public(
         self, path: str, params: Optional[Dict[str, Any]] = None
     ) -> Any:
-        """Unauthenticated GET for public endpoints (e.g. klines, tickers)."""
+        """
+        Unauthenticated GET for public endpoints (e.g. klines, tickers).
+
+        Retries on transient errors (rate-limit, HTML error page, 5xx) with
+        exponential backoff: 5s, 10s, 20s, 40s before giving up after 4 retries.
+        """
         url = REST_BASE + path
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
-                data = await resp.json()
-                if data.get("code") != 0:
-                    raise RuntimeError(
-                        f"Bitunix GET {path} error {data.get('code')}: {data.get('msg')}"
-                    )
-                return data.get("data")
+        max_retries = 4
+        for attempt in range(max_retries + 1):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, params=params) as resp:
+                        if resp.status in (429, 503, 502, 500):
+                            wait = 5 * (2 ** attempt)
+                            logging.warning(
+                                "Bitunix GET %s → HTTP %d, retrying in %ds (attempt %d/%d)",
+                                path, resp.status, wait, attempt + 1, max_retries,
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+                        try:
+                            data = await resp.json()
+                        except aiohttp.ContentTypeError:
+                            body = await resp.text()
+                            wait = 5 * (2 ** attempt)
+                            logging.warning(
+                                "Bitunix GET %s returned non-JSON (status %d, body prefix: %s…), "
+                                "retrying in %ds (attempt %d/%d)",
+                                path, resp.status, body[:120], wait, attempt + 1, max_retries,
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+                        if data.get("code") != 0:
+                            raise RuntimeError(
+                                f"Bitunix GET {path} error {data.get('code')}: {data.get('msg')}"
+                            )
+                        return data.get("data")
+            except (aiohttp.ClientConnectionError, aiohttp.ServerDisconnectedError) as exc:
+                if attempt == max_retries:
+                    raise
+                wait = 5 * (2 ** attempt)
+                logging.warning(
+                    "Bitunix GET %s connection error (%s), retrying in %ds (attempt %d/%d)",
+                    path, exc, wait, attempt + 1, max_retries,
+                )
+                await asyncio.sleep(wait)
+        raise RuntimeError(f"Bitunix GET {path} failed after {max_retries} retries")
 
 
 # ---------------------------------------------------------------------------

@@ -930,6 +930,8 @@ async def fetch_klines_as_df(
             print(f"  chunk {chunk_num}/{estimated_chunks}  ~{pct}% …", flush=True)
 
         if not candles:
+            # Small pause before retrying or moving on — avoids tight loops on empty windows
+            await asyncio.sleep(0.1)
             break
 
         # API returns newest-first — sort ascending so candles[-1] is newest.
@@ -1755,6 +1757,60 @@ XRP_VOL_2Y_CONFIG["param_sets"] = [
 
 
 # ===========================================================================
+# v8 — Market structure filter (Higher-High / Lower-Low breakout)
+# Only fire trend-capture when price confirms market structure:
+#   ms_filter=True + confirmed_up  → open LONG only if price > swing high (HH)
+#   ms_filter=True + confirmed_down→ open SHORT only if price < swing low  (LL)
+#   ms_lookback=20  → look back N candles for the swing high / low
+# Prevents trend trades from firing in the middle of a consolidation range.
+# ===========================================================================
+
+def _ms_set(name: str, ms_on: bool, lookback: int = 20,
+            size: float = 0.90) -> Dict[str, Any]:
+    return {
+        "name": name,
+        "use_sl": True,
+        "trend_detection": True, "trend_capture": True,
+        "trend_force_close_grid": True, "trend_confirm_candles": 3,
+        "trend_trailing_stop_pct": 0.04, "trend_capture_size_pct": size,
+        "trend_lookback_candles": 10,
+        "ms_filter": ms_on, "ms_lookback": lookback,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    }
+
+
+XRP_MS_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_MS_CONFIG["param_sets"] = [
+    _ms_set("ms_off",      ms_on=False),           # baseline (no MS filter)
+    _ms_set("ms_lb10",     ms_on=True, lookback=10),  # 10-candle swing lookback
+    _ms_set("ms_lb20",     ms_on=True, lookback=20),  # 20-candle swing lookback
+    _ms_set("ms_lb30",     ms_on=True, lookback=30),  # 30-candle swing lookback
+    {   # grid-only control
+        "name": "ms_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+XRP_MS_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_MS_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_MS_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_MS_2Y_CONFIG["param_sets"] = [
+    _ms_set("2y_ms_off",    ms_on=False),
+    _ms_set("2y_ms_lb10",   ms_on=True, lookback=10),
+    _ms_set("2y_ms_lb20",   ms_on=True, lookback=20),
+    {   # grid-only 2y baseline
+        "name": "2y_trend_off",
+        "use_sl": True, "trend_detection": False, "trend_capture": False,
+        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+    },
+]
+
+
+# ===========================================================================
 # Entry point
 # ===========================================================================
 
@@ -1791,6 +1847,16 @@ if __name__ == "__main__":
         print("\n" + "=" * 60)
         print("  v2 ADX filter sweep \u2014 6-month OOS  (Aug 2025 \u2192 Feb 2026)")
         print("=" * 60)
+    elif symbol in ("XRPMS", "MS"):
+        print("\n" + "=" * 60)
+        print("  v8 Market structure filter — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_MS_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v8 Market structure filter — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_MS_2Y_CONFIG)
         grid_search_backtest(XRP_ADX_CONFIG)
 
         print("\n" + "=" * 60)
