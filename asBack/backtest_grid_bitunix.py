@@ -2368,6 +2368,51 @@ XRP_PM_V3_2Y_CONFIG["param_sets"] = [
 
 
 # ===========================================================================
+# v14 — C_gridvol period fine-sweep
+#
+# XRPPM3 showed:
+#  - floor value is irrelevant (vol_avg/vol_now never drops below ~0.50)
+#  - period controls the result: p10=14.97%, p20=15.12%, p40=16.88% (2y)
+#  - 2y return still climbing at p40 — peak not yet found
+#
+# This sweep refines the period axis (floor fixed at 0.35, irrelevant):
+#   p20   — XRPPM3 baseline / control
+#   p30   — first step toward p40
+#   p40   — XRPPM3 winner (replicated as reference)
+#   p50   — step beyond p40
+#   p60   — longer baseline
+#   p80   — much longer baseline
+#   p120  — 2-hour rolling average
+# ===========================================================================
+
+XRP_PM_V4_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V4_CONFIG["param_sets"] = [
+    _pm_v2_set("pm4_baseline"),
+    _pm_v2_set("pm4_C_p20",  grid_vol_scale=True, grid_vol_period=20),
+    _pm_v2_set("pm4_C_p30",  grid_vol_scale=True, grid_vol_period=30),
+    _pm_v2_set("pm4_C_p40",  grid_vol_scale=True, grid_vol_period=40),
+    _pm_v2_set("pm4_C_p50",  grid_vol_scale=True, grid_vol_period=50),
+    _pm_v2_set("pm4_C_p60",  grid_vol_scale=True, grid_vol_period=60),
+    _pm_v2_set("pm4_C_p80",  grid_vol_scale=True, grid_vol_period=80),
+    _pm_v2_set("pm4_C_p120", grid_vol_scale=True, grid_vol_period=120),
+]
+
+XRP_PM_V4_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V4_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V4_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V4_2Y_CONFIG["param_sets"] = [
+    _pm_v2_set("2y_pm4_baseline"),
+    _pm_v2_set("2y_pm4_C_p20",  grid_vol_scale=True, grid_vol_period=20),
+    _pm_v2_set("2y_pm4_C_p30",  grid_vol_scale=True, grid_vol_period=30),
+    _pm_v2_set("2y_pm4_C_p40",  grid_vol_scale=True, grid_vol_period=40),
+    _pm_v2_set("2y_pm4_C_p50",  grid_vol_scale=True, grid_vol_period=50),
+    _pm_v2_set("2y_pm4_C_p60",  grid_vol_scale=True, grid_vol_period=60),
+    _pm_v2_set("2y_pm4_C_p80",  grid_vol_scale=True, grid_vol_period=80),
+    _pm_v2_set("2y_pm4_C_p120", grid_vol_scale=True, grid_vol_period=120),
+]
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -2642,6 +2687,16 @@ if __name__ == "__main__":
         print("  v13 C_gridvol sweep (floor × period) — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V3_2Y_CONFIG)
+    elif symbol in ("XRPPM4", "PM4"):
+        print("\n" + "=" * 60)
+        print("  v14 C_gridvol period fine-sweep — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V4_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v14 C_gridvol period fine-sweep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V4_2Y_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")

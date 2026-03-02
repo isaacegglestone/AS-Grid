@@ -68,6 +68,11 @@ jobs:
         #   period  — vol SMA lookback: 10 / 20 (default) / 40
         run: python asBack/backtest_grid_bitunix.py XRPPM3
 
+      - name: Backtest XRP/USDT — v14 C_gridvol period fine-sweep
+        # XRPPM3 showed floor is irrelevant; period=40 best 2y result.
+        # Fine-sweep: p20 (ctrl) / p30 / p40 / p50 / p60 / p80 / p120
+        run: python asBack/backtest_grid_bitunix.py XRPPM4
+
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
   #          GitHub Environment (Settings → Environments → ec2 → Required reviewers)
