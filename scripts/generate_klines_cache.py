@@ -7,9 +7,10 @@ Once generated, the backtest engine loads from disk instead of hitting the API.
 Data sources
 ------------
 - **Bitunix public API** — XRPUSDT available from ~2022-04-20 onward.
-- **Binance USDT-M futures public API** — XRPUSDT available from ~2019-10-01,
+- **Binance Data Vision** (data.binance.vision) — XRPUSDT spot data from ~2019-10-01,
   giving a full ~6.5-year history including the 2021 bull run, 2022 crash
-  (LUNA/FTX) and the 2023-2025 recovery cycle.
+  (LUNA/FTX) and the 2023-2025 recovery cycle.  Downloads monthly ZIP/CSV files
+  with no API key and no geographic restrictions.
 
 Both datasets are stitched from both sources:
   Binance  2019-10-01 → 2022-04-20  (pre-Bitunix history)
@@ -27,9 +28,12 @@ Actions workflow (.github/workflows/cache-klines.yml).
 """
 
 import asyncio
+import io
 import os
 import sys
-from datetime import datetime, timezone
+import zipfile
+from calendar import monthrange
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 import aiohttp
@@ -61,17 +65,6 @@ _BINANCE_INTERVAL_MAP = {
     "4h": "4h",
     "1d": "1d",
 }
-_BINANCE_INTERVAL_MS = {
-    "1m":  60_000,
-    "3m":  180_000,
-    "5m":  300_000,
-    "15m": 900_000,
-    "30m": 1_800_000,
-    "1h":  3_600_000,
-    "4h":  14_400_000,
-    "1d":  86_400_000,
-}
-
 # ---------------------------------------------------------------------------
 # Datasets to cache.
 # source="stitched"  — fetch pre-BITUNIX_START from Binance, rest from Bitunix.
@@ -89,8 +82,42 @@ def _datasets():
 
 
 # ---------------------------------------------------------------------------
-# Binance USDT-M futures klines fetcher
+# Binance Data Vision bulk-download klines fetcher
 # ---------------------------------------------------------------------------
+# Uses https://data.binance.vision (public S3) instead of the REST API.
+# No geographic restrictions (unlike fapi.binance.com which returns HTTP 451
+# from GitHub Actions runners in AWS us-east).
+#
+# Downloads monthly ZIP/CSV files for complete months, plus daily ZIPs for
+# the current/incomplete month.
+#
+# Monthly: https://data.binance.vision/data/spot/monthly/klines/{sym}/{iv}/{sym}-{iv}-{YYYY}-{MM}.zip
+# Daily:   https://data.binance.vision/data/spot/daily/klines/{sym}/{iv}/{sym}-{iv}-{YYYY}-{MM}-{DD}.zip
+# ---------------------------------------------------------------------------
+
+_BINANCE_DV_BASE_MONTHLY = "https://data.binance.vision/data/spot/monthly/klines"
+_BINANCE_DV_BASE_DAILY   = "https://data.binance.vision/data/spot/daily/klines"
+
+
+def _parse_binance_dv_csv(csv_bytes: bytes) -> pd.DataFrame:
+    """Parse a Binance Data Vision klines CSV (no header row)."""
+    df = pd.read_csv(
+        io.BytesIO(csv_bytes),
+        header=None,
+        usecols=[0, 1, 2, 3, 4, 5],
+        names=["open_time", "open", "high", "low", "close", "volume"],
+        dtype={
+            "open_time": "int64",
+            "open": "float64",
+            "high": "float64",
+            "low": "float64",
+            "close": "float64",
+            "volume": "float64",
+        },
+    )
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    return df
+
 
 async def fetch_binance_klines_as_df(
     symbol: str,
@@ -99,15 +126,14 @@ async def fetch_binance_klines_as_df(
     end_dt: datetime,
 ) -> pd.DataFrame:
     """
-    Fetch klines for *symbol* from the **Binance USDT-M futures** public API.
+    Fetch historical klines from **Binance Data Vision** bulk CSV downloads.
 
-    Returns a DataFrame with the same columns as Bitunix:
+    Works from any location — no geographic restrictions.
+    Downloads one ZIP per calendar month (monthly files for complete months,
+    daily files for the current/incomplete month).
+
+    Returns a DataFrame with the same columns as the Bitunix fetcher:
         open_time (datetime64[ns, UTC]), open, high, low, close, volume (float64)
-
-    *interval_bitunix* uses the Bitunix naming convention (e.g. ``"15min"``);
-    it is mapped internally to the Binance format (``"15m"``).
-
-    Binance limit: 1,500 candles per request.  No API key required.
     """
     binance_interval = _BINANCE_INTERVAL_MAP.get(interval_bitunix)
     if binance_interval is None:
@@ -115,76 +141,98 @@ async def fetch_binance_klines_as_df(
             f"No Binance interval mapping for '{interval_bitunix}'. "
             f"Known: {list(_BINANCE_INTERVAL_MAP)}"
         )
-    interval_ms = _BINANCE_INTERVAL_MS[binance_interval]
 
-    def _to_ms(dt: datetime) -> int:
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return int(dt.timestamp() * 1000)
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=timezone.utc)
 
-    CHUNK = 1500
-    start_ms = _to_ms(start_dt)
-    end_ms = _to_ms(end_dt)
-    total_ms = end_ms - start_ms
-    estimated_chunks = max(1, total_ms // (CHUNK * interval_ms))
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    print(f"  [Binance] Fetching {symbol} {interval_bitunix}  "
-          f"{start_dt.date()} → {end_dt.date()} …")
-    print(f"  (estimated ~{estimated_chunks} API requests)")
+    print(
+        f"  [Binance DataVision] Fetching {symbol} {interval_bitunix}  "
+        f"{start_dt.date()} → {end_dt.date()} …"
+    )
 
-    rows: List[dict] = []
-    cursor = start_ms
-    chunk_num = 0
+    all_frames: List[pd.DataFrame] = []
 
     async with aiohttp.ClientSession() as session:
-        while cursor < end_ms:
-            url = (
-                "https://fapi.binance.com/fapi/v1/klines"
-                f"?symbol={symbol}&interval={binance_interval}"
-                f"&startTime={cursor}&endTime={end_ms}&limit={CHUNK}"
-            )
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise RuntimeError(
-                        f"Binance API error {resp.status}: {text[:200]}"
+
+        async def _get_zip(url: str) -> bytes | None:
+            """Download a ZIP and return raw bytes, or None on 404."""
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as r:
+                if r.status == 200:
+                    return await r.read()
+                if r.status == 404:
+                    return None
+                text = await r.text()
+                raise RuntimeError(f"HTTP {r.status} fetching {url}: {text[:200]}")
+
+        year, month = start_dt.year, start_dt.month
+        end_year, end_month = end_dt.year, end_dt.month
+
+        while (year, month) <= (end_year, end_month):
+            last_day_of_month = monthrange(year, month)[1]
+            month_end_dt = datetime(year, month, last_day_of_month, 23, 59, 59, tzinfo=timezone.utc)
+
+            if month_end_dt < today:
+                # Complete month in the past — use monthly file.
+                url = (
+                    f"{_BINANCE_DV_BASE_MONTHLY}/{symbol}/{binance_interval}/"
+                    f"{symbol}-{binance_interval}-{year}-{month:02d}.zip"
+                )
+                raw = await _get_zip(url)
+                if raw is not None:
+                    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                        csv_bytes = zf.read(zf.namelist()[0])
+                    df = _parse_binance_dv_csv(csv_bytes)
+                    all_frames.append(df)
+                    print(f"    {year}-{month:02d}: {len(df):,} candles (monthly)", flush=True)
+                else:
+                    print(f"    {year}-{month:02d}: not found — skipped", flush=True)
+            else:
+                # Current or future month — download available daily files.
+                day_start = start_dt.day if (year == start_dt.year and month == start_dt.month) else 1
+                yesterday = today - timedelta(days=1)
+                day_end = (
+                    yesterday.day
+                    if (year == yesterday.year and month == yesterday.month)
+                    else last_day_of_month
+                )
+                daily_count = 0
+                for d in range(day_start, day_end + 1):
+                    url = (
+                        f"{_BINANCE_DV_BASE_DAILY}/{symbol}/{binance_interval}/"
+                        f"{symbol}-{binance_interval}-{year}-{month:02d}-{d:02d}.zip"
                     )
-                data = await resp.json()
+                    raw = await _get_zip(url)
+                    if raw is not None:
+                        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                            csv_bytes = zf.read(zf.namelist()[0])
+                        all_frames.append(_parse_binance_dv_csv(csv_bytes))
+                        daily_count += 1
+                if daily_count:
+                    print(f"    {year}-{month:02d}: {daily_count} daily file(s) downloaded", flush=True)
 
-            if not data:
-                break
+            # Advance to next month.
+            if month == 12:
+                year, month = year + 1, 1
+            else:
+                month += 1
 
-            chunk_num += 1
-            if chunk_num % 20 == 0 or chunk_num == 1:
-                pct = min(100, int(len(rows) / max(1, estimated_chunks * CHUNK) * 100))
-                print(f"    chunk {chunk_num}/{estimated_chunks}  ~{pct}% …", flush=True)
-
-            for row in data:
-                open_time_ms: int = row[0]
-                if open_time_ms < end_ms:
-                    rows.append({
-                        "open_time": open_time_ms,
-                        "open":   float(row[1]),
-                        "high":   float(row[2]),
-                        "low":    float(row[3]),
-                        "close":  float(row[4]),
-                        "volume": float(row[5]),
-                    })
-
-            last_open_ms: int = data[-1][0]
-            cursor = last_open_ms + interval_ms
-            await asyncio.sleep(0.05)   # gentle rate limiting
-
-    if not rows:
+    if not all_frames:
         raise ValueError(
-            f"No Binance klines returned for {symbol} {interval_bitunix} "
+            f"No Binance data retrieved for {symbol} {interval_bitunix} "
             f"between {start_dt} and {end_dt}"
         )
 
-    df = pd.DataFrame(rows)
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    df = pd.concat(all_frames, ignore_index=True)
     df = (
-        df.drop_duplicates(subset=["open_time"])
+        df[
+            (df["open_time"] >= pd.Timestamp(start_dt))
+            & (df["open_time"] < pd.Timestamp(end_dt))
+        ]
+        .drop_duplicates(subset=["open_time"])
         .sort_values("open_time")
         .reset_index(drop=True)
     )
