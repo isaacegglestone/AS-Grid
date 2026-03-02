@@ -347,8 +347,9 @@ class GridOrderBacktester:
                 _vol_now = float(self.df["volume"].iloc[idx])
                 _vol_avg = float(self.vol_avg_series.iloc[idx])
                 if _vol_avg > 0 and _vol_now > 0:
-                    # Inversely proportional: floor at 35% of normal, never larger than normal
-                    effective_order_value *= max(0.35, min(1.0, _vol_avg / _vol_now))
+                    # Inversely proportional: configurable floor, never larger than normal
+                    _gvf = self.config.get("grid_vol_floor", 0.35)
+                    effective_order_value *= max(_gvf, min(1.0, _vol_avg / _vol_now))
 
             self._refresh_orders_if_needed(price, timestamp)
 
@@ -2225,8 +2226,10 @@ def _pm_v2_set(
     bb_boost: bool = False,
     bb_threshold: float = 0.02,
     grid_vol_scale: bool = False,
+    grid_vol_floor: float = 0.35,
+    grid_vol_period: int = 20,
 ) -> Dict[str, Any]:
-    """v12 PM-tuning param set — exposes RSI threshold, BB threshold, and grid vol scale."""
+    """v12/v13 PM-tuning param set — exposes RSI threshold, BB threshold, grid vol scale, floor and period."""
     return {
         "name": name,
         "use_sl": True,
@@ -2246,8 +2249,10 @@ def _pm_v2_set(
         "bb_squeeze_threshold":  bb_threshold,
         "bb_squeeze_boost_mult": 1.35,
         # Option C — grid order size scaled inversely with volume
-        "grid_vol_scale": grid_vol_scale,
-        "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
+        "grid_vol_scale":  grid_vol_scale,
+        "grid_vol_floor":  grid_vol_floor,
+        "vol_period":      grid_vol_period,
+        "long_settings":   {"up_spacing": 0.010, "down_spacing": 0.010},
         "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
     }
 
@@ -2311,6 +2316,54 @@ XRP_PM_V2_2Y_CONFIG["param_sets"] = [
         "long_settings":  {"up_spacing": 0.010, "down_spacing": 0.010},
         "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
     },
+]
+
+
+# ===========================================================================
+# v13 — C_gridvol parameter sweep
+#
+# XRPPM2 showed Option C (grid_vol_scale) is the only PM variant that
+# consistently beats baseline across both the 6-month OOS and 2-year windows.
+# This sweep dials in the two key parameters of that mechanism:
+#
+# (floor) — minimum fraction of normal order size on extreme-volume candles
+#   Default 0.35 → also test 0.20 (more aggressive) and 0.50 (gentler)
+#
+# (period) — SMA window for computing vol_avg baseline
+#   Default 20 → also test 10 (faster signal) and 40 (slower signal)
+#
+# Grid of variants (floor × period, plus unscaled baseline as control):
+#   baseline    — no vol scaling (control)
+#   C_f35_p20   — current C_gridvol (exactly replicates XRPPM2 winner)
+#   C_f20_p20   — more aggressive floor, same period
+#   C_f50_p20   — gentler floor, same period
+#   C_f35_p10   — same floor, faster vol signal
+#   C_f35_p40   — same floor, slower vol signal
+#   C_f20_p10   — most aggressive: lowest floor + fastest signal
+# ===========================================================================
+
+XRP_PM_V3_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V3_CONFIG["param_sets"] = [
+    _pm_v2_set("pm3_baseline"),
+    _pm_v2_set("pm3_C_f35_p20", grid_vol_scale=True, grid_vol_floor=0.35, grid_vol_period=20),
+    _pm_v2_set("pm3_C_f20_p20", grid_vol_scale=True, grid_vol_floor=0.20, grid_vol_period=20),
+    _pm_v2_set("pm3_C_f50_p20", grid_vol_scale=True, grid_vol_floor=0.50, grid_vol_period=20),
+    _pm_v2_set("pm3_C_f35_p10", grid_vol_scale=True, grid_vol_floor=0.35, grid_vol_period=10),
+    _pm_v2_set("pm3_C_f35_p40", grid_vol_scale=True, grid_vol_floor=0.35, grid_vol_period=40),
+    _pm_v2_set("pm3_C_f20_p10", grid_vol_scale=True, grid_vol_floor=0.20, grid_vol_period=10),
+]
+
+XRP_PM_V3_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V3_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V3_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V3_2Y_CONFIG["param_sets"] = [
+    _pm_v2_set("2y_pm3_baseline"),
+    _pm_v2_set("2y_pm3_C_f35_p20", grid_vol_scale=True, grid_vol_floor=0.35, grid_vol_period=20),
+    _pm_v2_set("2y_pm3_C_f20_p20", grid_vol_scale=True, grid_vol_floor=0.20, grid_vol_period=20),
+    _pm_v2_set("2y_pm3_C_f50_p20", grid_vol_scale=True, grid_vol_floor=0.50, grid_vol_period=20),
+    _pm_v2_set("2y_pm3_C_f35_p10", grid_vol_scale=True, grid_vol_floor=0.35, grid_vol_period=10),
+    _pm_v2_set("2y_pm3_C_f35_p40", grid_vol_scale=True, grid_vol_floor=0.35, grid_vol_period=40),
+    _pm_v2_set("2y_pm3_C_f20_p10", grid_vol_scale=True, grid_vol_floor=0.20, grid_vol_period=10),
 ]
 
 
@@ -2579,6 +2632,16 @@ if __name__ == "__main__":
         print("  v12 PM tuning (A/B/C) — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V2_2Y_CONFIG)
+    elif symbol in ("XRPPM3", "PM3"):
+        print("\n" + "=" * 60)
+        print("  v13 C_gridvol sweep (floor × period) — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V3_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v13 C_gridvol sweep (floor × period) — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V3_2Y_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")

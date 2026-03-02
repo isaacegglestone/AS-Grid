@@ -62,6 +62,12 @@ jobs:
         # 1min parquet:  restored from Actions cache above (keyed on generate script hash).
         run: python asBack/backtest_grid_bitunix.py XRPPM2
 
+      - name: Backtest XRP/USDT — v13 C_gridvol parameter sweep (floor × period)
+        # Dials in the two knobs of the XRPPM2 winning variant (C_gridvol):
+        #   floor   — min order size fraction: 0.20 / 0.35 (default) / 0.50
+        #   period  — vol SMA lookback: 10 / 20 (default) / 40
+        run: python asBack/backtest_grid_bitunix.py XRPPM3
+
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
   #          GitHub Environment (Settings → Environments → ec2 → Required reviewers)
