@@ -2525,7 +2525,7 @@ XRP_PM_V4_2Y_CONFIG["param_sets"] = [
 #
 # All regime-filter variants use hysteresis=2% to avoid rapid toggling.
 # ===========================================================================
-_V5_BASE = dict(grid_vol_scale=True, grid_vol_floor=0.35, grid_vol_period=40)
+_V5_BASE = dict(grid_vol_scale=True, grid_vol_floor=0.35, grid_vol_period=50)  # XRPPM4 winner
 
 XRP_PM_V5_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
 XRP_PM_V5_CONFIG["param_sets"] = [
