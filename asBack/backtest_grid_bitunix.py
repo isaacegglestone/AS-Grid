@@ -432,10 +432,20 @@ class GridOrderBacktester:
 
             # Per-side caps: for a hedge strategy use max_positions_per_side=1
             max_per_side = self.config.get("max_positions_per_side", self.config["max_positions"])
+            # Regime short boost: in a bearish regime (price < EMA*(1-hyst)),
+            # allow regime_short_cap short levels instead of the normal cap.
+            # Shorts are the profitable side below EMA — deploy more capital there.
+            short_max_per_side = max_per_side
+            if (self.config.get("regime_filter") and self.config.get("regime_short_cap", 0) > 0
+                    and "regime_ema" in self.df.columns):
+                _ema_sb  = float(self.df["regime_ema"].iloc[idx])
+                _hyst_sb = self.config.get("regime_hysteresis_pct", 0.02)
+                if _ema_sb > 0 and price < _ema_sb * (1 - _hyst_sb):
+                    short_max_per_side = int(self.config["regime_short_cap"])
             long_at_cap  = len(self.long_positions)  >= max_per_side
-            short_at_cap = len(self.short_positions) >= max_per_side
+            short_at_cap = len(self.short_positions) >= short_max_per_side
             open_position_count = len(self.long_positions) + len(self.short_positions)
-            at_max = open_position_count >= self.config["max_positions"]
+            at_max = open_position_count >= (max_per_side + short_max_per_side)
 
             # Per-side unrealized loss circuit breaker.
             # Prevents piling into a trending move — if the open positions on
@@ -1413,6 +1423,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "grid_vol_floor", "vol_period",
                     # v15 regime filter
                     "regime_filter", "regime_ema_period", "regime_hysteresis_pct",
+                    # v16 XRPPM6 structural params
+                    "max_positions_per_side", "regime_short_cap",
                 ) if k in params}),
             }
         )
@@ -2320,8 +2332,12 @@ def _pm_v2_set(
     regime_filter: bool = False,
     regime_ema_period: int = 200,
     regime_hysteresis_pct: float = 0.02,
+    # v16 XRPPM6 structural extensions
+    spacing: float = 0.010,          # symmetric grid spacing for all 4 sides
+    max_per_side: int = 0,           # 0 = inherit base config default (3)
+    regime_short_cap: int = 0,       # 0 = off; >0 = short cap below regime EMA
 ) -> Dict[str, Any]:
-    """v12/v13/v15 PM-tuning param set — exposes RSI threshold, BB threshold, grid vol scale, floor, period, and regime filter."""
+    """v12/v13/v15/v16 PM-tuning param set — RSI, BB, grid vol scale, regime filter, spacing, depth."""
     return {
         "name": name,
         "use_sl": True,
@@ -2348,8 +2364,10 @@ def _pm_v2_set(
         "regime_filter":           regime_filter,
         "regime_ema_period":       regime_ema_period,
         "regime_hysteresis_pct":   regime_hysteresis_pct,
-        "long_settings":   {"up_spacing": 0.010, "down_spacing": 0.010},
-        "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
+        "long_settings":  {"up_spacing": spacing, "down_spacing": spacing},
+        "short_settings": {"up_spacing": spacing, "down_spacing": spacing},
+        **({"max_positions_per_side": max_per_side} if max_per_side > 0 else {}),
+        **({"regime_short_cap":       regime_short_cap} if regime_short_cap > 0 else {}),
     }
 
 
@@ -2543,6 +2561,103 @@ XRP_PM_V5_2Y_CONFIG["param_sets"] = [
     _pm_v2_set("2y_pm5_ema100",          **_V5_BASE, regime_filter=True, regime_ema_period=100),
     _pm_v2_set("2y_pm5_ema200",          **_V5_BASE, regime_filter=True, regime_ema_period=200),
     _pm_v2_set("2y_pm5_ema400",          **_V5_BASE, regime_filter=True, regime_ema_period=400),
+]
+
+
+# ===========================================================================
+# v16 — XRPPM6: Comprehensive grid and regime sweep
+#
+# Build on XRPPM5 winner (C_gridvol, vol_period=50, 15min EMA200, h=2%).
+# Six sweep groups to simultaneously address:
+#
+#   (A) Hysteresis — width of the band below EMA before halting longs.
+#       h2% is the pm5 default; scan h0..h5 to find the optimal deadband.
+#
+#   (B) EMA period fine-tune around the ema200 winner (150/175/225/250).
+#       pm5 showed 200 > 100 and 200 > 400 on 2y; find the true optimum.
+#
+#   (C) vol_period compound — p40 was the XRPPM3 2y winner.
+#       Does p40 + ema200 beat the p50 + ema200 combo on 2y?
+#
+#   (D) Grid spacing: 0.5% / 0.7% / 1.0% (control) / 1.5%.
+#       Diagnoses how much grid income is locked in spacing friction.
+#       Tighter → more fills, smaller profit, tighter SLs.
+#       Wider  → fewer fills, larger profit, fewer SLs.
+#
+#   (E) Grid depth (max_positions_per_side): 3 (control) / 4 / 5.
+#       At 3 × $100 × 2 sides = $600 deployed, $400 sits idle.
+#       Adding depth puts that capital to work.
+#
+#   (F) Short boost in bearish regime: regime_short_cap = 4 or 5.
+#       Below EMA, longs are halted; shorts are the profitable side.
+#       Deploying extra short levels harvests more of the downtrend.
+# ===========================================================================
+_V6_BASE = dict(
+    grid_vol_scale=True, grid_vol_floor=0.35, grid_vol_period=50,  # XRPPM4/5 winner
+    regime_filter=True, regime_ema_period=200, regime_hysteresis_pct=0.02,   # XRPPM5 winner
+)
+
+XRP_PM_V6_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V6_CONFIG["param_sets"] = [
+    # ── Baseline: matches pm5_ema200 (18.93% 2y, 0.18% max_dd) ───────────────
+    _pm_v2_set("pm6_baseline",  **_V6_BASE),
+
+    # ── Group A — Hysteresis sweep (EMA200, p50) ──────────────────────────────
+    _pm_v2_set("pm6_h0",        **{**_V6_BASE, "regime_hysteresis_pct": 0.00}),  # no band
+    _pm_v2_set("pm6_h1",        **{**_V6_BASE, "regime_hysteresis_pct": 0.01}),  # 1% below EMA
+    _pm_v2_set("pm6_h3",        **{**_V6_BASE, "regime_hysteresis_pct": 0.03}),  # 3% below EMA
+    _pm_v2_set("pm6_h5",        **{**_V6_BASE, "regime_hysteresis_pct": 0.05}),  # 5% below EMA
+
+    # ── Group B — EMA period fine-tune (h=2%, p50) ────────────────────────────
+    _pm_v2_set("pm6_e150",      **{**_V6_BASE, "regime_ema_period": 150}),  # 37.5h
+    _pm_v2_set("pm6_e175",      **{**_V6_BASE, "regime_ema_period": 175}),  # 43.75h
+    _pm_v2_set("pm6_e225",      **{**_V6_BASE, "regime_ema_period": 225}),  # 56.25h
+    _pm_v2_set("pm6_e250",      **{**_V6_BASE, "regime_ema_period": 250}),  # 62.5h
+
+    # ── Group C — vol_period compound (XRPPM3 2y: p40 vs p50 + ema200) ───────
+    _pm_v2_set("pm6_p40",       **{**_V6_BASE, "grid_vol_period": 40}),
+
+    # ── Group D — Grid spacing (harvesting diagnostic, ema200 h2 p50) ─────────
+    _pm_v2_set("pm6_sp05",      **_V6_BASE, spacing=0.005),  # 0.5% — double fill rate
+    _pm_v2_set("pm6_sp07",      **_V6_BASE, spacing=0.007),  # 0.7% — intermediate
+    _pm_v2_set("pm6_sp15",      **_V6_BASE, spacing=0.015),  # 1.5% — wider profit/fill
+
+    # ── Group E — Grid depth (capital utilisation, ema200 h2 p50) ────────────
+    _pm_v2_set("pm6_d4",        **_V6_BASE, max_per_side=4),  # $400/side max deployed
+    _pm_v2_set("pm6_d5",        **_V6_BASE, max_per_side=5),  # $500/side max deployed
+
+    # ── Group F — Short boost below EMA (deploy idle capital in downtrend) ────
+    _pm_v2_set("pm6_sb4",       **_V6_BASE, regime_short_cap=4),  # 4 short levels below EMA
+    _pm_v2_set("pm6_sb5",       **_V6_BASE, regime_short_cap=5),  # 5 short levels below EMA
+]
+
+XRP_PM_V6_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V6_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V6_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V6_2Y_CONFIG["param_sets"] = [
+    _pm_v2_set("2y_pm6_baseline",  **_V6_BASE),
+
+    _pm_v2_set("2y_pm6_h0",        **{**_V6_BASE, "regime_hysteresis_pct": 0.00}),
+    _pm_v2_set("2y_pm6_h1",        **{**_V6_BASE, "regime_hysteresis_pct": 0.01}),
+    _pm_v2_set("2y_pm6_h3",        **{**_V6_BASE, "regime_hysteresis_pct": 0.03}),
+    _pm_v2_set("2y_pm6_h5",        **{**_V6_BASE, "regime_hysteresis_pct": 0.05}),
+
+    _pm_v2_set("2y_pm6_e150",      **{**_V6_BASE, "regime_ema_period": 150}),
+    _pm_v2_set("2y_pm6_e175",      **{**_V6_BASE, "regime_ema_period": 175}),
+    _pm_v2_set("2y_pm6_e225",      **{**_V6_BASE, "regime_ema_period": 225}),
+    _pm_v2_set("2y_pm6_e250",      **{**_V6_BASE, "regime_ema_period": 250}),
+
+    _pm_v2_set("2y_pm6_p40",       **{**_V6_BASE, "grid_vol_period": 40}),
+
+    _pm_v2_set("2y_pm6_sp05",      **_V6_BASE, spacing=0.005),
+    _pm_v2_set("2y_pm6_sp07",      **_V6_BASE, spacing=0.007),
+    _pm_v2_set("2y_pm6_sp15",      **_V6_BASE, spacing=0.015),
+
+    _pm_v2_set("2y_pm6_d4",        **_V6_BASE, max_per_side=4),
+    _pm_v2_set("2y_pm6_d5",        **_V6_BASE, max_per_side=5),
+
+    _pm_v2_set("2y_pm6_sb4",       **_V6_BASE, regime_short_cap=4),
+    _pm_v2_set("2y_pm6_sb5",       **_V6_BASE, regime_short_cap=5),
 ]
 
 
@@ -2841,6 +2956,16 @@ if __name__ == "__main__":
         print("  v15 Regime filter sweep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V5_2Y_CONFIG)
+    elif symbol in ("XRPPM6", "PM6"):
+        print("\n" + "=" * 60)
+        print("  v16 XRPPM6 comprehensive sweep — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V6_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v16 XRPPM6 comprehensive sweep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V6_2Y_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")

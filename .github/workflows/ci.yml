@@ -79,6 +79,16 @@ jobs:
         # Variants: baseline (no filter) / ema100 / ema200 / ema400
         run: python asBack/backtest_grid_bitunix.py XRPPM5
 
+      - name: Backtest XRP/USDT — v16 XRPPM6 comprehensive sweep
+        # Sweeps 6 dimensions on top of XRPPM5 winner (ema200, h2%, p50):
+        #   (A) hysteresis: h0/h1/h2(ctrl)/h3/h5
+        #   (B) EMA fine-tune: e150/e175/e200(ctrl)/e225/e250
+        #   (C) vol_period compound: p40 vs p50(ctrl) + ema200
+        #   (D) grid spacing: sp05/sp07/sp10(ctrl)/sp15 — grid harvesting
+        #   (E) grid depth: d3(ctrl)/d4/d5 — capital utilisation
+        #   (F) short boost below EMA: sb4/sb5
+        run: python asBack/backtest_grid_bitunix.py XRPPM6
+
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
   #          GitHub Environment (Settings → Environments → ec2 → Required reviewers)
