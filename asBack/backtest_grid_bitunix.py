@@ -339,7 +339,15 @@ class GridOrderBacktester:
 
             price: float = row["close"]
             timestamp = row["open_time"]
-            effective_order_value = self.config["order_value"] * self.leverage
+            # v17 equity-proportional sizing: if order_value_pct is set, scale each
+            # grid order by (current equity × pct) instead of a fixed USD amount.
+            # Gains compound naturally; position risk shrinks after losses.
+            _ovp = self.config.get("order_value_pct", 0.0)
+            if _ovp > 0:
+                _ov_min = self.config.get("order_value_min", 10.0)
+                effective_order_value = max(_ov_min, self._equity(price) * _ovp) * self.leverage
+            else:
+                effective_order_value = self.config["order_value"] * self.leverage
 
             # v12 Option C: grid vol scale — shrink grid order size on high-vol candles
             # (volatile/trending market → smaller orders; quiet/ranging → normal size)
@@ -916,15 +924,29 @@ class GridOrderBacktester:
                 else:
                     if (not short_at_cap and not short_loss_tripped
                             and not short_blocked_by_trend and not halt_all):
-                        sell_price = self.last_short_price * (1 + self.short_settings["up_spacing"])
+                        # v17 asymmetric short spacing: below regime EMA use tighter
+                        # spacing → faster SL cycling, less unrealized-loss accumulation,
+                        # more fills during the downtrend regime.
+                        _rss = self.config.get("regime_short_spacing", 0.0)
+                        if (_rss > 0 and self.config.get("regime_filter")
+                                and "regime_ema" in self.df.columns):
+                            _ema_rss  = float(self.df["regime_ema"].iloc[idx])
+                            _hyst_rss = self.config.get("regime_hysteresis_pct", 0.02)
+                            _eff_short_sp = (_rss
+                                if _ema_rss > 0 and price < _ema_rss * (1 - _hyst_rss)
+                                else self.short_settings["up_spacing"])
+                        else:
+                            _eff_short_sp = self.short_settings["up_spacing"]
+
+                        sell_price = self.last_short_price * (1 + _eff_short_sp)
                         if price >= sell_price:
                             qty = effective_order_value / price
                             margin_required = qty * price / self.leverage
                             fee_cost = qty * price * (self.fee / 2)
                             if (margin_required + fee_cost) <= available_margin:
-                                tp_price = price * (1 - self.short_settings["down_spacing"])
+                                tp_price = price * (1 - _eff_short_sp)
                                 if use_sl:
-                                    short_sl_pct = max(sl_multiplier * self.short_settings["up_spacing"], min_sl_pct)
+                                    short_sl_pct = max(sl_multiplier * _eff_short_sp, min_sl_pct)
                                     sl_price = price * (1 + short_sl_pct)
                                 else:
                                     sl_price = float("inf")  # sentinel: never triggered
@@ -1425,6 +1447,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "regime_filter", "regime_ema_period", "regime_hysteresis_pct",
                     # v16 XRPPM6 structural params
                     "max_positions_per_side", "regime_short_cap",
+                    # v17 XRPPM7 params
+                    "leverage", "order_value_pct", "order_value_min", "regime_short_spacing",
                 ) if k in params}),
             }
         )
@@ -2336,8 +2360,13 @@ def _pm_v2_set(
     spacing: float = 0.010,          # symmetric grid spacing for all 4 sides
     max_per_side: int = 0,           # 0 = inherit base config default (3)
     regime_short_cap: int = 0,       # 0 = off; >0 = short cap below regime EMA
+    # v17 XRPPM7 extensions
+    leverage: float = 0.0,          # 0 = inherit base config (default 1x)
+    order_value_pct: float = 0.0,   # 0 = fixed order_value; >0 = % of equity per level
+    order_value_min: float = 10.0,  # floor order value when equity-pct mode is active
+    regime_short_spacing: float = 0.0,  # 0 = off; >0 = short spacing below regime EMA
 ) -> Dict[str, Any]:
-    """v12/v13/v15/v16 PM-tuning param set — RSI, BB, grid vol scale, regime filter, spacing, depth."""
+    """v12/v13/v15/v16/v17 PM-tuning param set — RSI, BB, grid vol scale, regime filter, spacing, depth, leverage, equity-pct."""
     return {
         "name": name,
         "use_sl": True,
@@ -2368,6 +2397,10 @@ def _pm_v2_set(
         "short_settings": {"up_spacing": spacing, "down_spacing": spacing},
         **({"max_positions_per_side": max_per_side} if max_per_side > 0 else {}),
         **({"regime_short_cap":       regime_short_cap} if regime_short_cap > 0 else {}),
+        **({"leverage":               leverage}             if leverage > 0 else {}),
+        **({"order_value_pct":        order_value_pct}      if order_value_pct > 0 else {}),
+        **({"order_value_min":        order_value_min}      if order_value_pct > 0 else {}),
+        **({"regime_short_spacing":   regime_short_spacing} if regime_short_spacing > 0 else {}),
     }
 
 
@@ -2658,6 +2691,84 @@ XRP_PM_V6_2Y_CONFIG["param_sets"] = [
 
     _pm_v2_set("2y_pm6_sb4",       **_V6_BASE, regime_short_cap=4),
     _pm_v2_set("2y_pm6_sb5",       **_V6_BASE, regime_short_cap=5),
+]
+
+
+# ===========================================================================
+# v17 — XRPPM7: Leverage, equity-proportional sizing, asymmetric short spacing
+#
+# Build on the XRPPM6 winner (TBD — update _V7_BASE once run #88 completes).
+# Until then _V7_BASE inherits _V6_BASE (pm6_baseline = pm5_ema200 stack).
+#
+# Three sweep groups:
+#
+#   (L) Leverage: 1x (ctrl) / 1.5x / 2x / 3x
+#       Direct P&L multiplier — returns and drawdown scale proportionally.
+#       With current max_dd of 0.18%, even 3x stays well below 1% drawdown.
+#
+#   (P) Equity-proportional order sizing (order_value_pct)
+#       Replace fixed $100/level with (equity × pct).
+#       Returns compound as equity grows; position size shrinks after losses.
+#       pct=0.10 → $100 at start (same absolute as baseline, but compounds).
+#       pct=0.12 → $120 at start (+20% from day one, compounds faster).
+#       pct=0.15 → $150 at start (+50% initial aggression + compounding).
+#
+#   (LP) Leverage + equity-pct combined (best of L and P stacked):
+#       l2_eqp10 → 2× leverage, 10% equity-pct (effective $200/level at start)
+#       l15_eqp10 → 1.5× leverage, 10% equity-pct (effective $150/level at start)
+#
+#   (S) Asymmetric short spacing below regime EMA:
+#       When longs are halted (bearish regime), switch to tighter short grid.
+#       Tighter SLs → less locked capital per stopped position → faster cycling.
+#       as07 → 0.7% short spacing below EMA (vs 1.0% normal)
+#       as05 → 0.5% short spacing below EMA
+#
+# TODO: After run #88 (XRPPM6) completes, update _V7_BASE to include winners
+#       from groups E (depth) and F (short boost) before triggering XRPPM7 CI.
+# ===========================================================================
+# _V7_BASE: start with V6_BASE — update max_per_side / regime_short_cap once
+#           XRPPM6 results are confirmed.
+_V7_BASE = dict(**_V6_BASE)  # TODO: update with XRPPM6 winners after run #88
+
+XRP_PM_V7_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V7_CONFIG["param_sets"] = [
+    # ── Baseline (control = pm6_baseline = pm5_ema200) ───────────────────────
+    _pm_v2_set("pm7_baseline",    **_V7_BASE),
+
+    # ── Group L — Leverage sweep ───────────────────────────────────────────────
+    _pm_v2_set("pm7_l15",         **_V7_BASE, leverage=1.5),   # +50% returns, +50% dd
+    _pm_v2_set("pm7_l2",          **_V7_BASE, leverage=2.0),   # ×2 returns,  ×2 dd
+    _pm_v2_set("pm7_l3",          **_V7_BASE, leverage=3.0),   # ×3 returns,  ×3 dd
+
+    # ── Group P — Equity-proportional order sizing ────────────────────────────
+    _pm_v2_set("pm7_eqp10",       **_V7_BASE, order_value_pct=0.10),  # = $100 at start
+    _pm_v2_set("pm7_eqp12",       **_V7_BASE, order_value_pct=0.12),  # = $120 at start
+    _pm_v2_set("pm7_eqp15",       **_V7_BASE, order_value_pct=0.15),  # = $150 at start
+
+    # ── Group LP — Leverage + equity-pct combined ─────────────────────────────
+    _pm_v2_set("pm7_l2_eqp10",    **_V7_BASE, leverage=2.0, order_value_pct=0.10),
+    _pm_v2_set("pm7_l15_eqp10",   **_V7_BASE, leverage=1.5, order_value_pct=0.10),
+
+    # ── Group S — Asymmetric short spacing below regime EMA ───────────────────
+    _pm_v2_set("pm7_as07",        **_V7_BASE, regime_short_spacing=0.007),  # 0.7% below EMA
+    _pm_v2_set("pm7_as05",        **_V7_BASE, regime_short_spacing=0.005),  # 0.5% below EMA
+]
+
+XRP_PM_V7_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V7_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V7_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V7_2Y_CONFIG["param_sets"] = [
+    _pm_v2_set("2y_pm7_baseline",   **_V7_BASE),
+    _pm_v2_set("2y_pm7_l15",        **_V7_BASE, leverage=1.5),
+    _pm_v2_set("2y_pm7_l2",         **_V7_BASE, leverage=2.0),
+    _pm_v2_set("2y_pm7_l3",         **_V7_BASE, leverage=3.0),
+    _pm_v2_set("2y_pm7_eqp10",      **_V7_BASE, order_value_pct=0.10),
+    _pm_v2_set("2y_pm7_eqp12",      **_V7_BASE, order_value_pct=0.12),
+    _pm_v2_set("2y_pm7_eqp15",      **_V7_BASE, order_value_pct=0.15),
+    _pm_v2_set("2y_pm7_l2_eqp10",   **_V7_BASE, leverage=2.0, order_value_pct=0.10),
+    _pm_v2_set("2y_pm7_l15_eqp10",  **_V7_BASE, leverage=1.5, order_value_pct=0.10),
+    _pm_v2_set("2y_pm7_as07",       **_V7_BASE, regime_short_spacing=0.007),
+    _pm_v2_set("2y_pm7_as05",       **_V7_BASE, regime_short_spacing=0.005),
 ]
 
 
@@ -2966,6 +3077,16 @@ if __name__ == "__main__":
         print("  v16 XRPPM6 comprehensive sweep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V6_2Y_CONFIG)
+    elif symbol in ("XRPPM7", "PM7"):
+        print("\n" + "=" * 60)
+        print("  v17 XRPPM7 leverage + equity-pct sweep — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V7_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v17 XRPPM7 leverage + equity-pct sweep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V7_2Y_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")

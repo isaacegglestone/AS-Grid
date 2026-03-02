@@ -89,6 +89,15 @@ jobs:
         #   (F) short boost below EMA: sb4/sb5
         run: python asBack/backtest_grid_bitunix.py XRPPM6
 
+      - name: Backtest XRP/USDT — v17 XRPPM7 leverage + equity-proportional sizing
+        # Build on XRPPM6 winner (update _V7_BASE after XRPPM6 results).
+        # Sweeps 4 groups to maximise absolute dollar P&L:
+        #   (L) leverage: 1x(ctrl) / 1.5x / 2x / 3x
+        #   (P) equity-pct: eqp10(=start) / eqp12 / eqp15 — compounding
+        #   (LP) combined: l2_eqp10 / l15_eqp10
+        #   (S) asymmetric short spacing below EMA: as07 / as05
+        run: python asBack/backtest_grid_bitunix.py XRPPM7
+
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
   #          GitHub Environment (Settings → Environments → ec2 → Required reviewers)
