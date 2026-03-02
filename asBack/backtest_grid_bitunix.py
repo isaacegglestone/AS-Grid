@@ -416,6 +416,20 @@ class GridOrderBacktester:
                     self.crash_halt_counter = crash_cb_halt_len
                     halt_grid_longs = True
 
+            # ------------------------------------------------------------------
+            # v15 Regime filter — suppress new long grid entries in bearish regime
+            # Uses a multi-timeframe EMA computed from 15min closes and reindexed
+            # to 1min.  When price is below EMA * (1 - hysteresis), the market is
+            # in a sustained downtrend and adding long grid orders would accumulate
+            # inventory against the trend → suppress until regime clears.
+            # ------------------------------------------------------------------
+            if not halt_grid_longs and self.config.get("regime_filter", False):
+                if "regime_ema" in self.df.columns:
+                    _regime_ema = float(self.df["regime_ema"].iloc[idx])
+                    _hyst = self.config.get("regime_hysteresis_pct", 0.02)
+                    if _regime_ema > 0 and price < _regime_ema * (1 - _hyst):
+                        halt_grid_longs = True
+
             # Per-side caps: for a hedge strategy use max_positions_per_side=1
             max_per_side = self.config.get("max_positions_per_side", self.config["max_positions"])
             long_at_cap  = len(self.long_positions)  >= max_per_side
@@ -1317,6 +1331,29 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
     best_result = None
     best_bt = None
 
+    # Pre-compute 15min EMA arrays for any param sets that use the regime filter.
+    # We load 15min klines once and align them to the 1min index via forward-fill.
+    _regime_ema_cache: Dict[int, np.ndarray] = {}
+    _regime_param_sets = [p for p in config["param_sets"] if p.get("regime_filter")]
+    if _regime_param_sets:
+        df_15m = await fetch_klines_as_df(
+            symbol=config["symbol"],
+            interval="15min",
+            start_dt=config["start_date"],
+            end_dt=config["end_date"],
+            api_key=config.get("api_key", ""),
+            secret_key=config.get("secret_key", ""),
+        )
+        ts_15m = pd.to_datetime(df_15m["open_time"], unit="ms", utc=True)
+        ts_1m  = pd.to_datetime(full_df["open_time"],  unit="ms", utc=True)
+        for p in _regime_param_sets:
+            period = int(p["regime_ema_period"])
+            if period not in _regime_ema_cache:
+                ema_15m = df_15m["close"].ewm(span=period, adjust=False).mean()
+                ema_series = pd.Series(ema_15m.values, index=ts_15m)
+                aligned = ema_series.reindex(ts_1m, method="ffill").bfill()
+                _regime_ema_cache[period] = aligned.values
+
     for params in config["param_sets"]:
         print(f"\n🚀 Strategy: {params['name']}")
         print(
@@ -1372,11 +1409,20 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "grid_notional_cap_pct",
                     # v12 grid vol scale
                     "grid_vol_scale",
+                    # v13 grid vol floor + period
+                    "grid_vol_floor", "vol_period",
+                    # v15 regime filter
+                    "regime_filter", "regime_ema_period", "regime_hysteresis_pct",
                 ) if k in params}),
             }
         )
 
-        bt = GridOrderBacktester(full_df.copy(), None, temp_config)
+        # Per-run df: add regime_ema column if this param set uses the filter
+        df_slice = full_df.copy()
+        if params.get("regime_filter") and params.get("regime_ema_period") in _regime_ema_cache:
+            df_slice["regime_ema"] = _regime_ema_cache[params["regime_ema_period"]]
+
+        bt = GridOrderBacktester(df_slice, None, temp_config)
         result = bt.run()
         result.update(
             {
@@ -2271,8 +2317,11 @@ def _pm_v2_set(
     grid_vol_scale: bool = False,
     grid_vol_floor: float = 0.35,
     grid_vol_period: int = 20,
+    regime_filter: bool = False,
+    regime_ema_period: int = 200,
+    regime_hysteresis_pct: float = 0.02,
 ) -> Dict[str, Any]:
-    """v12/v13 PM-tuning param set — exposes RSI threshold, BB threshold, grid vol scale, floor and period."""
+    """v12/v13/v15 PM-tuning param set — exposes RSI threshold, BB threshold, grid vol scale, floor, period, and regime filter."""
     return {
         "name": name,
         "use_sl": True,
@@ -2295,6 +2344,10 @@ def _pm_v2_set(
         "grid_vol_scale":  grid_vol_scale,
         "grid_vol_floor":  grid_vol_floor,
         "vol_period":      grid_vol_period,
+        # v15 — multi-timeframe regime filter
+        "regime_filter":           regime_filter,
+        "regime_ema_period":       regime_ema_period,
+        "regime_hysteresis_pct":   regime_hysteresis_pct,
         "long_settings":   {"up_spacing": 0.010, "down_spacing": 0.010},
         "short_settings": {"up_spacing": 0.010, "down_spacing": 0.010},
     }
@@ -2452,6 +2505,44 @@ XRP_PM_V4_2Y_CONFIG["param_sets"] = [
     _pm_v2_set("2y_pm4_C_p60",  grid_vol_scale=True, grid_vol_period=60),
     _pm_v2_set("2y_pm4_C_p80",  grid_vol_scale=True, grid_vol_period=80),
     _pm_v2_set("2y_pm4_C_p120", grid_vol_scale=True, grid_vol_period=120),
+]
+
+
+# ===========================================================================
+# v15 — Multi-timeframe regime filter sweep
+#
+# Build on the XRPPM4 winner (C_gridvol, vol_period=40).
+# Add a 15-minute EMA regime filter that suppresses new long grid entries
+# when price < EMA(15min close, N) × (1 - hysteresis).
+# During bearish regimes the strategy stops buying the dip, avoiding the
+# slow-grind losses that the ADX filter cannot catch.
+#
+# Variants:
+#   pm5_baseline      — control: C_f35_p40, NO regime filter
+#   pm5_ema100        — EMA(100) on 15min ≈ 25h lookback
+#   pm5_ema200        — EMA(200) on 15min ≈ 50h lookback (expected winner)
+#   pm5_ema400        — EMA(400) on 15min ≈ 100h lookback
+#
+# All regime-filter variants use hysteresis=2% to avoid rapid toggling.
+# ===========================================================================
+_V5_BASE = dict(grid_vol_scale=True, grid_vol_floor=0.35, grid_vol_period=40)
+
+XRP_PM_V5_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V5_CONFIG["param_sets"] = [
+    _pm_v2_set("pm5_baseline",           **_V5_BASE),
+    _pm_v2_set("pm5_ema100",             **_V5_BASE, regime_filter=True, regime_ema_period=100),
+    _pm_v2_set("pm5_ema200",             **_V5_BASE, regime_filter=True, regime_ema_period=200),
+    _pm_v2_set("pm5_ema400",             **_V5_BASE, regime_filter=True, regime_ema_period=400),
+]
+
+XRP_PM_V5_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V5_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V5_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V5_2Y_CONFIG["param_sets"] = [
+    _pm_v2_set("2y_pm5_baseline",        **_V5_BASE),
+    _pm_v2_set("2y_pm5_ema100",          **_V5_BASE, regime_filter=True, regime_ema_period=100),
+    _pm_v2_set("2y_pm5_ema200",          **_V5_BASE, regime_filter=True, regime_ema_period=200),
+    _pm_v2_set("2y_pm5_ema400",          **_V5_BASE, regime_filter=True, regime_ema_period=400),
 ]
 
 
@@ -2740,6 +2831,16 @@ if __name__ == "__main__":
         print("  v14 C_gridvol period fine-sweep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V4_2Y_CONFIG)
+    elif symbol in ("XRPPM5", "PM5"):
+        print("\n" + "=" * 60)
+        print("  v15 Regime filter sweep — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V5_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v15 Regime filter sweep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V5_2Y_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
