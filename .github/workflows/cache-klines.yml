@@ -31,12 +31,12 @@ jobs:
       - name: Check if parquet already committed
         id: check
         run: |
-          if [ -f "asBack/klines_cache/XRPUSDT_15min.parquet" ]; then
+          if [ -f "asBack/klines_cache/XRPUSDT_15min.parquet" ] && [ -f "asBack/klines_cache/XRPUSDT_1min.parquet" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Parquet already committed — skipping fetch."
+            echo "Both parquets already committed — skipping fetch."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "Parquet not found — will fetch (Binance 2019-10-01→2022-04-20 + Bitunix 2022-04-20→present)."
+            echo "One or more parquets missing — will fetch (Binance 2019-10-01→2022-04-20 + Bitunix 2022-04-20→present)."
           fi
 
       - uses: actions/setup-python@v5
