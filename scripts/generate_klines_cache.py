@@ -11,11 +11,12 @@ Data sources
   giving a full ~6.5-year history including the 2021 bull run, 2022 crash
   (LUNA/FTX) and the 2023-2025 recovery cycle.
 
-For the 15min dataset the two sources are stitched:
+Both datasets are stitched from both sources:
   Binance  2019-10-01 → 2022-04-20  (pre-Bitunix history)
-  Bitunix  2022-04-20 → 2026-02-28  (live-exchange data used by the bot)
+  Bitunix  2022-04-20 → now          (live-exchange data used by the bot)
 
-The 1min dataset is Bitunix-only (7 years of 1min data would be ~600 MB).
+The 1min stitched dataset is ~200–300 MB uncompressed (~60–80 MB as parquet).
+It is stored in GitHub Actions cache (not committed to git).
 
 Usage
 -----
@@ -73,15 +74,18 @@ _BINANCE_INTERVAL_MS = {
 
 # ---------------------------------------------------------------------------
 # Datasets to cache.
-# source="bitunix"   — fetch entirely from Bitunix.
 # source="stitched"  — fetch pre-BITUNIX_START from Binance, rest from Bitunix.
+# end_dt is evaluated at runtime so each generation always fetches up to today.
 # ---------------------------------------------------------------------------
-DATASETS = [
-    # Full ~6.5-year 15min history: Binance 2019-10-01 → 2022-04-20, then Bitunix.
-    ("XRPUSDT", "15min", datetime(2019, 10, 1), datetime(2026, 2, 28), "stitched"),
-    # 1min kept Bitunix-only — 7 years of 1min would be ~600 MB.
-    ("XRPUSDT", "1min",  datetime(2022, 4, 20), datetime(2026, 2, 28), "bitunix"),
-]
+def _datasets():
+    now = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    return [
+        # Full ~6.5-year 15min history: Binance 2019-10-01 → 2022-04-20, then Bitunix.
+        ("XRPUSDT", "15min", datetime(2019, 10, 1, tzinfo=timezone.utc), now, "stitched"),
+        # Full ~6.5-year 1min history: Binance 2019-10-01 → 2022-04-20, then Bitunix.
+        # Stored in Actions cache only (~60-80 MB parquet). Not committed to git.
+        ("XRPUSDT", "1min",  datetime(2019, 10, 1, tzinfo=timezone.utc), now, "stitched"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +203,7 @@ async def main() -> None:
     cache_dir = os.path.join(_REPO_ROOT, "asBack", "klines_cache")
     os.makedirs(cache_dir, exist_ok=True)
 
-    for symbol, interval, start_dt, end_dt, source in DATASETS:
+    for symbol, interval, start_dt, end_dt, source in _datasets():
         out_path = os.path.join(cache_dir, f"{symbol}_{interval}.parquet")
 
         if os.path.exists(out_path):
