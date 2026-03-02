@@ -1253,6 +1253,48 @@ def visualize_results(df_results: pd.DataFrame) -> None:
 
 
 # ===========================================================================
+# Quarterly P&L helper
+# ===========================================================================
+
+
+def _print_quarterly_breakdown(bt: "GridOrderBacktester", initial_balance: float) -> None:
+    """Print a quarter-by-quarter equity breakdown from the backtester's equity curve.
+
+    Shows per-quarter and cumulative returns so it's easy to spot which
+    sub-periods drove (or hurt) the overall result — especially useful for
+    multi-year windows where a single aggregate return hides intra-period drawdowns.
+    """
+    if len(bt.equity_curve) < 2:
+        return
+
+    ec_df = pd.DataFrame(
+        bt.equity_curve,
+        columns=["time", "price", "equity", "realized", "unrealized"],
+    )
+    ec_df["time"] = pd.to_datetime(ec_df["time"])
+    ec_df = ec_df.set_index("time")
+
+    q_end = ec_df["equity"].resample("QE").last().dropna()
+    if q_end.empty:
+        return
+
+    prev_eq = initial_balance
+    print("     " + "\u2500" * 60)
+    print("     Quarter-by-quarter breakdown:")
+    for q_date, eq in q_end.items():
+        q_return   = (eq - prev_eq) / prev_eq * 100
+        cum_return = (eq - initial_balance) / initial_balance * 100
+        period_str = f"{q_date.year} Q{q_date.quarter}"
+        flag = "  \u25c4 LOSS" if q_return < -3 else ("  \u2605" if q_return > 10 else "")
+        print(
+            f"       {period_str}: ${prev_eq:>8,.2f} \u2192 ${eq:>8,.2f}"
+            f"  {q_return:>+7.2f}%  (cum {cum_return:>+7.2f}%){flag}"
+        )
+        prev_eq = eq
+    print("     " + "\u2500" * 60)
+
+
+# ===========================================================================
 # Grid-search orchestrator
 # ===========================================================================
 
@@ -1358,6 +1400,7 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
             f"unrealized: ${result['unrealized_pnl']:+.2f}  "
             f"open at end: {open_long}L / {open_short}S"
         )
+        _print_quarterly_breakdown(bt, config["initial_balance"])
 
         if best_result is None or result["return_pct"] > best_result["return_pct"]:
             best_result = result
