@@ -35,10 +35,31 @@ jobs:
       - name: Unit tests
         run: python -m pytest --tb=short -q
 
+      # Restore the ~54 MB 1min parquet from Actions cache (populated by cache-klines.yml).
+      # Cache key matches cache-klines.yml so both workflows share the same entry.
+      - name: Restore 1min klines from Actions cache
+        id: cache-1min
+        uses: actions/cache/restore@v4
+        with:
+          path: asBack/klines_cache/XRPUSDT_1min.parquet
+          key: klines-1min-v1-${{ hashFiles('scripts/generate_klines_cache.py') }}
+
+      # Cache miss fallback: generate the 1min parquet inline (~15 min, Bitunix API).
+      # This only runs on the very first CI trigger before cache-klines.yml has seeded the cache.
+      - name: Generate 1min parquet (cache miss fallback)
+        if: steps.cache-1min.outputs.cache-hit != 'true'
+        run: python scripts/generate_klines_cache.py
+
+      - name: Save 1min parquet to Actions cache (if freshly generated)
+        if: steps.cache-1min.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: asBack/klines_cache/XRPUSDT_1min.parquet
+          key: klines-1min-v1-${{ hashFiles('scripts/generate_klines_cache.py') }}
+
       - name: Backtest XRP/USDT — v12 PM tuning (A/B/C options)
-        # klines are read from asBack/klines_cache/XRPUSDT_15min.parquet (committed).
-        # To regenerate: run .github/workflows/cache-klines.yml manually, download
-        # the artifact to asBack/klines_cache/, and commit the parquet file.
+        # 15min parquet: read from asBack/klines_cache/XRPUSDT_15min.parquet (committed).
+        # 1min parquet:  restored from Actions cache above (keyed on generate script hash).
         run: python asBack/backtest_grid_bitunix.py XRPPM2
 
   # ---------------------------------------------------------------------------
