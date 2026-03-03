@@ -2991,7 +2991,7 @@ XRP_PM_V9_2Y_CONFIG["param_sets"] = [
 #       split that drove btbw_tight's 2y gain.
 # ===========================================================================
 
-_V10_BASE = dict(**_V8_BASE, regime_hysteresis_pct=0.00)
+_V10_BASE = {**_V8_BASE, "regime_hysteresis_pct": 0.00}
 # = regime_ema_period=175, hysteresis=0.00, spacing=0.015, leverage=2.0
 # Expected baseline ~59.67% 2y (mirrors pm8_h0 from run #96)
 
