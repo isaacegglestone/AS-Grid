@@ -1,0 +1,23 @@
+name: Export klines cache as artifact
+on:
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore 1min klines from Actions cache
+        id: cache-1min
+        uses: actions/cache/restore@v4
+        with:
+          path: asBack/klines_cache/XRPUSDT_1min.parquet
+          key: klines-1min-v1-${{ hashFiles('scripts/generate_klines_cache.py') }}
+
+      - name: Upload parquet as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: XRPUSDT_1min_parquet
+          path: asBack/klines_cache/XRPUSDT_1min.parquet
+          retention-days: 3
