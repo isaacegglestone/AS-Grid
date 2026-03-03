@@ -99,6 +99,17 @@ jobs:
         #   (S) asymmetric short spacing below EMA: as07 / as05
         run: python asBack/backtest_grid_bitunix.py XRPPM7
 
+      - name: Backtest XRP/USDT — v18 XRPPM8 hysteresis + spacing on l2 base
+        # Base: _V8_BASE = _V7_BASE + leverage=2.0 (pm7_l2 winner: 54.23% 2y, 0.99% dd).
+        # Two open questions from XRPPM7:
+        #   (H) Does h0 stack on l2? (h0 gave +2pp on pm6 baseline — does it hold on sp15+l2?)
+        #       h0=0.0 (no band) / h1=0.01 (1% band) vs h2%=0.02 (current)
+        #   (S) Spacing fill-in: sp10 → sp12 → sp13 → sp15(baseline)
+        #       sp15: 78 trades/6m, 30.54% 2y | sp10: 294 trades/6m, 18.93% 2y
+        #       Goal: more fills than 78/6m without the 2y collapse of sp10 (-0.82% 2y w/ l1)
+        #   (C) Cross: h0 × sp12 interaction
+        run: python asBack/backtest_grid_bitunix.py XRPPM8
+
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
   #          GitHub Environment (Settings → Environments → ec2 → Required reviewers)

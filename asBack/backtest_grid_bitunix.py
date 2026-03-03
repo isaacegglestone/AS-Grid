@@ -2781,6 +2781,64 @@ XRP_PM_V7_2Y_CONFIG["param_sets"] = [
 
 
 # ===========================================================================
+# v18 — XRPPM8: Hysteresis + spacing fine-tune on l2 production base
+#
+# XRPPM7 confirmed: leverage=2.0 is the production target (54.23% 2y, 0.99% dd).
+# eqp sizing and asymmetric short spacing both degraded — abandoned.
+#
+# Two open questions answered here:
+#
+#   (H) Does h0 stack on l2?
+#       pm6 showed h0 +2pp (18.93% → 21.00%) with doubled dd (0.18% → 0.36%).
+#       With l2 base (0.99% dd), there's headroom.  Is the +2pp real on sp15?
+#       h0=0.0 → no hysteresis band (fires on every EMA cross)
+#       h1=0.01 → 1% band (midpoint between h0 and h2% current)
+#
+#   (S) Can spacing between sp10 and sp15 reclaim trades without 2y collapse?
+#       sp15 (78 trades/6m, 30.54% 2y) vs sp10 (294 trades/6m, 18.93% 2y).
+#       sp10 with l1 → -0.82% 2y (too many low-quality fills).
+#       Want: sp12/sp13 with l2 — more trades than 78/6m, 2y stays stable.
+#       sp10 tested too to see the full l2 curve.
+#
+#   (C) Hysteresis × spacing interaction:
+#       h0_sp12 — does h0 compound with tighter spacing?
+#
+# _V8_BASE: pm7_l2 locked in as production → leverage=2.0 baked
+_V8_BASE = dict(**_V7_BASE, leverage=2.0)  # 54.23% 2y, max_dd 0.99%
+
+XRP_PM_V8_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V8_CONFIG["param_sets"] = [
+    # ── Baseline (control = pm7_l2 reproduced) ────────────────────────────────
+    _pm_v2_set("pm8_baseline",    **_V8_BASE),
+
+    # ── Group H — Hysteresis sweep on l2 base ─────────────────────────────────
+    _pm_v2_set("pm8_h0",          **_V8_BASE, regime_hysteresis_pct=0.00),  # no band
+    _pm_v2_set("pm8_h1",          **_V8_BASE, regime_hysteresis_pct=0.01),  # 1% band
+
+    # ── Group S — Spacing fill-in: sp10→sp15 curve with l2 ───────────────────
+    _pm_v2_set("pm8_sp10",        **_V8_BASE, spacing=0.010),  # high-freq baseline ref
+    _pm_v2_set("pm8_sp12",        **_V8_BASE, spacing=0.012),  # midpoint
+    _pm_v2_set("pm8_sp13",        **_V8_BASE, spacing=0.013),  # tighter midpoint
+
+    # ── Group C — Cross: h0 × sp12 interaction ────────────────────────────────
+    _pm_v2_set("pm8_h0_sp12",     **_V8_BASE, regime_hysteresis_pct=0.00, spacing=0.012),
+]
+
+XRP_PM_V8_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V8_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V8_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V8_2Y_CONFIG["param_sets"] = [
+    _pm_v2_set("2y_pm8_baseline",  **_V8_BASE),
+    _pm_v2_set("2y_pm8_h0",        **_V8_BASE, regime_hysteresis_pct=0.00),
+    _pm_v2_set("2y_pm8_h1",        **_V8_BASE, regime_hysteresis_pct=0.01),
+    _pm_v2_set("2y_pm8_sp10",      **_V8_BASE, spacing=0.010),
+    _pm_v2_set("2y_pm8_sp12",      **_V8_BASE, spacing=0.012),
+    _pm_v2_set("2y_pm8_sp13",      **_V8_BASE, spacing=0.013),
+    _pm_v2_set("2y_pm8_h0_sp12",   **_V8_BASE, regime_hysteresis_pct=0.00, spacing=0.012),
+]
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -3095,6 +3153,16 @@ if __name__ == "__main__":
         print("  v17 XRPPM7 leverage + equity-pct sweep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V7_2Y_CONFIG)
+    elif symbol in ("XRPPM8", "PM8"):
+        print("\n" + "=" * 60)
+        print("  v18 XRPPM8 hysteresis + spacing fine-tune on l2 base — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V8_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v18 XRPPM8 hysteresis + spacing fine-tune on l2 base — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V8_2Y_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
