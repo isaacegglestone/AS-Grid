@@ -2723,16 +2723,24 @@ XRP_PM_V6_2Y_CONFIG["param_sets"] = [
 #       as07 → 0.7% short spacing below EMA (vs 1.0% normal)
 #       as05 → 0.5% short spacing below EMA
 #
-# TODO: After run #88 (XRPPM6) completes, update _V7_BASE to include winners
-#       from groups E (depth) and F (short boost) before triggering XRPPM7 CI.
+# XRPPM6 (run #88) confirmed winners applied to _V7_BASE:
+#   spacing=0.015  — sp15 won 2y by +11.61pp (18.93% → 30.54%, dd=0.55%)
+#   ema_period=175 — e175 won 2y by +1.39pp (18.93% → 20.32%, dd=0.15%)
+#   hysteresis=0.02 kept (h0/h1 gain +1-2pp but double dd; sweep on sp15 base
+#                         is a natural XRPPM8 target if leverage headroom warrants)
+#   depth/short-boost: no impact (max_unrealized_loss_per_side=$30 CB prevents
+#                       accumulation beyond 3 positions; raise CB to test)
 # ===========================================================================
-# _V7_BASE: start with V6_BASE — update max_per_side / regime_short_cap once
-#           XRPPM6 results are confirmed.
-_V7_BASE = dict(**_V6_BASE)  # TODO: update with XRPPM6 winners after run #88
+# _V7_BASE: XRPPM6 winners — sp15 + e175 on top of V6_BASE fundamentals
+_V7_BASE = dict(
+    grid_vol_scale=True, grid_vol_floor=0.35, grid_vol_period=50,  # XRPPM4 winner
+    regime_filter=True, regime_ema_period=175, regime_hysteresis_pct=0.02,  # XRPPM6: e175 winner
+    spacing=0.015,  # XRPPM6: sp15 winner (+11.61pp 2y: 18.93% → 30.54%)
+)
 
 XRP_PM_V7_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
 XRP_PM_V7_CONFIG["param_sets"] = [
-    # ── Baseline (control = pm6_baseline = pm5_ema200) ───────────────────────
+    # ── Baseline (control = V7_BASE: sp15 + ema175 + h2%) ────────────────────
     _pm_v2_set("pm7_baseline",    **_V7_BASE),
 
     # ── Group L — Leverage sweep ───────────────────────────────────────────────

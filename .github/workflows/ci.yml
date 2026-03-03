@@ -90,7 +90,8 @@ jobs:
         run: python asBack/backtest_grid_bitunix.py XRPPM6
 
       - name: Backtest XRP/USDT — v17 XRPPM7 leverage + equity-proportional sizing
-        # Build on XRPPM6 winner (update _V7_BASE after XRPPM6 results).
+        # Base: XRPPM6 winners applied — sp15 (1.5% spacing, +11.6pp 2y) + ema175.
+        # Expected baseline: ~30.54% 2y (was 18.93% before sp15 fix).
         # Sweeps 4 groups to maximise absolute dollar P&L:
         #   (L) leverage: 1x(ctrl) / 1.5x / 2x / 3x
         #   (P) equity-pct: eqp10(=start) / eqp12 / eqp15 — compounding
