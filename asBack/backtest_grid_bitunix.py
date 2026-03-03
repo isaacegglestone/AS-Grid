@@ -95,6 +95,15 @@ class GridOrderBacktester:
             period=self.config.get("atr_period", 14),
         )
 
+        # Pre-compute ATR-fraction EMA series (used by v18 vol-adaptive spacing)
+        # ATR/price gives the fractional volatility per candle.  An EMA of this
+        # series is the "normal" vol baseline; deviations above/below scale the
+        # grid spacing wider/tighter respectively.
+        _close_s   = self.df["close"].astype(float)
+        _atr_frac  = (self.atr_series / _close_s.replace(0, float("nan"))).fillna(0)
+        _vas_span  = self.config.get("vas_period", 40)
+        self.atr_frac_ema_series = _atr_frac.ewm(span=_vas_span, adjust=False).mean().fillna(0)
+
         # Pre-compute slow EMA series (used by EMA bias filter)
         self.ema_slow_series = self._compute_ema(
             self.df["close"],
@@ -868,15 +877,40 @@ class GridOrderBacktester:
                     if (not long_at_cap and not long_loss_tripped
                             and not long_blocked_by_trend and not long_notional_capped
                             and not halt_grid_longs and not halt_all):
-                        buy_price = self.last_long_price * (1 - self.long_settings["down_spacing"])
+                        # v18 — effective long spacing: vol-adaptive or regime-adaptive
+                        _base_long_sp = self.long_settings["down_spacing"]
+                        _eff_long_sp  = _base_long_sp
+                        if self.config.get("vol_adaptive_spacing", False):
+                            # Scale spacing by (current ATR/price) / (EMA of ATR/price).
+                            # Calm market → tighter grid (captures small oscillations).
+                            # Volatile/trending → wider grid (avoids SL cascade).
+                            _atr_frac_now = (float(self.atr_series.iloc[idx]) / price) if price > 0 else 0.0
+                            _atr_frac_ema = float(self.atr_frac_ema_series.iloc[idx])
+                            if _atr_frac_ema > 0:
+                                _vas_floor = self.config.get("vas_floor", 0.008)
+                                _vas_ceil  = self.config.get("vas_ceil",  0.020)
+                                _eff_long_sp = max(_vas_floor, min(_vas_ceil,
+                                    _base_long_sp * (_atr_frac_now / _atr_frac_ema)))
+                        elif (self.config.get("bull_spacing", 0.0) > 0
+                                and self.config.get("bear_spacing", 0.0) > 0
+                                and self.config.get("regime_filter")
+                                and "regime_ema" in self.df.columns):
+                            # Two-speed grid: tighter in bull regime, wider in bear.
+                            _ema_btbw  = float(self.df["regime_ema"].iloc[idx])
+                            _hyst_btbw = self.config.get("regime_hysteresis_pct", 0.02)
+                            if _ema_btbw > 0:
+                                _eff_long_sp = (self.config["bull_spacing"]
+                                    if price >= _ema_btbw * (1 - _hyst_btbw)
+                                    else self.config["bear_spacing"])
+                        buy_price = self.last_long_price * (1 - _eff_long_sp)
                         if price <= buy_price:
                             qty = effective_order_value / price
                             margin_required = qty * price / self.leverage
                             fee_cost = qty * price * (self.fee / 2)
                             if (margin_required + fee_cost) <= available_margin:
-                                tp_price = price * (1 + self.long_settings["up_spacing"])
+                                tp_price = price * (1 + _eff_long_sp)
                                 if use_sl:
-                                    long_sl_pct = max(sl_multiplier * self.long_settings["down_spacing"], min_sl_pct)
+                                    long_sl_pct = max(sl_multiplier * _eff_long_sp, min_sl_pct)
                                     sl_price = price * (1 - long_sl_pct)
                                 else:
                                     sl_price = 0.0  # sentinel: never triggered (price > 0 always)
@@ -1449,6 +1483,9 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "max_positions_per_side", "regime_short_cap",
                     # v17 XRPPM7 params
                     "leverage", "order_value_pct", "order_value_min", "regime_short_spacing",
+                    # v18 XRPPM9 params
+                    "vol_adaptive_spacing", "vas_floor", "vas_ceil", "vas_period",
+                    "bull_spacing", "bear_spacing",
                 ) if k in params}),
             }
         )
@@ -2365,8 +2402,15 @@ def _pm_v2_set(
     order_value_pct: float = 0.0,   # 0 = fixed order_value; >0 = % of equity per level
     order_value_min: float = 10.0,  # floor order value when equity-pct mode is active
     regime_short_spacing: float = 0.0,  # 0 = off; >0 = short spacing below regime EMA
+    # v18 XRPPM9 extensions — adaptive spacing
+    vol_adaptive_spacing: bool = False,  # scale spacing by (ATR/price) / EMA(ATR/price)
+    vas_floor: float = 0.008,     # minimum allowed spacing when vol is very low
+    vas_ceil: float = 0.020,      # maximum allowed spacing when vol is very high
+    vas_period: int = 40,         # EMA window for ATR-fraction baseline
+    bull_spacing: float = 0.0,    # two-speed: spacing when price >= regime EMA*(1-hyst)
+    bear_spacing: float = 0.0,    # two-speed: spacing when price < regime EMA*(1-hyst)
 ) -> Dict[str, Any]:
-    """v12/v13/v15/v16/v17 PM-tuning param set — RSI, BB, grid vol scale, regime filter, spacing, depth, leverage, equity-pct."""
+    """v12/v13/v15/v16/v17/v18 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing."""
     return {
         "name": name,
         "use_sl": True,
@@ -2401,6 +2445,12 @@ def _pm_v2_set(
         **({"order_value_pct":        order_value_pct}      if order_value_pct > 0 else {}),
         **({"order_value_min":        order_value_min}      if order_value_pct > 0 else {}),
         **({"regime_short_spacing":   regime_short_spacing} if regime_short_spacing > 0 else {}),
+        # v18 vol-adaptive / regime-adaptive spacing
+        **({"vol_adaptive_spacing": vol_adaptive_spacing,
+            "vas_floor": vas_floor, "vas_ceil": vas_ceil, "vas_period": vas_period}
+           if vol_adaptive_spacing else {}),
+        **({"bull_spacing": bull_spacing, "bear_spacing": bear_spacing}
+           if bull_spacing > 0 and bear_spacing > 0 else {}),
     }
 
 
@@ -2839,6 +2889,83 @@ XRP_PM_V8_2Y_CONFIG["param_sets"] = [
 
 
 # ===========================================================================
+# v19 — XRPPM9: Adaptive spacing — capture small oscillations without SL cascades
+#
+# Core insight from run #90 loss audit:
+#   - The ONLY loss mechanism that matters is grid SL cycling.
+#   - No crash CB, DD halt, or per-side circuit breakers ever fire.
+#   - sp15 (78 trades/6m, 30.54% 2y) leaves sub-1.5% oscillations uncaptured.
+#   - sp07 (1004 trades/6m) captures them profitably in bull markets but
+#     collapses in 2y (-0.82%) because sustained downtrends cause SL cascades
+#     at tight spacing.
+#
+# Goal: tight spacing in calm/bull markets, wide spacing in volatile/bear markets.
+#
+# Two mechanisms tested:
+#
+#   (V) Vol-Adaptive Spacing (VAS)
+#       eff_spacing = base_spacing × (ATR/price) / EMA(ATR/price, period=40)
+#       Clamp [vas_floor, vas_ceil].
+#       Calm market (ATR low vs baseline) → spacing < 0.015 → captures sp07-like fills.
+#       Volatile/trending (ATR high vs baseline) → spacing > 0.015 → SL protection.
+#
+#       Variants:
+#         vas       → floor=0.010, ceil=0.020  (moderate range around sp15)
+#         vas_tight → floor=0.007, ceil=0.020  (more aggressive tightening in calm)
+#         vas_wide  → floor=0.010, ceil=0.025  (wider ceiling in spike events)
+#
+#   (B) Bull-Tight Bear-Wide (BTBW) — two-speed regime-aware grid
+#       When price >= regime_EMA*(1-hyst): use bull_spacing (tighter)
+#       When price <  regime_EMA*(1-hyst): use bear_spacing (=sp15 protection)
+#       Simple, interpretable, zero per-candle computation overhead.
+#
+#       Variants:
+#         btbw      → bull=0.010, bear=0.015  (sp10 in bull, sp15 in bear)
+#         btbw_tight → bull=0.008, bear=0.015  (tighter bull grid)
+#         btbw_xtight → bull=0.007, bear=0.015  (most aggressive)
+#
+# _V9_BASE: _V8_BASE until XRPPM8 winner is known; update after run #91
+# (If h0 or sp12/sp13 win, slot that in here before run #92)
+_V9_BASE = dict(**_V8_BASE)  # = _V7_BASE + leverage=2.0; update once run #91 completes
+
+XRP_PM_V9_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V9_CONFIG["param_sets"] = [
+    # ── Baseline (control = pm8_baseline / pm7_l2 reproduced) ─────────────────
+    _pm_v2_set("pm9_baseline",     **_V9_BASE),
+
+    # ── Group V — Vol-Adaptive Spacing ────────────────────────────────────────
+    # base=0.015, scales ±ATR ratio; different floors/ceilings
+    _pm_v2_set("pm9_vas",          **_V9_BASE, vol_adaptive_spacing=True,
+               vas_floor=0.010, vas_ceil=0.020, vas_period=40),
+    _pm_v2_set("pm9_vas_tight",    **_V9_BASE, vol_adaptive_spacing=True,
+               vas_floor=0.007, vas_ceil=0.020, vas_period=40),
+    _pm_v2_set("pm9_vas_wide",     **_V9_BASE, vol_adaptive_spacing=True,
+               vas_floor=0.010, vas_ceil=0.025, vas_period=40),
+
+    # ── Group B — Bull-Tight Bear-Wide (two-speed regime grid) ────────────────
+    _pm_v2_set("pm9_btbw",         **_V9_BASE, bull_spacing=0.010, bear_spacing=0.015),
+    _pm_v2_set("pm9_btbw_tight",   **_V9_BASE, bull_spacing=0.008, bear_spacing=0.015),
+    _pm_v2_set("pm9_btbw_xtight",  **_V9_BASE, bull_spacing=0.007, bear_spacing=0.015),
+]
+
+XRP_PM_V9_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V9_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V9_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V9_2Y_CONFIG["param_sets"] = [
+    _pm_v2_set("2y_pm9_baseline",    **_V9_BASE),
+    _pm_v2_set("2y_pm9_vas",         **_V9_BASE, vol_adaptive_spacing=True,
+               vas_floor=0.010, vas_ceil=0.020, vas_period=40),
+    _pm_v2_set("2y_pm9_vas_tight",   **_V9_BASE, vol_adaptive_spacing=True,
+               vas_floor=0.007, vas_ceil=0.020, vas_period=40),
+    _pm_v2_set("2y_pm9_vas_wide",    **_V9_BASE, vol_adaptive_spacing=True,
+               vas_floor=0.010, vas_ceil=0.025, vas_period=40),
+    _pm_v2_set("2y_pm9_btbw",        **_V9_BASE, bull_spacing=0.010, bear_spacing=0.015),
+    _pm_v2_set("2y_pm9_btbw_tight",  **_V9_BASE, bull_spacing=0.008, bear_spacing=0.015),
+    _pm_v2_set("2y_pm9_btbw_xtight", **_V9_BASE, bull_spacing=0.007, bear_spacing=0.015),
+]
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -3163,6 +3290,16 @@ if __name__ == "__main__":
         print("  v18 XRPPM8 hysteresis + spacing fine-tune on l2 base — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V8_2Y_CONFIG)
+    elif symbol in ("XRPPM9", "PM9"):
+        print("\n" + "=" * 60)
+        print("  v19 XRPPM9 adaptive spacing (VAS + BTBW) — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V9_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v19 XRPPM9 adaptive spacing (VAS + BTBW) — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V9_2Y_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")

@@ -110,6 +110,20 @@ jobs:
         #   (C) Cross: h0 × sp12 interaction
         run: python asBack/backtest_grid_bitunix.py XRPPM8
 
+      - name: Backtest XRP/USDT — v19 XRPPM9 adaptive spacing (VAS + BTBW)
+        # Base: _V9_BASE = _V8_BASE (update with XRPPM8 winner post run #91).
+        # Core insight from run #90 loss audit: the ONLY loss mechanism is grid SL cycling.
+        # No CBs or halt events ever fire on XRP.  Sub-1.5% oscillations are left on the table.
+        # Two adaptive spacing strategies to capture them without sp07's 2y SL cascade:
+        #   (V) Vol-Adaptive Spacing (VAS): eff_spacing = base × (ATR/price) / EMA(ATR/price)
+        #       Calm/bull → tight spacing (captures oscillations); volatile/bear → wide (protects).
+        #       Variants: vas (floor=0.010), vas_tight (floor=0.007), vas_wide (ceil=0.025)
+        #   (B) Bull-Tight Bear-Wide (BTBW): two-speed regime grid
+        #       Bull regime (price ≥ EMA*(1-hyst)): bull_spacing (0.007–0.010)
+        #       Bear regime (price < EMA*(1-hyst)): bear_spacing=0.015 (sp15 protection)
+        #       Variants: btbw (bull=0.010), btbw_tight (0.008), btbw_xtight (0.007)
+        run: python asBack/backtest_grid_bitunix.py XRPPM9
+
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
   #          GitHub Environment (Settings → Environments → ec2 → Required reviewers)
