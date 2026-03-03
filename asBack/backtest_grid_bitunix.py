@@ -2862,16 +2862,16 @@ XRP_PM_V8_CONFIG["param_sets"] = [
     _pm_v2_set("pm8_baseline",    **_V8_BASE),
 
     # ── Group H — Hysteresis sweep on l2 base ─────────────────────────────────
-    _pm_v2_set("pm8_h0",          **_V8_BASE, regime_hysteresis_pct=0.00),  # no band
-    _pm_v2_set("pm8_h1",          **_V8_BASE, regime_hysteresis_pct=0.01),  # 1% band
+    _pm_v2_set("pm8_h0",          **{**_V8_BASE, "regime_hysteresis_pct": 0.00}),  # no band
+    _pm_v2_set("pm8_h1",          **{**_V8_BASE, "regime_hysteresis_pct": 0.01}),  # 1% band
 
     # ── Group S — Spacing fill-in: sp10→sp15 curve with l2 ───────────────────
-    _pm_v2_set("pm8_sp10",        **_V8_BASE, spacing=0.010),  # high-freq baseline ref
-    _pm_v2_set("pm8_sp12",        **_V8_BASE, spacing=0.012),  # midpoint
-    _pm_v2_set("pm8_sp13",        **_V8_BASE, spacing=0.013),  # tighter midpoint
+    _pm_v2_set("pm8_sp10",        **{**_V8_BASE, "spacing": 0.010}),  # high-freq baseline ref
+    _pm_v2_set("pm8_sp12",        **{**_V8_BASE, "spacing": 0.012}),  # midpoint
+    _pm_v2_set("pm8_sp13",        **{**_V8_BASE, "spacing": 0.013}),  # tighter midpoint
 
     # ── Group C — Cross: h0 × sp12 interaction ────────────────────────────────
-    _pm_v2_set("pm8_h0_sp12",     **_V8_BASE, regime_hysteresis_pct=0.00, spacing=0.012),
+    _pm_v2_set("pm8_h0_sp12",     **{**_V8_BASE, "regime_hysteresis_pct": 0.00, "spacing": 0.012}),
 ]
 
 XRP_PM_V8_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
@@ -2879,12 +2879,12 @@ XRP_PM_V8_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
 XRP_PM_V8_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
 XRP_PM_V8_2Y_CONFIG["param_sets"] = [
     _pm_v2_set("2y_pm8_baseline",  **_V8_BASE),
-    _pm_v2_set("2y_pm8_h0",        **_V8_BASE, regime_hysteresis_pct=0.00),
-    _pm_v2_set("2y_pm8_h1",        **_V8_BASE, regime_hysteresis_pct=0.01),
-    _pm_v2_set("2y_pm8_sp10",      **_V8_BASE, spacing=0.010),
-    _pm_v2_set("2y_pm8_sp12",      **_V8_BASE, spacing=0.012),
-    _pm_v2_set("2y_pm8_sp13",      **_V8_BASE, spacing=0.013),
-    _pm_v2_set("2y_pm8_h0_sp12",   **_V8_BASE, regime_hysteresis_pct=0.00, spacing=0.012),
+    _pm_v2_set("2y_pm8_h0",        **{**_V8_BASE, "regime_hysteresis_pct": 0.00}),
+    _pm_v2_set("2y_pm8_h1",        **{**_V8_BASE, "regime_hysteresis_pct": 0.01}),
+    _pm_v2_set("2y_pm8_sp10",      **{**_V8_BASE, "spacing": 0.010}),
+    _pm_v2_set("2y_pm8_sp12",      **{**_V8_BASE, "spacing": 0.012}),
+    _pm_v2_set("2y_pm8_sp13",      **{**_V8_BASE, "spacing": 0.013}),
+    _pm_v2_set("2y_pm8_h0_sp12",   **{**_V8_BASE, "regime_hysteresis_pct": 0.00, "spacing": 0.012}),
 ]
 
 
