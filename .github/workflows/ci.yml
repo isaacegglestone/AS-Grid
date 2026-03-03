@@ -124,6 +124,16 @@ jobs:
         #       Variants: btbw (bull=0.010), btbw_tight (0.008), btbw_xtight (0.007)
         run: python asBack/backtest_grid_bitunix.py XRPPM9
 
+      - name: Backtest XRP/USDT — v20 XRPPM10 h0 base + BTBW quarterly analysis
+        # Base: _V10_BASE = _V8_BASE + regime_hysteresis_pct=0.00 (h0 XRPPM8 winner).
+        # Run #96: h0 wins 2y walk-forward at 59.67% (+5.44% over h2=0.02 baseline, 0.99% dd).
+        # XRPPM9 result: btbw_tight +5.06% on 2y but -3% on 6m OOS (split unclear).
+        # This run tests BTBW variants on the better h0 base to isolate where the gain lives:
+        #   (B) btbw       → bull=0.010, bear=0.015
+        #   (B) btbw_tight → bull=0.008, bear=0.015
+        #   (M) Mid-year window Aug 2024 → Aug 2025 to detect bull-2024 concentration
+        run: python asBack/backtest_grid_bitunix.py XRPPM10
+
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
   #          GitHub Environment (Settings → Environments → ec2 → Required reviewers)

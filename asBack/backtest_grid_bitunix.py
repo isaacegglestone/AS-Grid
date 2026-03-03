@@ -2929,9 +2929,8 @@ XRP_PM_V8_2Y_CONFIG["param_sets"] = [
 #         btbw_tight → bull=0.008, bear=0.015  (tighter bull grid)
 #         btbw_xtight → bull=0.007, bear=0.015  (most aggressive)
 #
-# _V9_BASE: _V8_BASE until XRPPM8 winner is known; update after run #91
-# (If h0 or sp12/sp13 win, slot that in here before run #92)
-_V9_BASE = dict(**_V8_BASE)  # = _V7_BASE + leverage=2.0; update once run #91 completes
+# _V9_BASE: locked to _V8_BASE (h0=0.02 baseline — XRPPM8 winner was h0=0.00; see _V10_BASE)
+_V9_BASE = dict(**_V8_BASE)  # = _V7_BASE + leverage=2.0, h=0.02
 
 XRP_PM_V9_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
 XRP_PM_V9_CONFIG["param_sets"] = [
@@ -2967,6 +2966,61 @@ XRP_PM_V9_2Y_CONFIG["param_sets"] = [
     _pm_v2_set("2y_pm9_btbw",        **_V9_BASE, bull_spacing=0.010, bear_spacing=0.015),
     _pm_v2_set("2y_pm9_btbw_tight",  **_V9_BASE, bull_spacing=0.008, bear_spacing=0.015),
     _pm_v2_set("2y_pm9_btbw_xtight", **_V9_BASE, bull_spacing=0.007, bear_spacing=0.015),
+]
+
+
+# ===========================================================================
+# v20 — XRPPM10: h0 locked in as new base.  Test BTBW variants on h0.
+#
+# XRPPM8 result (run #96):
+#   h0 = regime_hysteresis_pct=0.00 wins 2y walk-forward (+5.44% over h2 baseline)
+#   h0:  59.67% 2y, 1.02% dd, 1066 trades  ← NEW BASE
+#   h2:  54.23% 2y, 0.99% dd, 1126 trades
+#
+# XRPPM9 result (run #96):
+#   BTBW-tight wins 2y (+5.06%) but regresses -3% on 6m OOS.
+#   Need quarterly breakdown to confirm where the gain concentrates.
+#
+# _V10_BASE: _V8_BASE but with h0 (hysteresis=0.00)
+# All other params unchanged: ema=175, sp=0.015, lev=2.0
+#
+# This run tests:
+#   (B) BTBW variants on h0 base — 6m OOS + 2y walk-forward
+#   (M) Mid-year window Aug 2024 → Aug 2025 to isolate bull-2024 vs bear-ish-2025
+#       split that drove btbw_tight's 2y gain.
+# ===========================================================================
+
+_V10_BASE = dict(**_V8_BASE, regime_hysteresis_pct=0.00)
+# = regime_ema_period=175, hysteresis=0.00, spacing=0.015, leverage=2.0
+# Expected baseline ~59.67% 2y (mirrors pm8_h0 from run #96)
+
+XRP_PM_V10_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V10_CONFIG["param_sets"] = [
+    _pm_v2_set("pm10_baseline",     **_V10_BASE),
+    _pm_v2_set("pm10_btbw",         **_V10_BASE, bull_spacing=0.010, bear_spacing=0.015),
+    _pm_v2_set("pm10_btbw_tight",   **_V10_BASE, bull_spacing=0.008, bear_spacing=0.015),
+    _pm_v2_set("pm10_btbw_xtight",  **_V10_BASE, bull_spacing=0.007, bear_spacing=0.015),
+]
+
+XRP_PM_V10_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V10_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V10_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V10_2Y_CONFIG["param_sets"] = [
+    _pm_v2_set("2y_pm10_baseline",   **_V10_BASE),
+    _pm_v2_set("2y_pm10_btbw",       **_V10_BASE, bull_spacing=0.010, bear_spacing=0.015),
+    _pm_v2_set("2y_pm10_btbw_tight", **_V10_BASE, bull_spacing=0.008, bear_spacing=0.015),
+]
+
+# Mid-year window: isolate whether btbw_tight gains concentrate in bull-2024 or persist
+# into Q1-2025 bear / Q2-2025 recovery.  Aug 2024 → Aug 2025 straddles the XRP parabolic
+# run (Oct–Dec 2024) and the 2025 correction.
+XRP_PM_V10_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V10_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V10_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V10_1Y_MID_CONFIG["param_sets"] = [
+    _pm_v2_set("mid_pm10_baseline",   **_V10_BASE),
+    _pm_v2_set("mid_pm10_btbw",       **_V10_BASE, bull_spacing=0.010, bear_spacing=0.015),
+    _pm_v2_set("mid_pm10_btbw_tight", **_V10_BASE, bull_spacing=0.008, bear_spacing=0.015),
 ]
 
 
@@ -3305,6 +3359,21 @@ if __name__ == "__main__":
         print("  v19 XRPPM9 adaptive spacing (VAS + BTBW) — 2-year walk-forward  (Feb 2024 → Feb 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V9_2Y_CONFIG)
+    elif symbol in ("XRPPM10", "PM10"):
+        print("\n" + "=" * 60)
+        print("  v20 XRPPM10 h0 base + BTBW — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V10_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v20 XRPPM10 h0 base + BTBW — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V10_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v20 XRPPM10 h0 base + BTBW — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V10_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
