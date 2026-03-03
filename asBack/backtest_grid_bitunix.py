@@ -1525,6 +1525,7 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
             f"open at end: {open_long}L / {open_short}S"
         )
         _print_quarterly_breakdown(bt, config["initial_balance"])
+        _print_weekly_breakdown(bt, config["initial_balance"])
 
         if best_result is None or result["return_pct"] > best_result["return_pct"]:
             best_result = result
