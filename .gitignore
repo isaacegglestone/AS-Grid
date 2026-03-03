@@ -152,6 +152,7 @@ src/multi_bot/state/*.json
 .env.local
 .env.production
 .env.staging
+.env.integration
 
 # API密钥和敏感信息
 *.key
