@@ -30,6 +30,7 @@ Actions workflow (.github/workflows/cache-klines.yml).
 import asyncio
 import io
 import os
+import shutil
 import sys
 import zipfile
 from calendar import monthrange
@@ -251,11 +252,18 @@ async def main() -> None:
     cache_dir = os.path.join(_REPO_ROOT, "asBack", "klines_cache")
     os.makedirs(cache_dir, exist_ok=True)
 
+    # Local dev mirror directory — lives outside the repo so large files aren't committed.
+    # The backtest engine checks this path as a fallback when the repo-local cache is absent.
+    _local_dev_dir = os.path.expanduser(os.path.join("~", "git", "data", "asgrid-klines"))
+
     for symbol, interval, start_dt, end_dt, source in _datasets():
         out_path = os.path.join(cache_dir, f"{symbol}_{interval}.parquet")
+        _local_dev_path = os.path.join(_local_dev_dir, f"{symbol}_{interval}.parquet")
 
-        if os.path.exists(out_path):
-            print(f"[skip] {out_path} already exists — delete it to force re-fetch.")
+        if os.path.exists(out_path) or os.path.exists(_local_dev_path):
+            print(f"[skip] {symbol} {interval} already cached — delete both copies to force re-fetch.")
+            print(f"         repo:  {out_path}")
+            print(f"         local: {_local_dev_path}")
             continue
 
         print(f"\n{'='*60}")
@@ -316,6 +324,11 @@ async def main() -> None:
         df.to_parquet(out_path, index=False)
         size_mb = os.path.getsize(out_path) / 1_048_576
         print(f"  → Saved {len(df):,} rows  ({size_mb:.1f} MB)  →  {out_path}")
+
+        # Mirror to the local dev directory (skipped in CI where the dir won't exist).
+        os.makedirs(_local_dev_dir, exist_ok=True)
+        shutil.copy2(out_path, _local_dev_path)
+        print(f"  → Mirrored  →  {_local_dev_path}")
 
     print("\nAll datasets cached.")
 

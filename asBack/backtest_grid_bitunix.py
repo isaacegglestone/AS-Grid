@@ -1156,14 +1156,19 @@ async def fetch_klines_as_df(
     """
     # ------------------------------------------------------------------
     # Disk cache: check for a pre-generated parquet file first.
-    # Files are stored as asBack/klines_cache/{symbol}_{interval}.parquet
-    # and cover the full available history; we slice to the requested range.
-    # Generate the cache file by running: scripts/generate_klines_cache.py
-    # or via the "Generate klines cache" GitHub Actions workflow.
+    # Search order (first match wins):
+    #   1. asBack/klines_cache/{symbol}_{interval}.parquet   — repo-local / CI
+    #   2. ~/git/data/asgrid-klines/{symbol}_{interval}.parquet — local dev copy
+    #      (69 MB 1min file lives here; not committed to git)
+    # Generate / refresh via: scripts/generate_klines_cache.py
+    # or the "Generate klines cache" GitHub Actions workflow.
     # ------------------------------------------------------------------
-    _cache_dir = os.path.join(os.path.dirname(__file__), "klines_cache")
-    _cache_file = os.path.join(_cache_dir, f"{symbol}_{interval}.parquet")
-    if os.path.exists(_cache_file):
+    _cache_candidates = [
+        os.path.join(os.path.dirname(__file__), "klines_cache", f"{symbol}_{interval}.parquet"),
+        os.path.expanduser(os.path.join("~", "git", "data", "asgrid-klines", f"{symbol}_{interval}.parquet")),
+    ]
+    _cache_file = next((p for p in _cache_candidates if os.path.exists(p)), None)
+    if _cache_file is not None:
         df_full = pd.read_parquet(_cache_file)
         if df_full["open_time"].dt.tz is None:
             df_full["open_time"] = df_full["open_time"].dt.tz_localize("UTC")
@@ -1171,7 +1176,7 @@ async def fetch_klines_as_df(
         _end   = end_dt   if end_dt.tzinfo   else end_dt.replace(tzinfo=timezone.utc)
         df = df_full[(df_full["open_time"] >= _start) & (df_full["open_time"] < _end)].copy().reset_index(drop=True)
         if len(df) > 0:
-            print(f"  → Cache hit: {len(df):,} candles for {symbol} {interval} ({start_dt.date()} → {end_dt.date()})")
+            print(f"  → Cache hit ({os.path.basename(os.path.dirname(_cache_file))}): {len(df):,} candles for {symbol} {interval} ({start_dt.date()} → {end_dt.date()})")
             return df
         print(f"  → Cache file found but no rows in range — falling back to API")
 
