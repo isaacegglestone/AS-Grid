@@ -76,7 +76,7 @@ def _seeded_buffer(
     ``high_offset`` / ``low_offset`` control candle OHLC spread (forwarded to
     ``_make_candles``).  Any remaining kwargs are passed to ``CandleBuffer``.
     """
-    buf = CandleBuffer(maxlen=200, interval="15min", **buf_kwargs)
+    buf = CandleBuffer(maxlen=200, interval="15min", regime_ema_period=21, **buf_kwargs)
     if closes is None:
         closes = [1.0 + i * 0.001 for i in range(n)]  # gentle uptrend
     candles = _make_candles(closes, vol=vol, high_offset=high_offset, low_offset=low_offset)
@@ -187,7 +187,7 @@ class TestCandleBufferSignals:
         assert buf.signals() is None
 
     def test_returns_none_below_min_required(self):
-        # 10 candles is far below the minimum (~26 = max(14,14,20,21)+5)
+        # 10 candles is far below the minimum (~26 = max(14,14,20,21,regime_ema=21)+5)
         buf = _seeded_buffer(n=10)
         assert buf.signals() is None
 
@@ -244,7 +244,7 @@ class TestCandleBufferSignals:
         vols = [1_000_000.0] * n
         vols[-1] = 5_000_000.0  # spike on last candle
         closes = [1.0 + i * 0.001 for i in range(n)]
-        buf = CandleBuffer(maxlen=200, interval="15min", vol_period=20)
+        buf = CandleBuffer(maxlen=200, interval="15min", vol_period=20, regime_ema_period=21)
         for c, v in zip(_make_candles(closes), vols):
             c.volume = v
             buf._closed.append(c)
@@ -453,7 +453,7 @@ class TestVolMetrics:
         closes = [1.0 + i * 0.001 for i in range(n)]
         candles = _make_candles(closes, vol=1_000_000.0)
         candles[-1].volume = 10_000_000.0   # 10× spike
-        buf = CandleBuffer(maxlen=200, interval="15min", vol_period=20)
+        buf = CandleBuffer(maxlen=200, interval="15min", vol_period=20, regime_ema_period=21)
         for c in candles:
             buf._closed.append(c)
         sig = buf.signals()
@@ -512,7 +512,7 @@ class TestSwingHighLow:
         # Make a prominent high somewhere in the middle of the lookback window
         candles = _make_candles(closes)
         candles[-5].high = 999.0
-        buf = CandleBuffer(maxlen=200, interval="15min", ms_lookback=20)
+        buf = CandleBuffer(maxlen=200, interval="15min", ms_lookback=20, regime_ema_period=21)
         for c in candles:
             buf._closed.append(c)
         sig = buf.signals()

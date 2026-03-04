@@ -59,7 +59,7 @@ def _kline_payload(ts: int, o="1.25", h="1.27", l="1.23", c="1.26",
 
 def _seeded_buffer(n: int = 60) -> CandleBuffer:
     """Return a ``CandleBuffer`` pre-seeded with enough candles for signals."""
-    buf = CandleBuffer(maxlen=200, interval="15min")
+    buf = CandleBuffer(maxlen=200, interval="15min", regime_ema_period=21)
     for i in range(n):
         buf._closed.append(
             Candle(
