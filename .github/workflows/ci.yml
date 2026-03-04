@@ -57,27 +57,12 @@ jobs:
           path: asBack/klines_cache/XRPUSDT_1min.parquet
           key: klines-1min-v1-${{ hashFiles('scripts/generate_klines_cache.py') }}
 
-      - name: Backtest XRP/USDT — v12 PM tuning (A/B/C options)
-        # 15min parquet: read from asBack/klines_cache/XRPUSDT_15min.parquet (committed).
-        # 1min parquet:  restored from Actions cache above (keyed on generate script hash).
-        run: python asBack/backtest_grid_bitunix.py XRPPM2
-
-      - name: Backtest XRP/USDT — v13 C_gridvol parameter sweep (floor × period)
-        # Dials in the two knobs of the XRPPM2 winning variant (C_gridvol):
-        #   floor   — min order size fraction: 0.20 / 0.35 (default) / 0.50
-        #   period  — vol SMA lookback: 10 / 20 (default) / 40
-        run: python asBack/backtest_grid_bitunix.py XRPPM3
-
-      - name: Backtest XRP/USDT — v14 C_gridvol period fine-sweep
-        # XRPPM3 showed floor is irrelevant; period=40 best 2y result.
-        # Fine-sweep: p20 (ctrl) / p30 / p40 / p50 / p60 / p80 / p120
-        run: python asBack/backtest_grid_bitunix.py XRPPM4
-
-      - name: Backtest XRP/USDT — v15 multi-timeframe regime filter sweep
-        # Build on XRPPM4 winner (C_gridvol, period=40).
-        # 15min EMA filter suppresses long grid entries in bearish regimes.
-        # Variants: baseline (no filter) / ema100 / ema200 / ema400
-        run: python asBack/backtest_grid_bitunix.py XRPPM5
+      # -----------------------------------------------------------------
+      # Superseded backtests removed from CI (code kept in backtest_grid_bitunix.py):
+      #   XRPPM2 (v12), XRPPM3 (v13), XRPPM4 (v14), XRPPM5 (v15)
+      #   XRPPM9 (v19), XRPPM10 (v20)
+      # These are fully superseded by later configs; run locally if needed.
+      # -----------------------------------------------------------------
 
       - name: Backtest XRP/USDT — v16 XRPPM6 comprehensive sweep
         # Sweeps 6 dimensions on top of XRPPM5 winner (ema200, h2%, p50):
@@ -109,30 +94,6 @@ jobs:
         #       Goal: more fills than 78/6m without the 2y collapse of sp10 (-0.82% 2y w/ l1)
         #   (C) Cross: h0 × sp12 interaction
         run: python asBack/backtest_grid_bitunix.py XRPPM8
-
-      - name: Backtest XRP/USDT — v19 XRPPM9 adaptive spacing (VAS + BTBW)
-        # Base: _V9_BASE = _V8_BASE (update with XRPPM8 winner post run #91).
-        # Core insight from run #90 loss audit: the ONLY loss mechanism is grid SL cycling.
-        # No CBs or halt events ever fire on XRP.  Sub-1.5% oscillations are left on the table.
-        # Two adaptive spacing strategies to capture them without sp07's 2y SL cascade:
-        #   (V) Vol-Adaptive Spacing (VAS): eff_spacing = base × (ATR/price) / EMA(ATR/price)
-        #       Calm/bull → tight spacing (captures oscillations); volatile/bear → wide (protects).
-        #       Variants: vas (floor=0.010), vas_tight (floor=0.007), vas_wide (ceil=0.025)
-        #   (B) Bull-Tight Bear-Wide (BTBW): two-speed regime grid
-        #       Bull regime (price ≥ EMA*(1-hyst)): bull_spacing (0.007–0.010)
-        #       Bear regime (price < EMA*(1-hyst)): bear_spacing=0.015 (sp15 protection)
-        #       Variants: btbw (bull=0.010), btbw_tight (0.008), btbw_xtight (0.007)
-        run: python asBack/backtest_grid_bitunix.py XRPPM9
-
-      - name: Backtest XRP/USDT — v20 XRPPM10 h0 base + BTBW quarterly analysis
-        # Base: _V10_BASE = _V8_BASE + regime_hysteresis_pct=0.00 (h0 XRPPM8 winner).
-        # Run #96: h0 wins 2y walk-forward at 59.67% (+5.44% over h2=0.02 baseline, 0.99% dd).
-        # XRPPM9 result: btbw_tight +5.06% on 2y but -3% on 6m OOS (split unclear).
-        # This run tests BTBW variants on the better h0 base to isolate where the gain lives:
-        #   (B) btbw       → bull=0.010, bear=0.015
-        #   (B) btbw_tight → bull=0.008, bear=0.015
-        #   (M) Mid-year window Aug 2024 → Aug 2025 to detect bull-2024 concentration
-        run: python asBack/backtest_grid_bitunix.py XRPPM10
 
       - name: Backtest XRP/USDT — v21 XRPPM11 ATR+HTF+RegimeVote (3-layer 80% fix)
         # Layer 1: ATR parabolic gate (blocks trend entries when ATR > mult×SMA)
