@@ -124,6 +124,17 @@ ADX_GRID_PAUSE:     float = 35.0  # pause new grid legs when ADX ≥ this thresh
 TREND_REENTRY_FAST: bool  = True  # skip 30-candle cooldown; re-confirm in 3 candles
 
 # ---------------------------------------------------------------------------
+# Layer 1–4 loss-mitigation gates (mirrors v21/v22 backtest configs)
+# ---------------------------------------------------------------------------
+# Set via env to allow per-deployment tuning without code changes.
+# All default to OFF (0 / False) so existing deployments are unaffected.
+# ---------------------------------------------------------------------------
+ATR_PARABOLIC_MULT:    float = float(os.getenv("ATR_PARABOLIC_MULT",    "0.0"))   # L1: block trend entries when ATR > mult × SMA(ATR,20)
+HTF_EMA_ALIGN:         bool  = os.getenv("HTF_EMA_ALIGN", "false").lower() == "true"  # L2: require HTF EMA agreement for trend entry
+REGIME_VOTE_MODE:      bool  = os.getenv("REGIME_VOTE_MODE", "false").lower() == "true"  # L3: 2-of-3 vote for bear halt
+GRID_SLEEP_ATR_THRESH: float = float(os.getenv("GRID_SLEEP_ATR_THRESH", "0.0"))   # L4: pause grid when ATR/price < threshold
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 os.makedirs("log", exist_ok=True)
@@ -203,6 +214,10 @@ class GridTradingBot(BitunixExchange):
         self.bull_spacing: float = BULL_SPACING   # BTBW: spacing in bull regime (price ≥ regime_ema)
         self.bear_spacing: float = BEAR_SPACING   # BTBW: spacing in bear regime (price < regime_ema)
         self.regime_hysteresis_pct: float = REGIME_HYSTERESIS_PCT  # h0=0.00 — no band
+        self.atr_parabolic_mult: float = ATR_PARABOLIC_MULT        # L1: 0=off
+        self.htf_ema_align: bool = HTF_EMA_ALIGN                   # L2: False=off
+        self.regime_vote_mode: bool = REGIME_VOTE_MODE             # L3: False=off
+        self.grid_sleep_atr_thresh: float = GRID_SLEEP_ATR_THRESH  # L4: 0=off
         self.initial_quantity = initial_quantity
         self.leverage = leverage
 
@@ -313,6 +328,54 @@ class GridTradingBot(BitunixExchange):
         """Return a best-effort equity estimate (available + margin USDT)."""
         usdt = self.balance.get("USDT", {})
         return float(usdt.get("available", 0.0)) + float(usdt.get("margin", 0.0))
+
+    # ------------------------------------------------------------------
+    # Layer 1–4 gate helpers (mirror backtest simulation engine)
+    # ------------------------------------------------------------------
+
+    def _parabolic_gate(self) -> bool:
+        """Layer 1: True when ATR > mult × SMA(ATR,20) — blocks trend entries."""
+        if self.atr_parabolic_mult <= 0 or self.latest_signals is None:
+            return False
+        atr = self.latest_signals.atr
+        atr_sma = self.latest_signals.atr_sma
+        if atr_sma <= 0:
+            return False
+        return atr > self.atr_parabolic_mult * atr_sma
+
+    def _htf_bull(self) -> bool:
+        """Layer 2: True when HTF fast EMA > HTF slow EMA (bullish alignment)."""
+        if self.latest_signals is None:
+            return False
+        return self.latest_signals.htf_ema_fast > self.latest_signals.htf_ema_slow
+
+    def _htf_bear(self) -> bool:
+        """Layer 2: True when HTF fast EMA < HTF slow EMA (bearish alignment)."""
+        if self.latest_signals is None:
+            return False
+        return self.latest_signals.htf_ema_fast < self.latest_signals.htf_ema_slow
+
+    def _regime_vote_halt_longs(self) -> bool:
+        """Layer 3: True when 2-of-3 EMAs vote bear — blocks long grid entries."""
+        if not self.regime_vote_mode or self.latest_signals is None:
+            return False
+        sig = self.latest_signals
+        price = sig.close
+        bear_votes = sum([
+            price < sig.regime_ema if sig.regime_ema > 0 else False,
+            price < sig.regime_ema_87 if sig.regime_ema_87 > 0 else False,
+            price < sig.regime_ema_42 if sig.regime_ema_42 > 0 else False,
+        ])
+        return bear_votes >= 2
+
+    def _grid_sleep(self) -> bool:
+        """Layer 4: True when ATR/price < threshold — pauses ALL grid entries."""
+        if self.grid_sleep_atr_thresh <= 0 or self.latest_signals is None:
+            return False
+        price = self.latest_signals.close
+        if price <= 0:
+            return False
+        return (self.latest_signals.atr / price) < self.grid_sleep_atr_thresh
 
     async def _open_trend_trade(self, side: str, price: float) -> None:
         """
@@ -501,6 +564,8 @@ class GridTradingBot(BitunixExchange):
                 self.trend_position is None
                 and velocity >= TREND_CAP_VEL_PCT
                 and adx_now >= ADX_MIN_TREND
+                and not self._parabolic_gate()     # Layer 1
+                and (not self.htf_ema_align or self._htf_bull())  # Layer 2
             ):
                 await self._open_trend_trade("long", price)
 
@@ -529,6 +594,8 @@ class GridTradingBot(BitunixExchange):
                 self.trend_position is None
                 and abs(velocity) >= TREND_CAP_VEL_PCT
                 and adx_now >= ADX_MIN_TREND
+                and not self._parabolic_gate()      # Layer 1
+                and (not self.htf_ema_align or self._htf_bear())  # Layer 2
             ):
                 await self._open_trend_trade("short", price)
 
@@ -728,7 +795,14 @@ class GridTradingBot(BitunixExchange):
 
             # Regime filter — halt new long legs when price is in bear regime
             # (price < regime_ema × (1 − hysteresis)).  Mirrors backtest halt_grid_longs.
-            if self.latest_signals is not None and self.latest_signals.regime_ema > 0:
+            if self.regime_vote_mode:
+                # Layer 3: 2-of-3 regime EMA vote replaces single-EMA check
+                if self._regime_vote_halt_longs():
+                    logger.info(
+                        "🗳️ Regime vote: halting long grid (2-of-3 EMAs vote bear)",
+                    )
+                    return
+            elif self.latest_signals is not None and self.latest_signals.regime_ema > 0:
                 regime_threshold = self.latest_signals.regime_ema * (1.0 - self.regime_hysteresis_pct)
                 if self.latest_price < regime_threshold:
                     logger.info(
@@ -736,6 +810,14 @@ class GridTradingBot(BitunixExchange):
                         self.latest_price, REGIME_EMA_PERIOD, self.latest_signals.regime_ema,
                     )
                     return
+
+            # Layer 4: Grid sleep — pause ALL grid entries when ATR/price too low
+            if self._grid_sleep():
+                logger.info(
+                    "💤 Grid sleep: long side paused (ATR/price < %.4f)",
+                    self.grid_sleep_atr_thresh,
+                )
+                return
 
             self.get_take_profit_quantity(self.long_position, "long")
             if self.long_position <= 0:
@@ -779,6 +861,13 @@ class GridTradingBot(BitunixExchange):
                 logger.info(
                     "⏸️ ADX grid pause short (adx=%.1f ≥ %.1f) — skipping grid refresh",
                     self.latest_signals.adx, ADX_GRID_PAUSE,
+                )
+                return
+            # Layer 4: Grid sleep — pause ALL grid entries when ATR/price too low
+            if self._grid_sleep():
+                logger.info(
+                    "💤 Grid sleep: short side paused (ATR/price < %.4f)",
+                    self.grid_sleep_atr_thresh,
                 )
                 return
             self.get_take_profit_quantity(self.short_position, "short")

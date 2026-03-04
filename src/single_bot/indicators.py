@@ -88,6 +88,17 @@ class Signals:
     # ── Regime filter (mirrors backtest regime_ema / halt_grid_longs) ─────
     regime_ema: float = 0.0   # slow EMA used for bull/bear regime detection (default 175)
 
+    # ── Layer 1: ATR parabolic gate ───────────────────────────────────────
+    atr_sma: float = 0.0     # SMA(ATR, 20) — baseline for parabolic detection
+
+    # ── Layer 2: HTF EMA alignment ────────────────────────────────────────
+    htf_ema_fast: float = 0.0   # 1hr-equiv fast EMA (default 36 on 15m = 9hr)
+    htf_ema_slow: float = 0.0   # 1hr-equiv slow EMA (default 84 on 15m = 21hr)
+
+    # ── Layer 3: Regime vote mode ─────────────────────────────────────────
+    regime_ema_87: float = 0.0  # secondary regime EMA (span 87)
+    regime_ema_42: float = 0.0  # tertiary  regime EMA (span 42)
+
     # ── Volume ────────────────────────────────────────────────────────────
     volume: float = 0.0       # current candle volume (baseVol)
     vol_avg: float = 0.0      # rolling SMA of volume
@@ -156,6 +167,11 @@ class CandleBuffer:
         regime_ema_period: int = 175,
         vol_period: int = 20,
         ms_lookback: int = 20,
+        htf_ema_fast_period: int = 36,
+        htf_ema_slow_period: int = 84,
+        regime_ema_87_period: int = 87,
+        regime_ema_42_period: int = 42,
+        atr_sma_period: int = 20,
     ) -> None:
         self.maxlen = maxlen
         self.interval = interval
@@ -169,6 +185,11 @@ class CandleBuffer:
         self.regime_ema_period = regime_ema_period
         self.vol_period = vol_period
         self.ms_lookback = ms_lookback
+        self.htf_ema_fast_period = htf_ema_fast_period
+        self.htf_ema_slow_period = htf_ema_slow_period
+        self.regime_ema_87_period = regime_ema_87_period
+        self.regime_ema_42_period = regime_ema_42_period
+        self.atr_sma_period = atr_sma_period
 
         self._closed: Deque[Candle] = deque(maxlen=maxlen)
         self._live: Optional[Candle] = None   # current in-progress candle
@@ -282,6 +303,11 @@ class CandleBuffer:
         ema_f                      = self._ema(closes, self.ema_fast)
         ema_s                      = self._ema(closes, self.ema_slow)
         regime_ema_val             = self._ema(closes, self.regime_ema_period)
+        htf_ema_f                  = self._ema(closes, self.htf_ema_fast_period)
+        htf_ema_s                  = self._ema(closes, self.htf_ema_slow_period)
+        regime_ema_87_val          = self._ema(closes, self.regime_ema_87_period)
+        regime_ema_42_val          = self._ema(closes, self.regime_ema_42_period)
+        atr_sma_val                = self._atr_sma(highs, lows, closes, self.atr_period, self.atr_sma_period)
         vol_avg                    = self._vol_sma(volumes, self.vol_period)
         swing_hi                   = self._swing_high(highs, self.ms_lookback)
         swing_lo                   = self._swing_low(lows, self.ms_lookback)
@@ -299,6 +325,11 @@ class CandleBuffer:
             ema_bias_long=ema_f > ema_s,
             ema_bias_short=ema_f < ema_s,
             regime_ema=regime_ema_val,
+            atr_sma=atr_sma_val,
+            htf_ema_fast=htf_ema_f,
+            htf_ema_slow=htf_ema_s,
+            regime_ema_87=regime_ema_87_val,
+            regime_ema_42=regime_ema_42_val,
             volume=last_vol,
             vol_avg=vol_avg,
             vol_ratio=last_vol / vol_avg if vol_avg > 0 else 0.0,
@@ -380,6 +411,27 @@ class CandleBuffer:
             [highs - lows, np.abs(highs - prev_closes), np.abs(lows - prev_closes)]
         )
         return float(cls._wilder_ewm(tr, period)[-1])
+
+    @classmethod
+    def _atr_sma(
+        cls,
+        highs: np.ndarray,
+        lows: np.ndarray,
+        closes: np.ndarray,
+        atr_period: int,
+        sma_period: int,
+    ) -> float:
+        """Return SMA of the ATR series over the last *sma_period* candles."""
+        n = len(closes)
+        prev_closes = np.empty(n)
+        prev_closes[0] = closes[0]
+        prev_closes[1:] = closes[:-1]
+        tr = np.maximum.reduce(
+            [highs - lows, np.abs(highs - prev_closes), np.abs(lows - prev_closes)]
+        )
+        atr_arr = cls._wilder_ewm(tr, atr_period)
+        w = min(sma_period, len(atr_arr))
+        return float(np.mean(atr_arr[-w:]))
 
     @classmethod
     def _rsi(cls, closes: np.ndarray, period: int) -> float:
