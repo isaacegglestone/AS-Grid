@@ -104,6 +104,24 @@ class GridOrderBacktester:
         _vas_span  = self.config.get("vas_period", 40)
         self.atr_frac_ema_series = _atr_frac.ewm(span=_vas_span, adjust=False).mean().fillna(0)
 
+        # Pre-compute ATR rolling SMA (Layer 1 — parabolic ATR gate)
+        # When ATR / SMA(ATR, 20) > atr_parabolic_mult, market is in a
+        # parabolic regime and trend entries are suppressed.
+        self.atr_sma_series = self.atr_series.rolling(20, min_periods=1).mean().fillna(0)
+
+        # Pre-compute HTF-equivalent EMAs (Layer 2 — HTF alignment gate)
+        # EMA-36 / EMA-84 on 15-min bars ≈ EMA-9 / EMA-21 on 1-hour chart.
+        # Trend entries are blocked unless the HTF EMAs agree with the signal.
+        self.htf_ema_fast_series = _close_s.ewm(span=36, adjust=False).mean()
+        self.htf_ema_slow_series = _close_s.ewm(span=84, adjust=False).mean()
+
+        # Pre-compute 30min- and 1hr-equivalent regime EMAs (Layer 3 — multi-TF vote)
+        # EMA-87 ≈ 30min TF equivalent; EMA-42 ≈ 1hr TF equivalent.
+        # regime_vote_mode=True requires 2-of-3 (EMA-175, EMA-87, EMA-42) to
+        # be bearish before halting long grid legs — reduces false bear signals.
+        self.regime_ema_87_series = _close_s.ewm(span=87, adjust=False).mean()
+        self.regime_ema_42_series = _close_s.ewm(span=42, adjust=False).mean()
+
         # Pre-compute slow EMA series (used by EMA bias filter)
         self.ema_slow_series = self._compute_ema(
             self.df["close"],
@@ -444,7 +462,18 @@ class GridOrderBacktester:
                 if "regime_ema" in self.df.columns:
                     _regime_ema = float(self.df["regime_ema"].iloc[idx])
                     _hyst = self.config.get("regime_hysteresis_pct", 0.02)
-                    if _regime_ema > 0 and price < _regime_ema * (1 - _hyst):
+                    if self.config.get("regime_vote_mode", False):
+                        # Layer 3: 2-of-3 multi-TF vote — EMA-175, EMA-87, EMA-42
+                        _e87  = float(self.regime_ema_87_series.iloc[idx])
+                        _e42  = float(self.regime_ema_42_series.iloc[idx])
+                        _bear_votes = sum([
+                            _regime_ema > 0 and price < _regime_ema * (1 - _hyst),
+                            _e87        > 0 and price < _e87        * (1 - _hyst),
+                            _e42        > 0 and price < _e42        * (1 - _hyst),
+                        ])
+                        if _bear_votes >= 2:
+                            halt_grid_longs = True
+                    elif _regime_ema > 0 and price < _regime_ema * (1 - _hyst):
                         halt_grid_longs = True
 
             # Per-side caps: for a hedge strategy use max_positions_per_side=1
@@ -519,6 +548,34 @@ class GridOrderBacktester:
                 atr_now = float(self.atr_series.iloc[idx])
                 dyn_trail = atr_now * atr_trail_mult / price
                 trail_stop_pct = max(atr_trail_min, min(atr_trail_max, dyn_trail))
+
+            # ── Layer 1: ATR parabolic gate ─────────────────────────────────
+            # When ATR > atr_parabolic_mult × 20-period SMA of ATR, price is in
+            # a parabolic spike — trend entries are suppressed (but force-close
+            # still fires to limit exposure on the wrong side).
+            _atr_parabolic_mult = float(self.config.get("atr_parabolic_mult", 0.0))
+            _atr_now     = float(self.atr_series.iloc[idx])
+            _atr_sma_now = float(self.atr_sma_series.iloc[idx])
+            _parabolic   = (_atr_parabolic_mult > 0 and _atr_sma_now > 0
+                            and _atr_now > _atr_parabolic_mult * _atr_sma_now)
+
+            # ── Layer 2: HTF EMA alignment gate ────────────────────────────
+            # Before opening a LONG trend entry: require HTF EMA-36 > EMA-84.
+            # Before opening a SHORT trend entry: require HTF EMA-36 < EMA-84.
+            # This stops velocity signals fired into a counter-trend HTF bias.
+            _htf_ema_align = bool(self.config.get("htf_ema_align", False))
+            _htf_fast      = float(self.htf_ema_fast_series.iloc[idx])
+            _htf_slow      = float(self.htf_ema_slow_series.iloc[idx])
+            _htf_bull      = _htf_fast > _htf_slow
+            _htf_bear      = _htf_fast < _htf_slow
+
+            # ── Layer 4: Grid sleep (low-ATR gate) ──────────────────────────
+            # When ATR/price < grid_sleep_atr_thresh, market is too flat for
+            # the grid to complete round trips — pause ALL new grid entries.
+            _grid_sleep_thresh = float(self.config.get("grid_sleep_atr_thresh", 0.0))
+            _grid_sleep = (_grid_sleep_thresh > 0 and price > 0
+                           and (_atr_now / price) < _grid_sleep_thresh)
+
             # ── ADX filter ─────────────────────────────────────────────
             # adx_filter=True gates trend-capture entries on ADX strength.
             # adx_grid_pause (optional): pause new grid orders entirely when
@@ -748,7 +805,9 @@ class GridOrderBacktester:
                               f"— force-closed {n} short(s)")
                     if (trend_capture and self.trend_position is None and not halt_all
                             and adx_allows_trend and ema_bias_long and bb_allows_trend
-                            and rsi_allows_long and vol_confirms and ms_allows_long):
+                            and rsi_allows_long and vol_confirms and ms_allows_long
+                            and not _parabolic                            # Layer 1
+                            and (not _htf_ema_align or _htf_bull)):     # Layer 2
                         if velocity >= cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * used_cap_size_pct * bb_size_boost
@@ -792,7 +851,9 @@ class GridOrderBacktester:
                               f"— force-closed {n} long(s)")
                     if (trend_capture and self.trend_position is None and not halt_all
                             and adx_allows_trend and ema_bias_short and bb_allows_trend
-                            and rsi_allows_short and vol_confirms and ms_allows_short):
+                            and rsi_allows_short and vol_confirms and ms_allows_short
+                            and not _parabolic                            # Layer 1
+                            and (not _htf_ema_align or _htf_bear)):     # Layer 2
                         if velocity <= -cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * used_cap_size_pct * bb_size_boost
@@ -876,7 +937,8 @@ class GridOrderBacktester:
                     )
                     if (not long_at_cap and not long_loss_tripped
                             and not long_blocked_by_trend and not long_notional_capped
-                            and not halt_grid_longs and not halt_all):
+                            and not halt_grid_longs and not halt_all
+                            and not _grid_sleep):       # Layer 4
                         # v18 — effective long spacing: vol-adaptive or regime-adaptive
                         _base_long_sp = self.long_settings["down_spacing"]
                         _eff_long_sp  = _base_long_sp
@@ -957,7 +1019,8 @@ class GridOrderBacktester:
                         break
                 else:
                     if (not short_at_cap and not short_loss_tripped
-                            and not short_blocked_by_trend and not halt_all):
+                            and not short_blocked_by_trend and not halt_all
+                            and not _grid_sleep):       # Layer 4
                         # v17 asymmetric short spacing: below regime EMA use tighter
                         # spacing → faster SL cycling, less unrealized-loss accumulation,
                         # more fills during the downtrend regime.
@@ -1532,6 +1595,10 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     # v18 XRPPM9 params
                     "vol_adaptive_spacing", "vas_floor", "vas_ceil", "vas_period",
                     "bull_spacing", "bear_spacing",
+                    # v21 XRPPM11 — regime & parabolic protection layers
+                    "atr_parabolic_mult", "htf_ema_align", "regime_vote_mode",
+                    # v22 XRPPM12 — grid sleep
+                    "grid_sleep_atr_thresh",
                 ) if k in params}),
             }
         )
@@ -2456,6 +2523,12 @@ def _pm_v2_set(
     vas_period: int = 40,         # EMA window for ATR-fraction baseline
     bull_spacing: float = 0.0,    # two-speed: spacing when price >= regime EMA*(1-hyst)
     bear_spacing: float = 0.0,    # two-speed: spacing when price < regime EMA*(1-hyst)
+    # v21 XRPPM11 — regime & parabolic protection layers
+    atr_parabolic_mult: float = 0.0,  # Layer 1: block trend entry when ATR > mult × SMA(ATR,20)
+    htf_ema_align: bool = False,      # Layer 2: require 1hr-equiv EMA alignment for trend entry
+    regime_vote_mode: bool = False,   # Layer 3: 2-of-3 multi-TF regime vote (EMA-175/87/42)
+    # v22 XRPPM12 — grid sleep in low-ATR
+    grid_sleep_atr_thresh: float = 0.0,  # Layer 4: pause new grid entries when ATR/price < thresh
 ) -> Dict[str, Any]:
     """v12/v13/v15/v16/v17/v18 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing."""
     return {
@@ -2498,6 +2571,12 @@ def _pm_v2_set(
            if vol_adaptive_spacing else {}),
         **({"bull_spacing": bull_spacing, "bear_spacing": bear_spacing}
            if bull_spacing > 0 and bear_spacing > 0 else {}),
+        # v21 XRPPM11 — regime & parabolic protection layers
+        **({"atr_parabolic_mult": atr_parabolic_mult} if atr_parabolic_mult > 0 else {}),
+        **({"htf_ema_align": True}                    if htf_ema_align else {}),
+        **({"regime_vote_mode": True}                 if regime_vote_mode else {}),
+        # v22 XRPPM12 — grid sleep
+        **({"grid_sleep_atr_thresh": grid_sleep_atr_thresh} if grid_sleep_atr_thresh > 0 else {}),
     }
 
 
@@ -3067,6 +3146,85 @@ XRP_PM_V10_1Y_MID_CONFIG["param_sets"] = [
 
 
 # ===========================================================================
+# v21 — XRPPM11: 3-layer 80% fix.  ATR gate (L1) + HTF align (L2) + regime vote (L3)
+#
+# Loss-audit of 2y weekly breakdown (run #108) found 80% of losses concentrate in:
+#   1. Parabolic pumps  (Nov–Dec 2024 XRP +300%) — trend entries fire into blow-offs
+#   2. Counter-trend    (Jan–Feb 2025)            — HTF bias ignored
+#   3. False bear halts (short flat chops)         — single-EMA too sensitive
+#
+# Layer 1: ATR parabolic gate — blocks trend entries when ATR > mult × SMA(ATR,20)
+# Layer 2: HTF EMA alignment  — requires 1hr-equiv EMA agreement for trend entry
+# Layer 3: Multi-TF regime vote — 2-of-3 EMAs (175/87/42) must agree before halting longs
+#
+# 10 strategies: baseline + L1@1.5/2.0/2.5 + L2 + L3 + L1L2 + L1L3 + L2L3 + full
+# 3 windows: 6m OOS + 2y walk-forward + mid-year
+# ===========================================================================
+
+_V11_BASE = {**_V10_BASE}  # h0, spacing=1.5%, leverage=2.0
+
+_PM11_SETS = [
+    _pm_v2_set("pm11_baseline",   **_V11_BASE),
+    _pm_v2_set("pm11_L1_15",      **_V11_BASE, atr_parabolic_mult=1.5),
+    _pm_v2_set("pm11_L1_20",      **_V11_BASE, atr_parabolic_mult=2.0),
+    _pm_v2_set("pm11_L1_25",      **_V11_BASE, atr_parabolic_mult=2.5),
+    _pm_v2_set("pm11_L2",         **_V11_BASE, htf_ema_align=True),
+    _pm_v2_set("pm11_L3",         **_V11_BASE, regime_vote_mode=True),
+    _pm_v2_set("pm11_L1_L2",      **_V11_BASE, atr_parabolic_mult=2.0, htf_ema_align=True),
+    _pm_v2_set("pm11_L1_L3",      **_V11_BASE, atr_parabolic_mult=2.0, regime_vote_mode=True),
+    _pm_v2_set("pm11_L2_L3",      **_V11_BASE, htf_ema_align=True, regime_vote_mode=True),
+    _pm_v2_set("pm11_full",       **_V11_BASE, atr_parabolic_mult=2.0, htf_ema_align=True, regime_vote_mode=True),
+]
+
+XRP_PM_V11_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V11_CONFIG["param_sets"] = _PM11_SETS
+
+XRP_PM_V11_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V11_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V11_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V11_2Y_CONFIG["param_sets"] = _PM11_SETS
+
+XRP_PM_V11_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V11_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V11_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V11_1Y_MID_CONFIG["param_sets"] = _PM11_SETS
+
+
+# ===========================================================================
+# v22 — XRPPM12: v21 full + Layer 4 grid sleep.  Stacked on top of the 3-layer winner.
+#
+# Layer 4: Grid sleep — pauses ALL new grid entries when ATR/price < threshold.
+# In flat, low-ATR markets the grid piles into positions that never complete
+# round trips.  Grid sleep keeps the bot idle until volatility returns.
+#
+# 4 strategies: baseline (pm11_full, no sleep) + sleep_02 / sleep_03 / sleep_04
+# 3 windows: 6m OOS + 2y walk-forward + mid-year
+# ===========================================================================
+
+_V12_BASE = {**_V11_BASE, "atr_parabolic_mult": 2.0, "htf_ema_align": True, "regime_vote_mode": True}
+
+_PM12_SETS = [
+    _pm_v2_set("pm12_baseline",  **_V12_BASE),
+    _pm_v2_set("pm12_sleep_02",  **_V12_BASE, grid_sleep_atr_thresh=0.002),
+    _pm_v2_set("pm12_sleep_03",  **_V12_BASE, grid_sleep_atr_thresh=0.003),
+    _pm_v2_set("pm12_sleep_04",  **_V12_BASE, grid_sleep_atr_thresh=0.004),
+]
+
+XRP_PM_V12_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V12_CONFIG["param_sets"] = _PM12_SETS
+
+XRP_PM_V12_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V12_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V12_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V12_2Y_CONFIG["param_sets"] = _PM12_SETS
+
+XRP_PM_V12_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V12_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V12_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V12_1Y_MID_CONFIG["param_sets"] = _PM12_SETS
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -3416,6 +3574,36 @@ if __name__ == "__main__":
         print("  v20 XRPPM10 h0 base + BTBW — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V10_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM11", "PM11"):
+        print("\n" + "=" * 60)
+        print("  v21 XRPPM11 3-layer 80% fix — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V11_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v21 XRPPM11 3-layer 80% fix — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V11_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v21 XRPPM11 3-layer 80% fix — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V11_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM12", "PM12"):
+        print("\n" + "=" * 60)
+        print("  v22 XRPPM12 full fix + grid sleep — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V12_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v22 XRPPM12 full fix + grid sleep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V12_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v22 XRPPM12 full fix + grid sleep — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V12_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")

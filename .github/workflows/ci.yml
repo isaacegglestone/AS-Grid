@@ -134,6 +134,16 @@ jobs:
         #   (M) Mid-year window Aug 2024 → Aug 2025 to detect bull-2024 concentration
         run: python asBack/backtest_grid_bitunix.py XRPPM10
 
+      - name: Backtest XRP/USDT — v21 XRPPM11 ATR+HTF+RegimeVote (3-layer 80% fix)
+        # Layer 1: ATR parabolic gate (blocks trend entries when ATR > mult×SMA)
+        # Layer 2: HTF EMA alignment (requires 1hr-equiv EMA agreement)
+        # Layer 3: Multi-TF regime vote (2-of-3 bear consensus for grid halt)
+        run: python asBack/backtest_grid_bitunix.py XRPPM11
+
+      - name: Backtest XRP/USDT — v22 XRPPM12 full fix + grid sleep (Layer 4 stacked)
+        # Layer 4 stacked onto v21 full: pause grid when ATR/price below threshold
+        run: python asBack/backtest_grid_bitunix.py XRPPM12
+
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
   #          GitHub Environment (Settings → Environments → ec2 → Required reviewers)
