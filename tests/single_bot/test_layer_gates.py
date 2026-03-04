@@ -422,6 +422,28 @@ class TestLayer3RegimeVote:
         )
         assert bot._regime_vote_halt_longs() is False
 
+    def test_hysteresis_prevents_halt_at_boundary(self):
+        """With 5% hysteresis, price=0.96 is above threshold (ema*0.95=0.95)."""
+        bot = _make_bot(regime_vote_mode=True, regime_hysteresis_pct=0.05)
+        bot.latest_signals = _signals(
+            close=0.96,
+            regime_ema=1.0,     # threshold = 0.95
+            regime_ema_87=1.0,  # threshold = 0.95
+            regime_ema_42=1.0,  # threshold = 0.95
+        )
+        assert bot._regime_vote_halt_longs() is False
+
+    def test_hysteresis_halts_below_band(self):
+        """With 5% hysteresis, price=0.94 is below all thresholds → halt."""
+        bot = _make_bot(regime_vote_mode=True, regime_hysteresis_pct=0.05)
+        bot.latest_signals = _signals(
+            close=0.94,
+            regime_ema=1.0,     # threshold = 0.95
+            regime_ema_87=1.0,  # threshold = 0.95
+            regime_ema_42=1.0,  # threshold = 0.95
+        )
+        assert bot._regime_vote_halt_longs() is True
+
 
 class TestLayer3GridIntegration:
     """Regime vote mode blocks long grid entries in place_long_orders."""

@@ -73,9 +73,9 @@ NOTIFICATION_INTERVAL: int = int(os.getenv("NOTIFICATION_INTERVAL", "3600"))
 API_KEY: str = os.getenv("API_KEY", "")
 API_SECRET: str = os.getenv("API_SECRET", "")
 COIN_NAME: str = os.getenv("COIN_NAME", "XRP")
-GRID_SPACING: float = float(os.getenv("GRID_SPACING", "0.004"))
+GRID_SPACING: float = float(os.getenv("GRID_SPACING", "0.015"))   # backtest winner: 1.5%
 INITIAL_QUANTITY: int = int(os.getenv("INITIAL_QUANTITY", "1"))
-LEVERAGE: int = int(os.getenv("LEVERAGE", "20"))
+LEVERAGE: int = int(os.getenv("LEVERAGE", "2"))                    # backtest winner: 2×
 
 # ---------------------------------------------------------------------------
 # Regime filter + BTBW spacing (ported from backtest winning configs: h0 + btbw)
@@ -361,10 +361,11 @@ class GridTradingBot(BitunixExchange):
             return False
         sig = self.latest_signals
         price = sig.close
+        hyst = self.regime_hysteresis_pct
         bear_votes = sum([
-            price < sig.regime_ema if sig.regime_ema > 0 else False,
-            price < sig.regime_ema_87 if sig.regime_ema_87 > 0 else False,
-            price < sig.regime_ema_42 if sig.regime_ema_42 > 0 else False,
+            price < sig.regime_ema * (1.0 - hyst) if sig.regime_ema > 0 else False,
+            price < sig.regime_ema_87 * (1.0 - hyst) if sig.regime_ema_87 > 0 else False,
+            price < sig.regime_ema_42 * (1.0 - hyst) if sig.regime_ema_42 > 0 else False,
         ])
         return bear_votes >= 2
 
