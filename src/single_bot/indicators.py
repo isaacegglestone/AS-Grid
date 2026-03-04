@@ -85,6 +85,9 @@ class Signals:
     ema_bias_long: bool = False   # fast > slow
     ema_bias_short: bool = False  # fast < slow
 
+    # ── Regime filter (mirrors backtest regime_ema / halt_grid_longs) ─────
+    regime_ema: float = 0.0   # slow EMA used for bull/bear regime detection (default 175)
+
     # ── Volume ────────────────────────────────────────────────────────────
     volume: float = 0.0       # current candle volume (baseVol)
     vol_avg: float = 0.0      # rolling SMA of volume
@@ -128,6 +131,11 @@ class CandleBuffer:
         Fast EMA span (default 9).
     ema_slow : int
         Slow EMA span (default 21).
+    regime_ema_period : int
+        Regime-filter EMA period (default 175).  Mirrors the ``ema=175``
+        parameter in the winning backtest configs.  The live price is
+        compared against this EMA each candle to decide whether to halt
+        long grid legs (bear regime) or switch to ``bull_spacing`` (BTBW).
     vol_period : int
         Rolling volume SMA period (default 20).
     ms_lookback : int
@@ -145,6 +153,7 @@ class CandleBuffer:
         bb_mult: float = 2.0,
         ema_fast: int = 9,
         ema_slow: int = 21,
+        regime_ema_period: int = 175,
         vol_period: int = 20,
         ms_lookback: int = 20,
     ) -> None:
@@ -157,6 +166,7 @@ class CandleBuffer:
         self.bb_mult = bb_mult
         self.ema_fast = ema_fast
         self.ema_slow = ema_slow
+        self.regime_ema_period = regime_ema_period
         self.vol_period = vol_period
         self.ms_lookback = ms_lookback
 
@@ -255,7 +265,7 @@ class CandleBuffer:
         """
         candles = list(self._closed)
         n = len(candles)
-        min_required = max(self.adx_period, self.rsi_period, self.bb_period, self.ema_slow) + 5
+        min_required = max(self.adx_period, self.rsi_period, self.bb_period, self.ema_slow, self.regime_ema_period) + 5
         if n < min_required:
             return None
 
@@ -271,6 +281,7 @@ class CandleBuffer:
         bb_w                       = self._bb_width(closes, self.bb_period, self.bb_mult)
         ema_f                      = self._ema(closes, self.ema_fast)
         ema_s                      = self._ema(closes, self.ema_slow)
+        regime_ema_val             = self._ema(closes, self.regime_ema_period)
         vol_avg                    = self._vol_sma(volumes, self.vol_period)
         swing_hi                   = self._swing_high(highs, self.ms_lookback)
         swing_lo                   = self._swing_low(lows, self.ms_lookback)
@@ -287,6 +298,7 @@ class CandleBuffer:
             ema_slow=ema_s,
             ema_bias_long=ema_f > ema_s,
             ema_bias_short=ema_f < ema_s,
+            regime_ema=regime_ema_val,
             volume=last_vol,
             vol_avg=vol_avg,
             vol_ratio=last_vol / vol_avg if vol_avg > 0 else 0.0,

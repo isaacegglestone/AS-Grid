@@ -78,6 +78,23 @@ INITIAL_QUANTITY: int = int(os.getenv("INITIAL_QUANTITY", "1"))
 LEVERAGE: int = int(os.getenv("LEVERAGE", "20"))
 
 # ---------------------------------------------------------------------------
+# Regime filter + BTBW spacing (ported from backtest winning configs: h0 + btbw)
+# ---------------------------------------------------------------------------
+# REGIME_EMA_PERIOD    — EMA period for bull/bear regime detection (175 = winner)
+# REGIME_HYSTERESIS_PCT — hysteresis band around the regime EMA (h0 = 0.00 = winner)
+# BULL_SPACING         — grid spacing used when price ≥ regime_ema (bull regime)
+# BEAR_SPACING         — grid spacing used when price < regime_ema  (bear regime)
+#
+# Defaults: BULL_SPACING and BEAR_SPACING both fall back to GRID_SPACING when
+# not set, making this a pure regime-halt (no BTBW) unless both are explicitly
+# configured.  Set BULL_SPACING=0.010 and BEAR_SPACING=0.015 for full BTBW.
+# ---------------------------------------------------------------------------
+REGIME_EMA_PERIOD:     int   = int(os.getenv("REGIME_EMA_PERIOD",     "175"))
+REGIME_HYSTERESIS_PCT: float = float(os.getenv("REGIME_HYSTERESIS_PCT", "0.00"))
+BULL_SPACING:          float = float(os.getenv("BULL_SPACING",          str(GRID_SPACING)))
+BEAR_SPACING:          float = float(os.getenv("BEAR_SPACING",          str(GRID_SPACING)))
+
+# ---------------------------------------------------------------------------
 # Derived / fixed constants (mirrors gate_bot.py)
 # ---------------------------------------------------------------------------
 POSITION_THRESHOLD: float = 10 * INITIAL_QUANTITY / GRID_SPACING * 2 / 100
@@ -149,8 +166,11 @@ def validate_config() -> None:
         )
         ENABLE_NOTIFICATIONS = False
     logger.info(
-        "Config OK – coin=%s grid_spacing=%s initial_qty=%d leverage=%dx",
-        COIN_NAME, GRID_SPACING, INITIAL_QUANTITY, LEVERAGE,
+        "Config OK – coin=%s grid_spacing=%s bull=%s bear=%s "
+        "regime_ema=%d hyst=%.2f%% initial_qty=%d leverage=%dx",
+        COIN_NAME, GRID_SPACING, BULL_SPACING, BEAR_SPACING,
+        REGIME_EMA_PERIOD, REGIME_HYSTERESIS_PCT * 100,
+        INITIAL_QUANTITY, LEVERAGE,
     )
 
 
@@ -179,7 +199,10 @@ class GridTradingBot(BitunixExchange):
         super().__init__(api_key=api_key, secret_key=api_secret)
 
         self.coin_name = coin_name
-        self.grid_spacing = grid_spacing
+        self.grid_spacing = grid_spacing          # base spacing (fallback pre-regime warm-up)
+        self.bull_spacing: float = BULL_SPACING   # BTBW: spacing in bull regime (price ≥ regime_ema)
+        self.bear_spacing: float = BEAR_SPACING   # BTBW: spacing in bear regime (price < regime_ema)
+        self.regime_hysteresis_pct: float = REGIME_HYSTERESIS_PCT  # h0=0.00 — no band
         self.initial_quantity = initial_quantity
         self.leverage = leverage
 
@@ -234,10 +257,10 @@ class GridTradingBot(BitunixExchange):
 
         # ── Candle buffer + indicator engine ──────────────────────────────
         # Seeded from REST on startup; kept live via WS kline channel.
-        # All filter parameters are placeholders — will be updated once
-        # backtest results determine the winning configuration.
+        # regime_ema_period=175 matches the winning backtest config (h0, BTBW).
+        # maxlen=210 ensures the 175-period EMA has a comfortable warm-up margin.
         self.candle_buffer: CandleBuffer = CandleBuffer(
-            maxlen=200,
+            maxlen=210,
             interval="15min",
             adx_period=14,
             atr_period=14,
@@ -246,6 +269,7 @@ class GridTradingBot(BitunixExchange):
             bb_mult=2.0,
             ema_fast=9,
             ema_slow=21,
+            regime_ema_period=REGIME_EMA_PERIOD,
             vol_period=20,
             ms_lookback=20,
         )
@@ -532,13 +556,21 @@ class GridTradingBot(BitunixExchange):
         """
         Recalculate grid boundary prices around *latest_price*.
 
+        BTBW regime-aware spacing
+        -------------------------
+        When the regime EMA (175-period) has warmed up the active spacing is
+        selected from ``bull_spacing`` / ``bear_spacing`` based on whether the
+        current price sits above or below ``regime_ema × (1 − hysteresis)``.
+        Before the EMA warms up (< 180 closed candles) ``grid_spacing`` is
+        used as a safe fallback.
+
         Long side:
-          lower_price_long = latest_price × (1 − grid_spacing)  ← entry
-          upper_price_long = latest_price × (1 + grid_spacing)  ← take-profit
+          lower_price_long = latest_price × (1 − spacing)  ← entry
+          upper_price_long = latest_price × (1 + spacing)  ← take-profit
 
         Short side:
-          upper_price_short = latest_price × (1 + grid_spacing) ← entry
-          lower_price_short = latest_price × (1 − grid_spacing) ← take-profit
+          upper_price_short = latest_price × (1 + spacing) ← entry
+          lower_price_short = latest_price × (1 − spacing) ← take-profit
 
         All prices are rounded to ``self.price_precision`` decimal places.
         """
@@ -546,14 +578,23 @@ class GridTradingBot(BitunixExchange):
             fmt = Decimal("0." + "0" * self.price_precision)
             return float(Decimal(str(p)).quantize(fmt, rounding=ROUND_HALF_UP))
 
+        # ── BTBW: resolve effective spacing from regime signal ─────────────
+        sig = self.latest_signals
+        if sig is not None and sig.regime_ema > 0:
+            regime_threshold = sig.regime_ema * (1.0 - self.regime_hysteresis_pct)
+            in_bull = latest_price >= regime_threshold
+            effective_spacing = self.bull_spacing if in_bull else self.bear_spacing
+        else:
+            effective_spacing = self.grid_spacing   # fallback: EMA not yet warmed up
+
         if side == "long":
             self.mid_price_long = _round(latest_price)
-            self.lower_price_long = _round(latest_price * (1 - self.grid_spacing))
-            self.upper_price_long = _round(latest_price * (1 + self.grid_spacing))
+            self.lower_price_long = _round(latest_price * (1 - effective_spacing))
+            self.upper_price_long = _round(latest_price * (1 + effective_spacing))
         elif side == "short":
             self.mid_price_short = _round(latest_price)
-            self.upper_price_short = _round(latest_price * (1 + self.grid_spacing))
-            self.lower_price_short = _round(latest_price * (1 - self.grid_spacing))
+            self.upper_price_short = _round(latest_price * (1 + effective_spacing))
+            self.lower_price_short = _round(latest_price * (1 - effective_spacing))
 
     def get_take_profit_quantity(self, position: float, side: str) -> int:
         """
@@ -684,6 +725,18 @@ class GridTradingBot(BitunixExchange):
                     self.latest_signals.adx, ADX_GRID_PAUSE,
                 )
                 return
+
+            # Regime filter — halt new long legs when price is in bear regime
+            # (price < regime_ema × (1 − hysteresis)).  Mirrors backtest halt_grid_longs.
+            if self.latest_signals is not None and self.latest_signals.regime_ema > 0:
+                regime_threshold = self.latest_signals.regime_ema * (1.0 - self.regime_hysteresis_pct)
+                if self.latest_price < regime_threshold:
+                    logger.info(
+                        "🐻 Regime filter: halting long grid (price=%.4f < ema%d=%.4f)",
+                        self.latest_price, REGIME_EMA_PERIOD, self.latest_signals.regime_ema,
+                    )
+                    return
+
             self.get_take_profit_quantity(self.long_position, "long")
             if self.long_position <= 0:
                 return
@@ -1080,9 +1133,15 @@ class GridTradingBot(BitunixExchange):
             if candle_closed:
                 self.latest_signals = self.candle_buffer.signals()
                 if self.latest_signals:
+                    regime_status = "–"
+                    if self.latest_signals.regime_ema > 0:
+                        regime_status = (
+                            "bull" if self.latest_signals.close >= self.latest_signals.regime_ema
+                            else "bear"
+                        )
                     logger.debug(
                         "Candle closed | close=%.4f  adx=%.1f  rsi=%.1f  "
-                        "bb_w=%.4f  vol_ratio=%.2f  ema_bias=%s",
+                        "bb_w=%.4f  vol_ratio=%.2f  ema_bias=%s  regime=%s(ema175=%.4f)",
                         self.latest_signals.close,
                         self.latest_signals.adx,
                         self.latest_signals.rsi,
@@ -1090,6 +1149,8 @@ class GridTradingBot(BitunixExchange):
                         self.latest_signals.vol_ratio,
                         "long" if self.latest_signals.ema_bias_long else
                         "short" if self.latest_signals.ema_bias_short else "flat",
+                        regime_status,
+                        self.latest_signals.regime_ema,
                     )
                     await self._evaluate_trend(self.latest_signals.close)
 
@@ -1235,10 +1296,16 @@ class GridTradingBot(BitunixExchange):
         """Send a one-time startup summary (called once at bot start)."""
         if self.startup_notified:
             return
+        btbw_str = (
+            f"bull={self.bull_spacing:.2%} / bear={self.bear_spacing:.2%}"
+            if self.bull_spacing != self.bear_spacing
+            else f"{self.grid_spacing:.2%} (no BTBW)"
+        )
         msg = (
             f"🚀 *Bot started*\n\n"
             f"• Coin: {COIN_NAME}\n"
-            f"• Grid spacing: {GRID_SPACING:.2%}\n"
+            f"• Spacing (BTBW): {btbw_str}\n"
+            f"• Regime EMA: {REGIME_EMA_PERIOD}-period  hysteresis={self.regime_hysteresis_pct:.2%}\n"
             f"• Initial qty: {INITIAL_QUANTITY} contracts\n"
             f"• Leverage: {LEVERAGE}x\n"
             f"• Position threshold: {POSITION_THRESHOLD:.2f}\n"
