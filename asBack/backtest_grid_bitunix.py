@@ -1379,6 +1379,47 @@ def _print_quarterly_breakdown(bt: "GridOrderBacktester", initial_balance: float
     print("     " + "\u2500" * 60)
 
 
+def _print_weekly_breakdown(bt: "GridOrderBacktester", initial_balance: float) -> None:
+    """Print a week-by-week equity breakdown from the backtester's equity curve.
+
+    Crypto regime shifts, liquidation cascades, and parabolic runs often play
+    out over days rather than months.  Weekly granularity surfaces which exact
+    weeks drove (or hurt) the overall result — especially useful when comparing
+    strategies like BTBW where the difference concentrates in a handful of weeks.
+
+    Flags:
+      ◄ LOSS  weekly return < -3% (significant down week)
+      ★       weekly return >  5% (notable bull week)
+    """
+    if len(bt.equity_curve) < 2:
+        return
+
+    ec_df = pd.DataFrame(
+        bt.equity_curve,
+        columns=["time", "price", "equity", "realized", "unrealized"],
+    )
+    ec_df["time"] = pd.to_datetime(ec_df["time"])
+    ec_df = ec_df.set_index("time")
+
+    # Resample to week-ending Sunday (pandas default for "W")
+    w_end = ec_df["equity"].resample("W").last().dropna()
+    if w_end.empty:
+        return
+
+    prev_eq = initial_balance
+    print("     " + "\u2500" * 60)
+    print("     Week-by-week breakdown (week ending Sunday):")
+    for w_date, eq in w_end.items():
+        w_return   = (eq - prev_eq) / prev_eq * 100
+        cum_return = (eq - initial_balance) / initial_balance * 100
+        flag = "  \u25c4 LOSS" if w_return < -3 else ("  \u2605" if w_return > 5 else "")
+        print(
+            f"       {w_date.strftime('%Y-%m-%d')}  {w_return:>+7.2f}%  (cum {cum_return:>+7.2f}%){flag}"
+        )
+        prev_eq = eq
+    print("     " + "\u2500" * 60)
+
+
 # ===========================================================================
 # Grid-search orchestrator
 # ===========================================================================
