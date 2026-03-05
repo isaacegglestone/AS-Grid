@@ -122,6 +122,15 @@ class GridOrderBacktester:
         self.regime_ema_87_series = _close_s.ewm(span=87, adjust=False).mean()
         self.regime_ema_42_series = _close_s.ewm(span=42, adjust=False).mean()
 
+        # Pre-compute ATR rolling percentile (Layer 1 Approach B — percentile gate)
+        # Only block trend entries when ATR is truly extreme — above the Nth
+        # percentile over a rolling window, not just above a fixed SMA multiple.
+        _pct_window = self.config.get("atr_pct_window", 100)
+        _pct_thresh = self.config.get("atr_pct_threshold", 0.90)
+        self.atr_pct_series = self.atr_series.rolling(
+            _pct_window, min_periods=1
+        ).quantile(_pct_thresh).fillna(0)
+
         # Pre-compute slow EMA series (used by EMA bias filter)
         self.ema_slow_series = self._compute_ema(
             self.df["close"],
@@ -549,15 +558,49 @@ class GridOrderBacktester:
                 dyn_trail = atr_now * atr_trail_mult / price
                 trail_stop_pct = max(atr_trail_min, min(atr_trail_max, dyn_trail))
 
-            # ── Layer 1: ATR parabolic gate ─────────────────────────────────
-            # When ATR > atr_parabolic_mult × 20-period SMA of ATR, price is in
-            # a parabolic spike — trend entries are suppressed (but force-close
-            # still fires to limit exposure on the wrong side).
-            _atr_parabolic_mult = float(self.config.get("atr_parabolic_mult", 0.0))
+            # ── Layer 1: ATR parabolic gate (fixed or adaptive) ───────────
+            # When ATR exceeds a threshold, price is in a parabolic spike and
+            # trend entries are suppressed.  The threshold can be:
+            #   Fixed:    atr_parabolic_mult × SMA(ATR,20)    (v21 original)
+            #   Approach A (atr_regime_adaptive): bull→relaxed mult, bear→tight
+            #   Approach B (atr_percentile_gate): block only above rolling Nth %ile
+            #   Approach C (atr_adx_scale): ADX strength modulates mult continuously
+            #   Hybrid:   any combination — OR logic (any trigger blocks)
             _atr_now     = float(self.atr_series.iloc[idx])
             _atr_sma_now = float(self.atr_sma_series.iloc[idx])
-            _parabolic   = (_atr_parabolic_mult > 0 and _atr_sma_now > 0
-                            and _atr_now > _atr_parabolic_mult * _atr_sma_now)
+
+            # Start with the fixed multiplier (0 = disabled)
+            _atr_parabolic_mult = float(self.config.get("atr_parabolic_mult", 0.0))
+
+            # Approach A: Regime-adaptive — bull/bear regime switches multiplier
+            if self.config.get("atr_regime_adaptive", False) and "regime_ema" in self.df.columns:
+                _regime_ema_val = float(self.df["regime_ema"].iloc[idx])
+                if _regime_ema_val > 0 and price >= _regime_ema_val:
+                    _atr_parabolic_mult = float(self.config.get("atr_bull_mult", 2.5))
+                else:
+                    _atr_parabolic_mult = float(self.config.get("atr_bear_mult", 1.5))
+
+            # Approach C: ADX-scaled — ADX strength modulates multiplier
+            # High ADX (strong trend) → higher mult → more permissive.
+            # Overrides fixed mult and regime-adaptive mult.
+            if self.config.get("atr_adx_scale", False):
+                _adx_val = float(self.adx_series.iloc[idx])
+                _adx_base = float(self.config.get("atr_adx_base_mult", 1.5))
+                _adx_max  = float(self.config.get("atr_adx_max_mult", 3.0))
+                _atr_parabolic_mult = _adx_base + (_adx_val / 100.0) * (_adx_max - _adx_base)
+
+            # SMA-mult gate: fires when ATR > effective_mult × SMA(ATR,20)
+            _parabolic_sma = (_atr_parabolic_mult > 0 and _atr_sma_now > 0
+                              and _atr_now > _atr_parabolic_mult * _atr_sma_now)
+
+            # Approach B: Percentile gate — block when ATR > rolling Nth percentile
+            _parabolic_pct = False
+            if self.config.get("atr_percentile_gate", False):
+                _atr_pct_val = float(self.atr_pct_series.iloc[idx])
+                _parabolic_pct = (_atr_pct_val > 0 and _atr_now > _atr_pct_val)
+
+            # Final gate: either SMA-mult OR percentile triggers blocking
+            _parabolic = _parabolic_sma or _parabolic_pct
 
             # ── Layer 2: HTF EMA alignment gate ────────────────────────────
             # Before opening a LONG trend entry: require HTF EMA-36 > EMA-84.
@@ -1599,6 +1642,10 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "atr_parabolic_mult", "htf_ema_align", "regime_vote_mode",
                     # v22 XRPPM12 — grid sleep
                     "grid_sleep_atr_thresh",
+                    # v23 XRPPM13 — adaptive ATR gate
+                    "atr_regime_adaptive", "atr_bull_mult", "atr_bear_mult",
+                    "atr_percentile_gate", "atr_pct_threshold", "atr_pct_window",
+                    "atr_adx_scale", "atr_adx_base_mult", "atr_adx_max_mult",
                 ) if k in params}),
             }
         )
@@ -2529,8 +2576,18 @@ def _pm_v2_set(
     regime_vote_mode: bool = False,   # Layer 3: 2-of-3 multi-TF regime vote (EMA-175/87/42)
     # v22 XRPPM12 — grid sleep in low-ATR
     grid_sleep_atr_thresh: float = 0.0,  # Layer 4: pause new grid entries when ATR/price < thresh
+    # v23 XRPPM13 — adaptive ATR gate (replaces fixed atr_parabolic_mult)
+    atr_regime_adaptive: bool = False,   # Approach A: bull→relaxed mult, bear→tight mult
+    atr_bull_mult: float = 2.5,          #   multiplier when price >= regime EMA (bull regime)
+    atr_bear_mult: float = 1.5,          #   multiplier when price <  regime EMA (bear regime)
+    atr_percentile_gate: bool = False,   # Approach B: block when ATR > rolling percentile
+    atr_pct_threshold: float = 0.90,     #   percentile level (0.90 = 90th)
+    atr_pct_window: int = 100,           #   rolling window for percentile calc
+    atr_adx_scale: bool = False,         # Approach C: ADX modulates ATR mult continuously
+    atr_adx_base_mult: float = 1.5,      #   mult when ADX=0 (no trend)
+    atr_adx_max_mult: float = 3.0,       #   mult when ADX=100 (max trend strength)
 ) -> Dict[str, Any]:
-    """v12/v13/v15/v16/v17/v18 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing."""
+    """v12/v13/v15/v16/v17/v18/v23 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates."""
     return {
         "name": name,
         "use_sl": True,
@@ -2577,6 +2634,16 @@ def _pm_v2_set(
         **({"regime_vote_mode": True}                 if regime_vote_mode else {}),
         # v22 XRPPM12 — grid sleep
         **({"grid_sleep_atr_thresh": grid_sleep_atr_thresh} if grid_sleep_atr_thresh > 0 else {}),
+        # v23 XRPPM13 — adaptive ATR gate
+        **({"atr_regime_adaptive": True,
+            "atr_bull_mult": atr_bull_mult, "atr_bear_mult": atr_bear_mult}
+           if atr_regime_adaptive else {}),
+        **({"atr_percentile_gate": True,
+            "atr_pct_threshold": atr_pct_threshold, "atr_pct_window": atr_pct_window}
+           if atr_percentile_gate else {}),
+        **({"atr_adx_scale": True,
+            "atr_adx_base_mult": atr_adx_base_mult, "atr_adx_max_mult": atr_adx_max_mult}
+           if atr_adx_scale else {}),
     }
 
 
@@ -3225,6 +3292,81 @@ XRP_PM_V12_1Y_MID_CONFIG["param_sets"] = _PM12_SETS
 
 
 # ===========================================================================
+# v23 — XRPPM13: Adaptive ATR gate.  Replaces fixed L1 multiplier with
+# regime-aware, percentile-based, and ADX-scaled approaches.
+#
+# PM11 showed L1 at 1.5× is a volatility smoother:
+#   Bull (6m OOS): 106.77% → 29.41%  (−77pp — too aggressive in bull)
+#   Bear (mid-yr): −6.92% → +24.57%  (+31pp — excellent protection)
+#   2y walk-fwd:   59.67% → 60.49%   (+0.82pp — washes out)
+#
+# Goal: achieve L1's bear protection while preserving bull performance
+# by dynamically adjusting the ATR gate threshold.
+#
+# Approach A (atr_regime_adaptive):
+#   Bull regime (price ≥ regime EMA) → high mult (relaxed, rarely blocks)
+#   Bear regime (price < regime EMA) → low mult (tight, blocks parabolic spikes)
+#
+# Approach B (atr_percentile_gate):
+#   Block only when ATR > rolling Nth percentile of recent ATR window.
+#   Naturally adapts: in a steady bull, percentile rises → fewer blocks.
+#
+# Approach C (atr_adx_scale):
+#   ADX strength modulates the multiplier continuously.
+#   Strong trend (high ADX) → higher mult → more permissive.
+#   Weak/ranging (low ADX) → lower mult → more protective.
+#
+# Hybrid (A+B): regime-adaptive mult + percentile gate (OR logic).
+#
+# 8 strategies × 3 windows (6m OOS, 2y walk-forward, mid-year)
+# ===========================================================================
+
+_V13_BASE = {**_V10_BASE}  # h0, spacing=1.5%, leverage=2.0 (same as V11)
+
+_PM13_SETS = [
+    # Control — no adaptive gate, no fixed gate (matches pm11_baseline)
+    _pm_v2_set("pm13_baseline",         **_V13_BASE),
+
+    # Approach A — Regime-adaptive ATR gate
+    _pm_v2_set("pm13_regime_b25_r15",   **_V13_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5),
+    _pm_v2_set("pm13_regime_b30_r15",   **_V13_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=3.0, atr_bear_mult=1.5),
+
+    # Approach B — Percentile gate (no SMA mult)
+    _pm_v2_set("pm13_pct_90",           **_V13_BASE,
+               atr_percentile_gate=True, atr_pct_threshold=0.90, atr_pct_window=100),
+    _pm_v2_set("pm13_pct_95",           **_V13_BASE,
+               atr_percentile_gate=True, atr_pct_threshold=0.95, atr_pct_window=100),
+
+    # Approach C — ADX-scaled gate
+    _pm_v2_set("pm13_adx_15_30",        **_V13_BASE,
+               atr_adx_scale=True, atr_adx_base_mult=1.5, atr_adx_max_mult=3.0),
+
+    # Hybrid A+B — Regime-adaptive AND percentile (OR logic)
+    _pm_v2_set("pm13_hybrid_b25_p90",   **_V13_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_percentile_gate=True, atr_pct_threshold=0.90, atr_pct_window=100),
+    _pm_v2_set("pm13_hybrid_b30_p95",   **_V13_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=3.0, atr_bear_mult=1.5,
+               atr_percentile_gate=True, atr_pct_threshold=0.95, atr_pct_window=100),
+]
+
+XRP_PM_V13_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V13_CONFIG["param_sets"] = _PM13_SETS
+
+XRP_PM_V13_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V13_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V13_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V13_2Y_CONFIG["param_sets"] = _PM13_SETS
+
+XRP_PM_V13_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V13_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V13_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V13_1Y_MID_CONFIG["param_sets"] = _PM13_SETS
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -3604,6 +3746,21 @@ if __name__ == "__main__":
         print("  v22 XRPPM12 full fix + grid sleep — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V12_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM13", "PM13"):
+        print("\n" + "=" * 60)
+        print("  v23 XRPPM13 adaptive ATR gate — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V13_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v23 XRPPM13 adaptive ATR gate — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V13_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v23 XRPPM13 adaptive ATR gate — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V13_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")

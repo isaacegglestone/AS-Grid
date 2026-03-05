@@ -60,6 +60,8 @@ jobs:
             dispatch: XRPPM11
           - name: "XRPPM12 — v22 full fix + grid sleep"
             dispatch: XRPPM12
+          - name: "XRPPM13 — v23 adaptive ATR gate"
+            dispatch: XRPPM13
 
     steps:
       - uses: actions/checkout@v4
