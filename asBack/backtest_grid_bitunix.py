@@ -82,6 +82,7 @@ class GridOrderBacktester:
         # Crash protection state
         self.crash_halt_counter: int = 0   # candles remaining in velocity CB halt
         self.dd_halt_counter: int = 0      # candles remaining in DD halt/resume pause
+        self._gate_fire_counter: int = 0   # ATR gate consecutive fire count (Approach F cooldown)
 
         # Pre-compute ADX series for the full dataset (used by ADX filter)
         self.adx_series = self._compute_adx(
@@ -601,6 +602,40 @@ class GridOrderBacktester:
 
             # Final gate: either SMA-mult OR percentile triggers blocking
             _parabolic = _parabolic_sma or _parabolic_pct
+
+            # Approach D: Directional — only keep gate ON if price also falling
+            # Grid strategies profit from buying dips, so suppress the gate when
+            # the ATR spike is caused by price RISING (healthy pump).
+            if _parabolic and self.config.get("atr_directional", False):
+                _dir_lb = int(self.config.get("atr_dir_lookback", 8))
+                _dir_drop = float(self.config.get("atr_dir_drop_pct", 0.02))
+                if idx >= _dir_lb:
+                    _prev_price = float(self.df["close"].iloc[idx - _dir_lb])
+                    if _prev_price > 0:
+                        _price_chg = (price - _prev_price) / _prev_price
+                        # Gate only fires if price actually FELL by drop threshold
+                        if _price_chg > -_dir_drop:
+                            _parabolic = False  # price flat/rising → allow entries
+
+            # Approach E: ATR acceleration — only keep gate ON if ATR is rising
+            # After a crash ATR stays high but flattens → gate clears faster.
+            if _parabolic and self.config.get("atr_acceleration", False):
+                _accel_lb = int(self.config.get("atr_accel_lookback", 10))
+                if idx >= _accel_lb:
+                    _prev_atr = float(self.atr_series.iloc[idx - _accel_lb])
+                    if _prev_atr > 0 and _atr_now <= _prev_atr:
+                        _parabolic = False  # ATR flat/falling → allow entries
+
+            # Approach F: Cooldown — limit consecutive blocked candles
+            # After gate fires for N consecutive candles, force-resume entries.
+            _atr_cooldown_max = int(self.config.get("atr_cooldown", 0))
+            if _atr_cooldown_max > 0:
+                if _parabolic:
+                    self._gate_fire_counter = getattr(self, "_gate_fire_counter", 0) + 1
+                    if self._gate_fire_counter > _atr_cooldown_max:
+                        _parabolic = False  # cooldown expired → force resume
+                else:
+                    self._gate_fire_counter = 0  # reset when gate not firing
 
             # ── Layer 2: HTF EMA alignment gate ────────────────────────────
             # Before opening a LONG trend entry: require HTF EMA-36 > EMA-84.
@@ -1646,6 +1681,10 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "atr_regime_adaptive", "atr_bull_mult", "atr_bear_mult",
                     "atr_percentile_gate", "atr_pct_threshold", "atr_pct_window",
                     "atr_adx_scale", "atr_adx_base_mult", "atr_adx_max_mult",
+                    # v24 XRPPM14 — directional velocity gate
+                    "atr_directional", "atr_dir_lookback", "atr_dir_drop_pct",
+                    "atr_acceleration", "atr_accel_lookback",
+                    "atr_cooldown",
                 ) if k in params}),
             }
         )
@@ -2586,8 +2625,15 @@ def _pm_v2_set(
     atr_adx_scale: bool = False,         # Approach C: ADX modulates ATR mult continuously
     atr_adx_base_mult: float = 1.5,      #   mult when ADX=0 (no trend)
     atr_adx_max_mult: float = 3.0,       #   mult when ADX=100 (max trend strength)
+    # v24 XRPPM14 — directional velocity gate
+    atr_directional: bool = False,       # Approach D: only gate when ATR spike + price falling
+    atr_dir_lookback: int = 8,           #   candles to measure price direction (8 = 2 hours on 15min)
+    atr_dir_drop_pct: float = 0.02,      #   min price decline to qualify as "falling" (2%)
+    atr_acceleration: bool = False,      # Approach E: gate only when ATR is rising vs N candles ago
+    atr_accel_lookback: int = 10,        #   candles to compare ATR growth
+    atr_cooldown: int = 0,               # Approach F: resume entries N candles after gate fires
 ) -> Dict[str, Any]:
-    """v12/v13/v15/v16/v17/v18/v23 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates."""
+    """v12/v13/v15/v16/v17/v18/v23/v24 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates."""
     return {
         "name": name,
         "use_sl": True,
@@ -2644,6 +2690,14 @@ def _pm_v2_set(
         **({"atr_adx_scale": True,
             "atr_adx_base_mult": atr_adx_base_mult, "atr_adx_max_mult": atr_adx_max_mult}
            if atr_adx_scale else {}),
+        # v24 XRPPM14 — directional velocity gate
+        **({"atr_directional": True,
+            "atr_dir_lookback": atr_dir_lookback, "atr_dir_drop_pct": atr_dir_drop_pct}
+           if atr_directional else {}),
+        **({"atr_acceleration": True,
+            "atr_accel_lookback": atr_accel_lookback}
+           if atr_acceleration else {}),
+        **({"atr_cooldown": atr_cooldown} if atr_cooldown > 0 else {}),
     }
 
 
@@ -3367,6 +3421,109 @@ XRP_PM_V13_1Y_MID_CONFIG["param_sets"] = _PM13_SETS
 
 
 # ===========================================================================
+# v24 — XRPPM14: Directional velocity gate.
+#
+# PM13 diagnosis revealed that ALL ATR-based gates (regime-adaptive,
+# percentile, ADX-scaled) cost ~77pp in bull because:
+#   1. Gate fire rates are identical in pump vs calm periods (~3% for 1.5×)
+#   2. The gate blocks at CRITICAL reversal points — exactly when the grid
+#      strategy wants to buy dips and ride the recovery
+#   3. Grid strategies profit from high-ATR dips; ATR gates block them
+#
+# Root cause: ATR gates are direction-blind.  An ATR spike from a healthy
+# pump (price rising) is treated identically to one from a crash (falling).
+#
+# Approach D (atr_directional):
+#   Keep original ATR gate logic, but only fire when price has actually
+#   FALLEN over a lookback window.  If price is flat/rising, the gate
+#   is suppressed — the ATR spike is from a bullish move, not a crash.
+#   Params: atr_dir_lookback (default 8 = 2hrs), atr_dir_drop_pct (2%)
+#
+# Approach E (atr_acceleration):
+#   Only fire the gate when ATR is actively RISING vs N candles ago.
+#   After a crash, ATR stays elevated but flattens — gate clears faster
+#   than the SMA-based approach.  Allows entries during the recovery.
+#   Param: atr_accel_lookback (default 10)
+#
+# Approach F (atr_cooldown):
+#   After the gate has fired for N consecutive candles, force it off.
+#   Prevents prolonged blocking during recovery after a crash.
+#   Param: atr_cooldown (default 0 = disabled)
+#
+# Combined with PM13 Approach A (regime-adaptive): D+A, E+A, D+E+A
+# Also standalone: D-only, E-only, D+E, F+A
+#
+# 10 strategies × 3 windows (6m OOS, 2y walk-forward, mid-year)
+# ===========================================================================
+
+_V14_BASE = {**_V10_BASE}  # h0, spacing=1.5%, leverage=2.0 (same as V11/V13)
+
+_PM14_SETS = [
+    # Control — no gate at all (matches pm13_baseline)
+    _pm_v2_set("pm14_baseline",           **_V14_BASE),
+
+    # PM13 best bear protector as reference (regime-adaptive A, b25/r15)
+    _pm_v2_set("pm14_regime_ref",         **_V14_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5),
+
+    # Approach D standalone — directional gate with fixed 1.5× mult
+    _pm_v2_set("pm14_dir_only",           **_V14_BASE,
+               atr_parabolic_mult=1.5, atr_directional=True,
+               atr_dir_lookback=8, atr_dir_drop_pct=0.02),
+
+    # D + looser drop threshold (price must fall 3% to engage gate)
+    _pm_v2_set("pm14_dir_3pct",           **_V14_BASE,
+               atr_parabolic_mult=1.5, atr_directional=True,
+               atr_dir_lookback=8, atr_dir_drop_pct=0.03),
+
+    # Approach E standalone — acceleration gate with fixed 1.5× mult
+    _pm_v2_set("pm14_accel_only",         **_V14_BASE,
+               atr_parabolic_mult=1.5, atr_acceleration=True,
+               atr_accel_lookback=10),
+
+    # D + A — directional + regime-adaptive (best of both worlds?)
+    _pm_v2_set("pm14_dir_regime",         **_V14_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_directional=True, atr_dir_lookback=8, atr_dir_drop_pct=0.02),
+
+    # E + A — acceleration + regime-adaptive
+    _pm_v2_set("pm14_accel_regime",       **_V14_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_acceleration=True, atr_accel_lookback=10),
+
+    # D + E — directional + acceleration (double filter, no regime)
+    _pm_v2_set("pm14_dir_accel",          **_V14_BASE,
+               atr_parabolic_mult=1.5,
+               atr_directional=True, atr_dir_lookback=8, atr_dir_drop_pct=0.02,
+               atr_acceleration=True, atr_accel_lookback=10),
+
+    # D + E + A — triple filter
+    _pm_v2_set("pm14_dir_accel_regime",   **_V14_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_directional=True, atr_dir_lookback=8, atr_dir_drop_pct=0.02,
+               atr_acceleration=True, atr_accel_lookback=10),
+
+    # F + A — cooldown (resume after 4 candles / 1 hour) + regime-adaptive
+    _pm_v2_set("pm14_cooldown_regime",    **_V14_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_cooldown=4),
+]
+
+XRP_PM_V14_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V14_CONFIG["param_sets"] = _PM14_SETS
+
+XRP_PM_V14_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V14_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V14_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V14_2Y_CONFIG["param_sets"] = _PM14_SETS
+
+XRP_PM_V14_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V14_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V14_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V14_1Y_MID_CONFIG["param_sets"] = _PM14_SETS
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -3761,6 +3918,21 @@ if __name__ == "__main__":
         print("  v23 XRPPM13 adaptive ATR gate — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V13_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM14", "PM14"):
+        print("\n" + "=" * 60)
+        print("  v24 XRPPM14 directional velocity gate — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V14_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v24 XRPPM14 directional velocity gate — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V14_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v24 XRPPM14 directional velocity gate — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V14_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
