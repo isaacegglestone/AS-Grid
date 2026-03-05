@@ -6,19 +6,18 @@ on:
   pull_request:
     branches: [main]
 
-# Allow at most one run per ref at a time, but queue rather than cancel.
-# cancel-in-progress: false means a new push will wait for the current run
-# to finish before starting — critical for the sequential feature backtest chain.
+# Cancel previous runs on the same branch — with parallel jobs there's no
+# sequential chain to protect, so a new push should supersede the old run.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Stage 1: Tests on free GitHub runner — runs on every push / PR
+  # Stage 1a: Unit tests — fast gate (~1 min)
   # ---------------------------------------------------------------------------
   tests:
-    name: "Stage 1: Tests (GitHub runner)"
+    name: "Unit tests"
     runs-on: ubuntu-latest
 
     steps:
@@ -35,8 +34,45 @@ jobs:
       - name: Unit tests
         run: python -m pytest --tb=short -q
 
+  # ---------------------------------------------------------------------------
+  # Stage 1b: Backtests — each config runs in its own parallel job (~40 min each)
+  #
+  # Superseded backtests removed from CI (code kept in backtest_grid_bitunix.py):
+  #   XRPPM2 (v12), XRPPM3 (v13), XRPPM4 (v14), XRPPM5 (v15)
+  #   XRPPM9 (v19), XRPPM10 (v20)
+  # These are fully superseded by later configs; run locally if needed.
+  # ---------------------------------------------------------------------------
+  backtests:
+    name: "Backtest ${{ matrix.name }}"
+    runs-on: ubuntu-latest
+    needs: tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "XRPPM6 — v16 comprehensive sweep"
+            dispatch: XRPPM6
+          - name: "XRPPM7 — v17 leverage + sizing"
+            dispatch: XRPPM7
+          - name: "XRPPM8 — v18 hysteresis + spacing"
+            dispatch: XRPPM8
+          - name: "XRPPM11 — v21 ATR+HTF+RegimeVote"
+            dispatch: XRPPM11
+          - name: "XRPPM12 — v22 full fix + grid sleep"
+            dispatch: XRPPM12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
       # Restore the ~54 MB 1min parquet from Actions cache (populated by cache-klines.yml).
-      # Cache key matches cache-klines.yml so both workflows share the same entry.
       - name: Restore 1min klines from Actions cache
         id: cache-1min
         uses: actions/cache/restore@v4
@@ -44,8 +80,7 @@ jobs:
           path: asBack/klines_cache/XRPUSDT_1min.parquet
           key: klines-1min-v1-${{ hashFiles('scripts/generate_klines_cache.py') }}
 
-      # Cache miss fallback: generate the 1min parquet inline (~15 min, Bitunix API).
-      # This only runs on the very first CI trigger before cache-klines.yml has seeded the cache.
+      # Cache miss fallback: generate the 1min parquet inline (~15 min).
       - name: Generate 1min parquet (cache miss fallback)
         if: steps.cache-1min.outputs.cache-hit != 'true'
         run: python scripts/generate_klines_cache.py
@@ -57,53 +92,8 @@ jobs:
           path: asBack/klines_cache/XRPUSDT_1min.parquet
           key: klines-1min-v1-${{ hashFiles('scripts/generate_klines_cache.py') }}
 
-      # -----------------------------------------------------------------
-      # Superseded backtests removed from CI (code kept in backtest_grid_bitunix.py):
-      #   XRPPM2 (v12), XRPPM3 (v13), XRPPM4 (v14), XRPPM5 (v15)
-      #   XRPPM9 (v19), XRPPM10 (v20)
-      # These are fully superseded by later configs; run locally if needed.
-      # -----------------------------------------------------------------
-
-      - name: Backtest XRP/USDT — v16 XRPPM6 comprehensive sweep
-        # Sweeps 6 dimensions on top of XRPPM5 winner (ema200, h2%, p50):
-        #   (A) hysteresis: h0/h1/h2(ctrl)/h3/h5
-        #   (B) EMA fine-tune: e150/e175/e200(ctrl)/e225/e250
-        #   (C) vol_period compound: p40 vs p50(ctrl) + ema200
-        #   (D) grid spacing: sp05/sp07/sp10(ctrl)/sp15 — grid harvesting
-        #   (E) grid depth: d3(ctrl)/d4/d5 — capital utilisation
-        #   (F) short boost below EMA: sb4/sb5
-        run: python asBack/backtest_grid_bitunix.py XRPPM6
-
-      - name: Backtest XRP/USDT — v17 XRPPM7 leverage + equity-proportional sizing
-        # Base: XRPPM6 winners applied — sp15 (1.5% spacing, +11.6pp 2y) + ema175.
-        # Expected baseline: ~30.54% 2y (was 18.93% before sp15 fix).
-        # Sweeps 4 groups to maximise absolute dollar P&L:
-        #   (L) leverage: 1x(ctrl) / 1.5x / 2x / 3x
-        #   (P) equity-pct: eqp10(=start) / eqp12 / eqp15 — compounding
-        #   (LP) combined: l2_eqp10 / l15_eqp10
-        #   (S) asymmetric short spacing below EMA: as07 / as05
-        run: python asBack/backtest_grid_bitunix.py XRPPM7
-
-      - name: Backtest XRP/USDT — v18 XRPPM8 hysteresis + spacing on l2 base
-        # Base: _V8_BASE = _V7_BASE + leverage=2.0 (pm7_l2 winner: 54.23% 2y, 0.99% dd).
-        # Two open questions from XRPPM7:
-        #   (H) Does h0 stack on l2? (h0 gave +2pp on pm6 baseline — does it hold on sp15+l2?)
-        #       h0=0.0 (no band) / h1=0.01 (1% band) vs h2%=0.02 (current)
-        #   (S) Spacing fill-in: sp10 → sp12 → sp13 → sp15(baseline)
-        #       sp15: 78 trades/6m, 30.54% 2y | sp10: 294 trades/6m, 18.93% 2y
-        #       Goal: more fills than 78/6m without the 2y collapse of sp10 (-0.82% 2y w/ l1)
-        #   (C) Cross: h0 × sp12 interaction
-        run: python asBack/backtest_grid_bitunix.py XRPPM8
-
-      - name: Backtest XRP/USDT — v21 XRPPM11 ATR+HTF+RegimeVote (3-layer 80% fix)
-        # Layer 1: ATR parabolic gate (blocks trend entries when ATR > mult×SMA)
-        # Layer 2: HTF EMA alignment (requires 1hr-equiv EMA agreement)
-        # Layer 3: Multi-TF regime vote (2-of-3 bear consensus for grid halt)
-        run: python asBack/backtest_grid_bitunix.py XRPPM11
-
-      - name: Backtest XRP/USDT — v22 XRPPM12 full fix + grid sleep (Layer 4 stacked)
-        # Layer 4 stacked onto v21 full: pause grid when ATR/price below threshold
-        run: python asBack/backtest_grid_bitunix.py XRPPM12
+      - name: "Run backtest: ${{ matrix.dispatch }}"
+        run: python asBack/backtest_grid_bitunix.py ${{ matrix.dispatch }}
 
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
@@ -113,7 +103,7 @@ jobs:
   ec2-tests:
     name: "Stage 2: Tests (ephemeral EC2)"
     runs-on: ubuntu-latest
-    needs: tests
+    needs: backtests
     if: github.ref == 'refs/heads/main'
     environment: ec2
 
