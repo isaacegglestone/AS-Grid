@@ -225,6 +225,109 @@ class TestLayer1ParabolicGate:
         assert bot._parabolic_gate() is False
 
 
+class TestLayer1bRegimeAdaptive:
+    """Regime-adaptive gate uses different mults for bull vs bear."""
+
+    def test_bull_regime_uses_bull_mult(self):
+        """Price ≥ regime_ema → uses bull_mult (2.5). ATR=4, SMA=2 → threshold=5 → no fire."""
+        bot = _make_bot(
+            atr_parabolic_mult=1.5,  # fallback (not used)
+            atr_regime_adaptive=True,
+            atr_bull_mult=2.5,
+            atr_bear_mult=1.5,
+        )
+        bot.latest_signals = _signals(atr=4.0, atr_sma=2.0, regime_ema=1.0, close=1.5)
+        assert bot._parabolic_gate() is False  # 4.0 < 2.5×2.0=5.0
+
+    def test_bear_regime_uses_bear_mult(self):
+        """Price < regime_ema → uses bear_mult (1.5). ATR=4, SMA=2 → threshold=3 → fires."""
+        bot = _make_bot(
+            atr_parabolic_mult=2.5,  # fallback (not used when adaptive)
+            atr_regime_adaptive=True,
+            atr_bull_mult=2.5,
+            atr_bear_mult=1.5,
+        )
+        bot.latest_signals = _signals(atr=4.0, atr_sma=2.0, regime_ema=2.0, close=1.5)
+        assert bot._parabolic_gate() is True  # 4.0 > 1.5×2.0=3.0
+
+    def test_adaptive_off_uses_fixed_mult(self):
+        """When atr_regime_adaptive=False, uses atr_parabolic_mult regardless of regime."""
+        bot = _make_bot(
+            atr_parabolic_mult=2.0,
+            atr_regime_adaptive=False,
+            atr_bull_mult=5.0,
+            atr_bear_mult=1.0,
+        )
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0, regime_ema=1.0, close=1.5)
+        assert bot._parabolic_gate() is True  # 5.0 > 2.0×2.0=4.0, uses fixed
+
+    def test_regime_ema_zero_falls_back_to_fixed(self):
+        """If regime_ema is 0 (not warmed up), falls back to fixed mult."""
+        bot = _make_bot(
+            atr_parabolic_mult=2.0,
+            atr_regime_adaptive=True,
+            atr_bull_mult=5.0,
+            atr_bear_mult=1.0,
+        )
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0, regime_ema=0.0, close=1.5)
+        assert bot._parabolic_gate() is True  # falls back to fixed 2.0, 5>4
+
+
+class TestLayer1cCooldown:
+    """Cooldown gate: force-resume after N consecutive fires."""
+
+    def test_cooldown_off_no_effect(self):
+        """atr_cooldown=0 → normal gate behavior."""
+        bot = _make_bot(atr_parabolic_mult=2.0, atr_cooldown=0)
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0)
+        # Should fire indefinitely
+        for _ in range(20):
+            assert bot._parabolic_gate() is True
+
+    def test_cooldown_force_resumes(self):
+        """After N consecutive fires, gate returns False (force-resume)."""
+        bot = _make_bot(atr_parabolic_mult=2.0, atr_cooldown=4)
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0)
+        results = [bot._parabolic_gate() for _ in range(8)]
+        # First 4 fire (True), then force-resume (False)
+        assert results == [True, True, True, True, False, False, False, False]
+
+    def test_cooldown_resets_on_natural_clear(self):
+        """Counter resets when gate naturally clears (ATR drops)."""
+        bot = _make_bot(atr_parabolic_mult=2.0, atr_cooldown=4)
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0)
+        # Fire 3 times (not yet at cooldown)
+        for _ in range(3):
+            assert bot._parabolic_gate() is True
+        assert bot._gate_fire_counter == 3
+
+        # ATR drops — gate naturally clears → counter resets
+        bot.latest_signals = _signals(atr=3.0, atr_sma=2.0)
+        assert bot._parabolic_gate() is False
+        assert bot._gate_fire_counter == 0
+
+        # Fire again — counter starts fresh
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0)
+        for _ in range(4):
+            assert bot._parabolic_gate() is True
+        # 5th fire → force-resume
+        assert bot._parabolic_gate() is False
+
+    def test_cooldown_with_regime_adaptive(self):
+        """Cooldown works together with regime-adaptive mults."""
+        bot = _make_bot(
+            atr_parabolic_mult=0.0,
+            atr_regime_adaptive=True,
+            atr_bull_mult=2.5,
+            atr_bear_mult=1.5,
+            atr_cooldown=3,
+        )
+        # Bear regime (close < regime_ema) → mult=1.5, threshold=3.0
+        bot.latest_signals = _signals(atr=4.0, atr_sma=2.0, regime_ema=2.0, close=1.5)
+        results = [bot._parabolic_gate() for _ in range(6)]
+        assert results == [True, True, True, False, False, False]
+
+
 class TestLayer1TrendIntegration:
     """Parabolic gate integrated into _evaluate_trend."""
 

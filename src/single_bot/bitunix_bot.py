@@ -130,6 +130,10 @@ TREND_REENTRY_FAST: bool  = True  # skip 30-candle cooldown; re-confirm in 3 can
 # All default to OFF (0 / False) so existing deployments are unaffected.
 # ---------------------------------------------------------------------------
 ATR_PARABOLIC_MULT:    float = float(os.getenv("ATR_PARABOLIC_MULT",    "0.0"))   # L1: block trend entries when ATR > mult × SMA(ATR,20)
+ATR_REGIME_ADAPTIVE:   bool  = os.getenv("ATR_REGIME_ADAPTIVE", "false").lower() == "true"  # L1b: use different mults for bull/bear
+ATR_BULL_MULT:         float = float(os.getenv("ATR_BULL_MULT",         "2.5"))   # L1b: mult in bull regime (price ≥ regime_ema)
+ATR_BEAR_MULT:         float = float(os.getenv("ATR_BEAR_MULT",         "1.5"))   # L1b: mult in bear regime (price < regime_ema)
+ATR_COOLDOWN:          int   = int(os.getenv("ATR_COOLDOWN",            "0"))     # L1c: force-resume after N consecutive gate fires (0=off)
 HTF_EMA_ALIGN:         bool  = os.getenv("HTF_EMA_ALIGN", "false").lower() == "true"  # L2: require HTF EMA agreement for trend entry
 REGIME_VOTE_MODE:      bool  = os.getenv("REGIME_VOTE_MODE", "false").lower() == "true"  # L3: 2-of-3 vote for bear halt
 GRID_SLEEP_ATR_THRESH: float = float(os.getenv("GRID_SLEEP_ATR_THRESH", "0.0"))   # L4: pause grid when ATR/price < threshold
@@ -215,6 +219,10 @@ class GridTradingBot(BitunixExchange):
         self.bear_spacing: float = BEAR_SPACING   # BTBW: spacing in bear regime (price < regime_ema)
         self.regime_hysteresis_pct: float = REGIME_HYSTERESIS_PCT  # h0=0.00 — no band
         self.atr_parabolic_mult: float = ATR_PARABOLIC_MULT        # L1: 0=off
+        self.atr_regime_adaptive: bool = ATR_REGIME_ADAPTIVE       # L1b: regime-adaptive mults
+        self.atr_bull_mult: float = ATR_BULL_MULT                  # L1b: bull mult (2.5)
+        self.atr_bear_mult: float = ATR_BEAR_MULT                  # L1b: bear mult (1.5)
+        self.atr_cooldown: int = ATR_COOLDOWN                      # L1c: cooldown candles (0=off)
         self.htf_ema_align: bool = HTF_EMA_ALIGN                   # L2: False=off
         self.regime_vote_mode: bool = REGIME_VOTE_MODE             # L3: False=off
         self.grid_sleep_atr_thresh: float = GRID_SLEEP_ATR_THRESH  # L4: 0=off
@@ -300,6 +308,9 @@ class GridTradingBot(BitunixExchange):
         self.trend_position: Optional[Dict[str, Any]] = None
         # trend_position keys: side, entry, qty, peak
 
+        # ── Gate state (cooldown counter for L1c) ────────────────────────
+        self._gate_fire_counter: int = 0
+
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
@@ -334,14 +345,42 @@ class GridTradingBot(BitunixExchange):
     # ------------------------------------------------------------------
 
     def _parabolic_gate(self) -> bool:
-        """Layer 1: True when ATR > mult × SMA(ATR,20) — blocks trend entries."""
-        if self.atr_parabolic_mult <= 0 or self.latest_signals is None:
+        """Layer 1: True when ATR > mult × SMA(ATR,20) — blocks trend entries.
+
+        Supports regime-adaptive multipliers (L1b) and cooldown (L1c):
+        - L1b: Use ATR_BULL_MULT when price ≥ regime_ema, ATR_BEAR_MULT otherwise.
+        - L1c: After ATR_COOLDOWN consecutive gate fires, force-resume (return False)
+               to avoid missing recovery entries.  Resets when gate naturally clears.
+        """
+        if self.latest_signals is None:
             return False
         atr = self.latest_signals.atr
         atr_sma = self.latest_signals.atr_sma
         if atr_sma <= 0:
             return False
-        return atr > self.atr_parabolic_mult * atr_sma
+
+        # Determine effective multiplier
+        if self.atr_regime_adaptive and self.latest_signals.regime_ema > 0:
+            price = self.latest_signals.close or self.latest_price
+            mult = self.atr_bull_mult if price >= self.latest_signals.regime_ema else self.atr_bear_mult
+        else:
+            mult = self.atr_parabolic_mult
+
+        if mult <= 0:
+            return False
+
+        firing = atr > mult * atr_sma
+
+        # L1c: cooldown — force-resume after N consecutive fires
+        if self.atr_cooldown > 0:
+            if firing:
+                self._gate_fire_counter += 1
+                if self._gate_fire_counter > self.atr_cooldown:
+                    return False          # force-resume: gate blocked long enough
+            else:
+                self._gate_fire_counter = 0   # natural clear → reset
+
+        return firing
 
     def _htf_bull(self) -> bool:
         """Layer 2: True when HTF fast EMA > HTF slow EMA (bullish alignment)."""
