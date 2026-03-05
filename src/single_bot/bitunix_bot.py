@@ -134,6 +134,7 @@ ATR_REGIME_ADAPTIVE:   bool  = os.getenv("ATR_REGIME_ADAPTIVE", "false").lower()
 ATR_BULL_MULT:         float = float(os.getenv("ATR_BULL_MULT",         "2.5"))   # L1b: mult in bull regime (price ≥ regime_ema)
 ATR_BEAR_MULT:         float = float(os.getenv("ATR_BEAR_MULT",         "1.5"))   # L1b: mult in bear regime (price < regime_ema)
 ATR_COOLDOWN:          int   = int(os.getenv("ATR_COOLDOWN",            "0"))     # L1c: force-resume after N consecutive gate fires (0=off)
+ATR_ACCEL_LOOKBACK:    int   = int(os.getenv("ATR_ACCEL_LOOKBACK",      "0"))     # L1d: only gate when ATR rising vs N candles ago (0=off)
 HTF_EMA_ALIGN:         bool  = os.getenv("HTF_EMA_ALIGN", "false").lower() == "true"  # L2: require HTF EMA agreement for trend entry
 REGIME_VOTE_MODE:      bool  = os.getenv("REGIME_VOTE_MODE", "false").lower() == "true"  # L3: 2-of-3 vote for bear halt
 GRID_SLEEP_ATR_THRESH: float = float(os.getenv("GRID_SLEEP_ATR_THRESH", "0.0"))   # L4: pause grid when ATR/price < threshold
@@ -223,6 +224,7 @@ class GridTradingBot(BitunixExchange):
         self.atr_bull_mult: float = ATR_BULL_MULT                  # L1b: bull mult (2.5)
         self.atr_bear_mult: float = ATR_BEAR_MULT                  # L1b: bear mult (1.5)
         self.atr_cooldown: int = ATR_COOLDOWN                      # L1c: cooldown candles (0=off)
+        self.atr_accel_lookback: int = ATR_ACCEL_LOOKBACK            # L1d: accel lookback (0=off)
         self.htf_ema_align: bool = HTF_EMA_ALIGN                   # L2: False=off
         self.regime_vote_mode: bool = REGIME_VOTE_MODE             # L3: False=off
         self.grid_sleep_atr_thresh: float = GRID_SLEEP_ATR_THRESH  # L4: 0=off
@@ -295,6 +297,7 @@ class GridTradingBot(BitunixExchange):
             regime_ema_period=REGIME_EMA_PERIOD,
             vol_period=20,
             ms_lookback=20,
+            atr_accel_lookback=self.atr_accel_lookback,
         )
         # Latest computed indicator snapshot (refreshed on each candle close).
         self.latest_signals: Optional[Signals] = None
@@ -347,10 +350,14 @@ class GridTradingBot(BitunixExchange):
     def _parabolic_gate(self) -> bool:
         """Layer 1: True when ATR > mult × SMA(ATR,20) — blocks trend entries.
 
-        Supports regime-adaptive multipliers (L1b) and cooldown (L1c):
+        Supports regime-adaptive multipliers (L1b), cooldown (L1c),
+        and acceleration filter (L1d):
         - L1b: Use ATR_BULL_MULT when price ≥ regime_ema, ATR_BEAR_MULT otherwise.
         - L1c: After ATR_COOLDOWN consecutive gate fires, force-resume (return False)
                to avoid missing recovery entries.  Resets when gate naturally clears.
+        - L1d: Only fire gate when ATR is actively rising (ATR > ATR[N candles ago]).
+               This clears the gate faster during recovery when ATR is still elevated
+               but flattening.
         """
         if self.latest_signals is None:
             return False
@@ -370,6 +377,12 @@ class GridTradingBot(BitunixExchange):
             return False
 
         firing = atr > mult * atr_sma
+
+        # L1d: acceleration filter — only gate when ATR is rising
+        if firing and self.atr_accel_lookback > 0:
+            atr_prev = self.latest_signals.atr_prev
+            if atr_prev > 0 and atr <= atr_prev:
+                firing = False  # ATR peaked/flattening → recovery phase
 
         # L1c: cooldown — force-resume after N consecutive fires
         if self.atr_cooldown > 0:

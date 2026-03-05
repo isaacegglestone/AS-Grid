@@ -328,7 +328,62 @@ class TestLayer1cCooldown:
         assert results == [True, True, True, False, False, False]
 
 
-class TestLayer1TrendIntegration:
+class TestLayer1dAcceleration:
+    """Acceleration filter: only gate when ATR is actively rising."""
+
+    def test_accel_off_no_effect(self):
+        """atr_accel_lookback=0 → normal gate (no acceleration check)."""
+        bot = _make_bot(atr_parabolic_mult=2.0, atr_accel_lookback=0)
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0, atr_prev=6.0)
+        # Even though ATR is falling (5 < 6), gate fires because accel is off
+        assert bot._parabolic_gate() is True
+
+    def test_accel_suppresses_when_atr_falling(self):
+        """ATR above threshold BUT falling → gate suppressed (recovery phase)."""
+        bot = _make_bot(atr_parabolic_mult=2.0, atr_accel_lookback=10)
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0, atr_prev=6.0)
+        assert bot._parabolic_gate() is False
+
+    def test_accel_suppresses_when_atr_flat(self):
+        """ATR exactly equal to prev → not rising → gate suppressed."""
+        bot = _make_bot(atr_parabolic_mult=2.0, atr_accel_lookback=10)
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0, atr_prev=5.0)
+        assert bot._parabolic_gate() is False
+
+    def test_accel_allows_when_atr_rising(self):
+        """ATR above threshold AND rising → gate fires normally."""
+        bot = _make_bot(atr_parabolic_mult=2.0, atr_accel_lookback=10)
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0, atr_prev=4.0)
+        assert bot._parabolic_gate() is True
+
+    def test_accel_no_prev_data(self):
+        """atr_prev=0 (not enough history) → gate fires normally."""
+        bot = _make_bot(atr_parabolic_mult=2.0, atr_accel_lookback=10)
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0, atr_prev=0.0)
+        assert bot._parabolic_gate() is True
+
+    def test_accel_below_threshold_no_gate(self):
+        """ATR below threshold (no gate) → accel filter irrelevant."""
+        bot = _make_bot(atr_parabolic_mult=2.0, atr_accel_lookback=10)
+        bot.latest_signals = _signals(atr=3.0, atr_sma=2.0, atr_prev=4.0)
+        assert bot._parabolic_gate() is False
+
+    def test_accel_with_cooldown(self):
+        """Acceleration + cooldown work together (the winning combo)."""
+        bot = _make_bot(atr_parabolic_mult=1.5, atr_accel_lookback=10, atr_cooldown=4)
+        # ATR rising above threshold → gate fires
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0, atr_prev=3.0)
+        results = [bot._parabolic_gate() for _ in range(6)]
+        # 4 fires then cooldown kicks in
+        assert results == [True, True, True, True, False, False]
+
+    def test_accel_suppresses_before_cooldown(self):
+        """ATR falling suppresses gate before cooldown even starts counting."""
+        bot = _make_bot(atr_parabolic_mult=1.5, atr_accel_lookback=10, atr_cooldown=4)
+        bot.latest_signals = _signals(atr=5.0, atr_sma=2.0, atr_prev=6.0)
+        # Accel suppresses immediately — cooldown counter never increments
+        assert bot._parabolic_gate() is False
+        assert bot._gate_fire_counter == 0
     """Parabolic gate integrated into _evaluate_trend."""
 
     @pytest.mark.asyncio

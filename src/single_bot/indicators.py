@@ -90,6 +90,7 @@ class Signals:
 
     # ── Layer 1: ATR parabolic gate ───────────────────────────────────────
     atr_sma: float = 0.0     # SMA(ATR, 20) — baseline for parabolic detection
+    atr_prev: float = 0.0    # ATR value N candles ago (acceleration filter)
 
     # ── Layer 2: HTF EMA alignment ────────────────────────────────────────
     htf_ema_fast: float = 0.0   # 1hr-equiv fast EMA (default 36 on 15m = 9hr)
@@ -172,6 +173,7 @@ class CandleBuffer:
         regime_ema_87_period: int = 87,
         regime_ema_42_period: int = 42,
         atr_sma_period: int = 20,
+        atr_accel_lookback: int = 10,
     ) -> None:
         self.maxlen = maxlen
         self.interval = interval
@@ -190,6 +192,7 @@ class CandleBuffer:
         self.regime_ema_87_period = regime_ema_87_period
         self.regime_ema_42_period = regime_ema_42_period
         self.atr_sma_period = atr_sma_period
+        self.atr_accel_lookback = atr_accel_lookback
 
         self._closed: Deque[Candle] = deque(maxlen=maxlen)
         self._live: Optional[Candle] = None   # current in-progress candle
@@ -297,7 +300,8 @@ class CandleBuffer:
         volumes = np.array([c.volume for c in candles], dtype=float)
 
         adx_val, plus_di, minus_di = self._adx(highs, lows, closes, self.adx_period)
-        atr_val                    = self._atr(highs, lows, closes, self.atr_period)
+        atr_val, atr_prev_val      = self._atr(highs, lows, closes, self.atr_period,
+                                                prev_lookback=self.atr_accel_lookback)
         rsi_val                    = self._rsi(closes, self.rsi_period)
         bb_w                       = self._bb_width(closes, self.bb_period, self.bb_mult)
         ema_f                      = self._ema(closes, self.ema_fast)
@@ -319,6 +323,7 @@ class CandleBuffer:
             minus_di=minus_di,
             bb_width=bb_w,
             atr=atr_val,
+            atr_prev=atr_prev_val,
             rsi=rsi_val,
             ema_fast=ema_f,
             ema_slow=ema_s,
@@ -399,9 +404,14 @@ class CandleBuffer:
 
     @classmethod
     def _atr(
-        cls, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int
-    ) -> float:
-        """Return ATR (price units) for the most-recent candle (Wilder smoothing)."""
+        cls, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int,
+        prev_lookback: int = 0,
+    ) -> "float | tuple[float, float]":
+        """Return ATR (price units) for the most-recent candle (Wilder smoothing).
+
+        If *prev_lookback* > 0, returns ``(atr_current, atr_prev)`` where
+        ``atr_prev`` is the ATR value *prev_lookback* candles before current.
+        """
         n = len(closes)
         prev_closes = np.empty(n)
         prev_closes[0] = closes[0]
@@ -410,7 +420,12 @@ class CandleBuffer:
         tr = np.maximum.reduce(
             [highs - lows, np.abs(highs - prev_closes), np.abs(lows - prev_closes)]
         )
-        return float(cls._wilder_ewm(tr, period)[-1])
+        atr_arr = cls._wilder_ewm(tr, period)
+        current = float(atr_arr[-1])
+        if prev_lookback <= 0:
+            return current
+        idx = max(0, len(atr_arr) - 1 - prev_lookback)
+        return current, float(atr_arr[idx])
 
     @classmethod
     def _atr_sma(
