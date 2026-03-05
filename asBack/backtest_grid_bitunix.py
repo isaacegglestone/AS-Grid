@@ -3524,6 +3524,87 @@ XRP_PM_V14_1Y_MID_CONFIG["param_sets"] = _PM14_SETS
 
 
 # ===========================================================================
+# v25 — XRPPM15: Cooldown sweep + F+E combinations.
+#
+# PM14 results revealed the COOLDOWN approach (F) is the breakthrough:
+#   pm14_cooldown_regime:  106.77% bull | 119.18% 2y WF | 15.06% mid-yr
+# This is 2× better than any previous strategy on the 2y walk-forward.
+#
+# Approach D (directional) was actively HARMFUL — it suppresses the gate
+# during parabolic blow-off tops where price IS rising, causing entries
+# at blow-off peaks.  2y WF dropped from 48.11% → 33.34%.
+#
+# Key insight: the problem isn't gate DIRECTION, it's gate DURATION.
+# Brief gates protect against flash crashes; prolonged gates miss
+# recoveries.  Cooldown directly controls duration.
+#
+# This sweep optimizes:
+#   1. Cooldown duration: 2, 4, 6, 8, 12, 16 candles (0.5-4 hours)
+#   2. F+E+A combo: cooldown + acceleration + regime-adaptive
+#   3. F+E: cooldown + acceleration (no regime)
+#
+# 10 strategies × 3 windows (6m OOS, 2y walk-forward, mid-year)
+# ===========================================================================
+
+_V15_BASE = {**_V10_BASE}  # h0, spacing=1.5%, leverage=2.0
+
+_PM15_SETS = [
+    # Control — no gate (reference)
+    _pm_v2_set("pm15_baseline",           **_V15_BASE),
+
+    # Cooldown sweep: F+A with varying durations
+    _pm_v2_set("pm15_cd2_regime",         **_V15_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_cooldown=2),
+    _pm_v2_set("pm15_cd4_regime",         **_V15_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_cooldown=4),
+    _pm_v2_set("pm15_cd6_regime",         **_V15_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_cooldown=6),
+    _pm_v2_set("pm15_cd8_regime",         **_V15_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_cooldown=8),
+    _pm_v2_set("pm15_cd12_regime",        **_V15_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_cooldown=12),
+    _pm_v2_set("pm15_cd16_regime",        **_V15_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_cooldown=16),
+
+    # F+E+A — cooldown + acceleration + regime-adaptive (best of E bear + F bull)
+    _pm_v2_set("pm15_cd4_accel_regime",   **_V15_BASE,
+               atr_regime_adaptive=True, atr_bull_mult=2.5, atr_bear_mult=1.5,
+               atr_acceleration=True, atr_accel_lookback=10,
+               atr_cooldown=4),
+
+    # F+E — cooldown + acceleration, fixed 1.5× mult (no regime)
+    _pm_v2_set("pm15_cd4_accel_fixed",    **_V15_BASE,
+               atr_parabolic_mult=1.5,
+               atr_acceleration=True, atr_accel_lookback=10,
+               atr_cooldown=4),
+
+    # Accel-only reference (E with fixed 1.5× — best bear protector from PM14)
+    _pm_v2_set("pm15_accel_ref",          **_V15_BASE,
+               atr_parabolic_mult=1.5, atr_acceleration=True,
+               atr_accel_lookback=10),
+]
+
+XRP_PM_V15_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V15_CONFIG["param_sets"] = _PM15_SETS
+
+XRP_PM_V15_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V15_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V15_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V15_2Y_CONFIG["param_sets"] = _PM15_SETS
+
+XRP_PM_V15_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V15_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V15_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V15_1Y_MID_CONFIG["param_sets"] = _PM15_SETS
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -3933,6 +4014,21 @@ if __name__ == "__main__":
         print("  v24 XRPPM14 directional velocity gate — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V14_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM15", "PM15"):
+        print("\n" + "=" * 60)
+        print("  v25 XRPPM15 cooldown sweep + F+E — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V15_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v25 XRPPM15 cooldown sweep + F+E — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V15_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v25 XRPPM15 cooldown sweep + F+E — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V15_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")

@@ -62,8 +62,8 @@ jobs:
             dispatch: XRPPM12
           - name: "XRPPM13 — v23 adaptive ATR gate"
             dispatch: XRPPM13
-          - name: "XRPPM14 — v24 directional velocity gate"
-            dispatch: XRPPM14
+          - name: "XRPPM15 — v25 cooldown sweep + F+E"
+            dispatch: XRPPM15
 
     steps:
       - uses: actions/checkout@v4
