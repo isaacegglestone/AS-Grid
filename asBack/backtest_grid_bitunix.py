@@ -559,18 +559,6 @@ class GridOrderBacktester:
                 dyn_trail = atr_now * atr_trail_mult / price
                 trail_stop_pct = max(atr_trail_min, min(atr_trail_max, dyn_trail))
 
-            # ── v26 XRPPM16: Dynamic velocity threshold ──────────────────
-            # Replace fixed vel_threshold/cap_vel_threshold with ATR-scaled
-            # versions.  In high-vol (post-parabolic), threshold auto-rises
-            # so noise bounce doesn't trigger trend entries.  In normal-vol,
-            # threshold stays similar to the current fixed 4%/6%.
-            _vel_atr_mult = float(self.config.get("vel_atr_mult", 0.0))
-            if _vel_atr_mult > 0 and price > 0:
-                _atr_for_vel = float(self.atr_series.iloc[idx])
-                vel_threshold     = _vel_atr_mult * _atr_for_vel / price
-                _vel_cap_mult = float(self.config.get("vel_cap_atr_mult", _vel_atr_mult * 1.5))
-                cap_vel_threshold = _vel_cap_mult * _atr_for_vel / price
-
             # ── Layer 1: ATR parabolic gate (fixed or adaptive) ───────────
             # When ATR exceeds a threshold, price is in a parabolic spike and
             # trend entries are suppressed.  The threshold can be:
@@ -581,6 +569,19 @@ class GridOrderBacktester:
             #   Hybrid:   any combination — OR logic (any trigger blocks)
             _atr_now     = float(self.atr_series.iloc[idx])
             _atr_sma_now = float(self.atr_sma_series.iloc[idx])
+
+            # ── v26 XRPPM16: Dynamic velocity threshold ──────────────────
+            # Scale the STATIC vel_threshold proportionally to the ATR spike
+            # ratio (ATR / ATR_SMA).  In normal vol (ratio ≈ 1.0), the floor
+            # keeps the threshold unchanged.  In high-vol (ratio 3-4×),
+            # threshold rises 3-4× so post-parabolic bounces are ignored.
+            #   threshold = static_vel × max(1.0, vel_atr_mult × ATR/SMA)
+            _vel_atr_mult = float(self.config.get("vel_atr_mult", 0.0))
+            if _vel_atr_mult > 0 and _atr_sma_now > 0:
+                _atr_ratio_vel = _atr_now / _atr_sma_now
+                _vel_scale = max(1.0, _vel_atr_mult * _atr_ratio_vel)
+                vel_threshold     = vel_threshold * _vel_scale
+                cap_vel_threshold = cap_vel_threshold * _vel_scale
 
             # Start with the fixed multiplier (0 = disabled)
             _atr_parabolic_mult = float(self.config.get("atr_parabolic_mult", 0.0))
@@ -655,6 +656,9 @@ class GridOrderBacktester:
             # spike_ratio = peak_atr / atr_sma during the gate period.
             # This catches the post-parabolic correction window (Dec 2024)
             # where ATR is still 3-4× normal but no longer RISING.
+            #
+            # State machine:  IDLE → GATE_ACTIVE → DECAYING → IDLE
+            # Only track peak during real gate fire, NOT during decay.
             _gate_decay_scale = float(self.config.get("gate_decay_scale", 0.0))
             if _gate_decay_scale > 0:
                 # Ensure state variables exist on first candle
@@ -662,26 +666,31 @@ class GridOrderBacktester:
                     self._gate_peak_atr_ratio = 1.0
                 if not hasattr(self, "_gate_decay_countdown"):
                     self._gate_decay_countdown = 0
+                if not hasattr(self, "_gate_was_active"):
+                    self._gate_was_active = False
 
-                if _parabolic:
-                    # Track peak ATR ratio while gate is active
+                _decay_countdown = self._gate_decay_countdown
+
+                if _parabolic and _decay_countdown == 0:
+                    # GATE_ACTIVE: real gate fire → track peak ratio
                     _cur_spike = _atr_now / _atr_sma_now if _atr_sma_now > 0 else 1.0
                     self._gate_peak_atr_ratio = max(
-                        getattr(self, "_gate_peak_atr_ratio", 1.0), _cur_spike
+                        self._gate_peak_atr_ratio, _cur_spike
                     )
-                    self._gate_decay_countdown = 0  # reset countdown while gate active
-                else:
-                    _peak = getattr(self, "_gate_peak_atr_ratio", 1.0)
-                    _countdown = getattr(self, "_gate_decay_countdown", 0)
-                    if _peak > 1.0 and _countdown == 0:
-                        # Gate just cleared → start decay countdown
+                    self._gate_was_active = True
+                elif not _parabolic and self._gate_was_active and _decay_countdown == 0:
+                    # Gate just cleared → start decay countdown from peak
+                    _peak = self._gate_peak_atr_ratio
+                    if _peak > 1.0:
                         self._gate_decay_countdown = int(_peak * _gate_decay_scale)
-                    if self._gate_decay_countdown > 0:
-                        _parabolic = True  # extend suppression during decay
-                        self._gate_decay_countdown -= 1
-                        if self._gate_decay_countdown <= 0:
-                            # Decay expired → fully reset
-                            self._gate_peak_atr_ratio = 1.0
+                    self._gate_was_active = False
+
+                if self._gate_decay_countdown > 0:
+                    _parabolic = True  # suppress entries during decay
+                    self._gate_decay_countdown -= 1
+                    if self._gate_decay_countdown <= 0:
+                        # Decay expired → fully reset
+                        self._gate_peak_atr_ratio = 1.0
 
             # ── Layer 2: HTF EMA alignment gate ────────────────────────────
             # Before opening a LONG trend entry: require HTF EMA-36 > EMA-84.
@@ -1820,7 +1829,7 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "atr_acceleration", "atr_accel_lookback",
                     "atr_cooldown",
                     # v26 XRPPM16 — dynamic self-calibrating mechanisms
-                    "vel_atr_mult", "vel_cap_atr_mult",
+                    "vel_atr_mult",
                     "gate_decay_scale",
                     "cap_size_atr_scale", "cap_size_atr_floor", "cap_size_atr_ceiling",
                     "trend_max_loss_atr",
@@ -2772,8 +2781,7 @@ def _pm_v2_set(
     atr_accel_lookback: int = 10,        #   candles to compare ATR growth
     atr_cooldown: int = 0,               # Approach F: resume entries N candles after gate fires
     # v26 XRPPM16 — dynamic self-calibrating mechanisms
-    vel_atr_mult: float = 0.0,           # Dynamic velocity: threshold = mult × ATR/price (0=use static)
-    vel_cap_atr_mult: float = 0.0,       # Dynamic capture velocity: cap_threshold = mult × ATR/price (0=use static)
+    vel_atr_mult: float = 0.0,           # Dynamic velocity: scale = max(1, mult × ATR/SMA) (0=use static)
     gate_decay_scale: float = 0.0,       # Dynamic gate decay: after gate clears, suppress for spike_ratio × scale candles (0=off)
     cap_size_atr_scale: bool = False,    # Dynamic position sizing: size = base / atr_ratio, capped [0.30, 0.90]
     cap_size_atr_floor: float = 0.30,    # Minimum trend capture size when ATR is extreme
@@ -2847,7 +2855,6 @@ def _pm_v2_set(
         **({"atr_cooldown": atr_cooldown} if atr_cooldown > 0 else {}),
         # v26 XRPPM16 — dynamic self-calibrating mechanisms
         **({"vel_atr_mult": vel_atr_mult} if vel_atr_mult > 0 else {}),
-        **({"vel_cap_atr_mult": vel_cap_atr_mult} if vel_cap_atr_mult > 0 else {}),
         **({"gate_decay_scale": gate_decay_scale} if gate_decay_scale > 0 else {}),
         **({"cap_size_atr_scale": True,
             "cap_size_atr_floor": cap_size_atr_floor,
@@ -3804,13 +3811,17 @@ _PM16_SETS = [
     # Control — pm15 winner baseline (no dynamic mechanisms)
     _pm_v2_set("pm16_baseline",              **_V16_BASE),
 
-    # ── Dynamic velocity only ─────────────────────────────────
-    _pm_v2_set("pm16_vel08",                 **_V16_BASE,
-               vel_atr_mult=0.8, vel_cap_atr_mult=1.2),
+    # ── Dynamic velocity only (ATR-ratio scaling) ───────────────
+    # vel_atr_mult scales static threshold by max(1, mult × ATR/SMA)
+    # Normal vol (ratio≈1): unchanged.  3× spike: threshold ×3.
+    _pm_v2_set("pm16_vel05",                 **_V16_BASE,
+               vel_atr_mult=0.5),
+    _pm_v2_set("pm16_vel075",               **_V16_BASE,
+               vel_atr_mult=0.75),
     _pm_v2_set("pm16_vel10",                 **_V16_BASE,
-               vel_atr_mult=1.0, vel_cap_atr_mult=1.5),
-    _pm_v2_set("pm16_vel12",                 **_V16_BASE,
-               vel_atr_mult=1.2, vel_cap_atr_mult=1.8),
+               vel_atr_mult=1.0),
+    _pm_v2_set("pm16_vel15",                 **_V16_BASE,
+               vel_atr_mult=1.5),
 
     # ── Dynamic gate decay only ───────────────────────────────
     _pm_v2_set("pm16_decay3",                **_V16_BASE,
@@ -3824,25 +3835,25 @@ _PM16_SETS = [
 
     # ── Velocity + decay combo ────────────────────────────────
     _pm_v2_set("pm16_vel10_decay3",          **_V16_BASE,
-               vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+               vel_atr_mult=1.0,
                gate_decay_scale=3.0),
     _pm_v2_set("pm16_vel10_decay5",          **_V16_BASE,
-               vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+               vel_atr_mult=1.0,
                gate_decay_scale=5.0),
 
     # ── Full stack: velocity + decay + sizing ─────────────────
     _pm_v2_set("pm16_full_v10d3",            **_V16_BASE,
-               vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+               vel_atr_mult=1.0,
                gate_decay_scale=3.0,
                cap_size_atr_scale=True),
     _pm_v2_set("pm16_full_v10d5",            **_V16_BASE,
-               vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+               vel_atr_mult=1.0,
                gate_decay_scale=5.0,
                cap_size_atr_scale=True),
 
     # ── Full stack + max loss cap ─────────────────────────────
     _pm_v2_set("pm16_full_maxloss",          **_V16_BASE,
-               vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+               vel_atr_mult=1.0,
                gate_decay_scale=3.0,
                cap_size_atr_scale=True,
                trend_max_loss_atr=2.0),

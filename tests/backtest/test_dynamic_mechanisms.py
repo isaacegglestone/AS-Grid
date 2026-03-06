@@ -6,7 +6,7 @@ Unit tests for v26 XRPPM16 dynamic self-calibrating mechanisms added to
 
 Mechanisms tested
 -----------------
-1. Dynamic velocity threshold    (``vel_atr_mult`` / ``vel_cap_atr_mult``)
+1. Dynamic velocity threshold    (``vel_atr_mult``)
 2. Dynamic gate decay            (``gate_decay_scale``)
 3. Dynamic position sizing       (``cap_size_atr_scale`` / floor / ceiling)
 4. Dynamic max-loss per trade    (``trend_max_loss_atr``)
@@ -221,12 +221,9 @@ class TestPmV2SetDynamicParams:
     def test_vel_atr_mult_zero_omitted(self):
         assert "vel_atr_mult" not in _pm_v2_set("t", vel_atr_mult=0.0)
 
-    def test_vel_cap_atr_mult_stored_when_positive(self):
-        cfg = _pm_v2_set("t", vel_cap_atr_mult=1.5)
-        assert cfg["vel_cap_atr_mult"] == pytest.approx(1.5)
-
-    def test_vel_cap_atr_mult_absent_by_default(self):
-        assert "vel_cap_atr_mult" not in _pm_v2_set("t")
+    def test_vel_cap_atr_mult_absent_when_vel_atr_mult_zero(self):
+        """vel_atr_mult=0 should not encode any velocity params."""
+        assert "vel_atr_mult" not in _pm_v2_set("t", vel_atr_mult=0.0)
 
     def test_gate_decay_scale_absent_by_default(self):
         assert "gate_decay_scale" not in _pm_v2_set("t")
@@ -274,13 +271,12 @@ class TestPmV2SetDynamicParams:
     def test_all_v26_params_combined(self):
         cfg = _pm_v2_set(
             "full_v26",
-            vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+            vel_atr_mult=1.0,
             gate_decay_scale=3.0,
             cap_size_atr_scale=True,
             trend_max_loss_atr=2.0,
         )
         assert cfg["vel_atr_mult"] == pytest.approx(1.0)
-        assert cfg["vel_cap_atr_mult"] == pytest.approx(1.5)
         assert cfg["gate_decay_scale"] == pytest.approx(3.0)
         assert cfg["cap_size_atr_scale"] is True
         assert cfg["trend_max_loss_atr"] == pytest.approx(2.0)
@@ -308,9 +304,11 @@ class TestDynamicVelocityThreshold:
         )
 
     def test_dynamic_threshold_still_fires_on_clean_spike(self):
-        """Dynamic velocity with moderate multiplier still fires on a clean spike."""
+        """Dynamic velocity with moderate multiplier still fires on a clean spike.
+        With ATR ratio ≈ 1.0 (normal vol), scale = max(1, 1.0 × 1.0) = 1.0,
+        so the threshold stays at the static 4% — the +12% spike clears it."""
         df = _make_df(_flat_then_spike_up())
-        cfg = _base_config(vel_atr_mult=1.0, vel_cap_atr_mult=1.5)
+        cfg = _base_config(vel_atr_mult=1.0)
         bt = _run(df, cfg)
         assert len(_trend_open_trades(bt)) >= 1, (
             "Dynamic velocity should still fire on a clean +12% spike in normal vol"
@@ -327,7 +325,7 @@ class TestDynamicVelocityThreshold:
         static_opens = _trend_open_trades(bt_static)
 
         # Dynamic: high multiplier should raise threshold above 5%
-        cfg = _base_config(vel_atr_mult=2.0, vel_cap_atr_mult=3.0)
+        cfg = _base_config(vel_atr_mult=2.0)
         bt_dynamic = _run(df, cfg)
         dynamic_opens = _trend_open_trades(bt_dynamic)
 
@@ -342,7 +340,7 @@ class TestDynamicVelocityThreshold:
         df = _make_df(closes, atr_mult=0.005)
 
         bt_static  = _run(df, _base_config())
-        cfg = _base_config(vel_atr_mult=1.0, vel_cap_atr_mult=1.5)
+        cfg = _base_config(vel_atr_mult=1.0)
         bt_dynamic = _run(df, cfg)
 
         s_opens = _trend_open_trades(bt_static)
@@ -627,7 +625,6 @@ class TestCombinedMechanisms:
             atr_accel_lookback=10,
             atr_cooldown=4,
             vel_atr_mult=1.0,
-            vel_cap_atr_mult=1.5,
             gate_decay_scale=3.0,
             cap_size_atr_scale=True,
             trend_max_loss_atr=2.0,
@@ -642,7 +639,7 @@ class TestCombinedMechanisms:
 
         bt_baseline = _run(df, _base_config())
         bt_full = _run(df, _base_config(
-            vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+            vel_atr_mult=1.0,
             gate_decay_scale=3.0,
             cap_size_atr_scale=True,
             trend_max_loss_atr=2.0,
@@ -658,7 +655,7 @@ class TestCombinedMechanisms:
         df = _make_df(_flat_then_spike_up())
 
         # Just velocity
-        bt_vel = _run(df, _base_config(vel_atr_mult=1.0, vel_cap_atr_mult=1.5))
+        bt_vel = _run(df, _base_config(vel_atr_mult=1.0))
         # Just sizing
         bt_size = _run(df, _base_config(cap_size_atr_scale=True))
         # Just max loss
@@ -682,6 +679,6 @@ class TestCombinedMechanisms:
         assert cfg.get("atr_accel_lookback") == 10
         assert cfg.get("atr_cooldown") == 4
         # No v26 params should be present
-        for key in ("vel_atr_mult", "vel_cap_atr_mult", "gate_decay_scale",
+        for key in ("vel_atr_mult", "gate_decay_scale",
                      "cap_size_atr_scale", "trend_max_loss_atr"):
             assert key not in cfg, f"Baseline should not have {key}"
