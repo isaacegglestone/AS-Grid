@@ -1819,6 +1819,11 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "atr_directional", "atr_dir_lookback", "atr_dir_drop_pct",
                     "atr_acceleration", "atr_accel_lookback",
                     "atr_cooldown",
+                    # v26 XRPPM16 — dynamic self-calibrating mechanisms
+                    "vel_atr_mult", "vel_cap_atr_mult",
+                    "gate_decay_scale",
+                    "cap_size_atr_scale", "cap_size_atr_floor", "cap_size_atr_ceiling",
+                    "trend_max_loss_atr",
                 ) if k in params}),
             }
         )
