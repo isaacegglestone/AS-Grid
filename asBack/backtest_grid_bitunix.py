@@ -559,6 +559,18 @@ class GridOrderBacktester:
                 dyn_trail = atr_now * atr_trail_mult / price
                 trail_stop_pct = max(atr_trail_min, min(atr_trail_max, dyn_trail))
 
+            # ── v26 XRPPM16: Dynamic velocity threshold ──────────────────
+            # Replace fixed vel_threshold/cap_vel_threshold with ATR-scaled
+            # versions.  In high-vol (post-parabolic), threshold auto-rises
+            # so noise bounce doesn't trigger trend entries.  In normal-vol,
+            # threshold stays similar to the current fixed 4%/6%.
+            _vel_atr_mult = float(self.config.get("vel_atr_mult", 0.0))
+            if _vel_atr_mult > 0 and price > 0:
+                _atr_for_vel = float(self.atr_series.iloc[idx])
+                vel_threshold     = _vel_atr_mult * _atr_for_vel / price
+                _vel_cap_mult = float(self.config.get("vel_cap_atr_mult", _vel_atr_mult * 1.5))
+                cap_vel_threshold = _vel_cap_mult * _atr_for_vel / price
+
             # ── Layer 1: ATR parabolic gate (fixed or adaptive) ───────────
             # When ATR exceeds a threshold, price is in a parabolic spike and
             # trend entries are suppressed.  The threshold can be:
@@ -636,6 +648,40 @@ class GridOrderBacktester:
                         _parabolic = False  # cooldown expired → force resume
                 else:
                     self._gate_fire_counter = 0  # reset when gate not firing
+
+            # ── v26 XRPPM16: Dynamic gate decay ──────────────────────────
+            # After the parabolic gate fires and then clears, maintain
+            # suppression for spike_ratio × scale additional candles.
+            # spike_ratio = peak_atr / atr_sma during the gate period.
+            # This catches the post-parabolic correction window (Dec 2024)
+            # where ATR is still 3-4× normal but no longer RISING.
+            _gate_decay_scale = float(self.config.get("gate_decay_scale", 0.0))
+            if _gate_decay_scale > 0:
+                # Ensure state variables exist on first candle
+                if not hasattr(self, "_gate_peak_atr_ratio"):
+                    self._gate_peak_atr_ratio = 1.0
+                if not hasattr(self, "_gate_decay_countdown"):
+                    self._gate_decay_countdown = 0
+
+                if _parabolic:
+                    # Track peak ATR ratio while gate is active
+                    _cur_spike = _atr_now / _atr_sma_now if _atr_sma_now > 0 else 1.0
+                    self._gate_peak_atr_ratio = max(
+                        getattr(self, "_gate_peak_atr_ratio", 1.0), _cur_spike
+                    )
+                    self._gate_decay_countdown = 0  # reset countdown while gate active
+                else:
+                    _peak = getattr(self, "_gate_peak_atr_ratio", 1.0)
+                    _countdown = getattr(self, "_gate_decay_countdown", 0)
+                    if _peak > 1.0 and _countdown == 0:
+                        # Gate just cleared → start decay countdown
+                        self._gate_decay_countdown = int(_peak * _gate_decay_scale)
+                    if self._gate_decay_countdown > 0:
+                        _parabolic = True  # extend suppression during decay
+                        self._gate_decay_countdown -= 1
+                        if self._gate_decay_countdown <= 0:
+                            # Decay expired → fully reset
+                            self._gate_peak_atr_ratio = 1.0
 
             # ── Layer 2: HTF EMA alignment gate ────────────────────────────
             # Before opening a LONG trend entry: require HTF EMA-36 > EMA-84.
@@ -764,6 +810,19 @@ class GridOrderBacktester:
                 )
             else:
                 used_cap_size_pct = cap_size_pct
+
+            # ── v26 XRPPM16: Dynamic position sizing ────────────────────
+            # Scale position size inversely with ATR spike ratio.
+            # Normal vol (ratio≈1): full size.  3× ATR: ~30% size.
+            # Reduces exposure during post-parabolic volatility (Dec 2024).
+            if self.config.get("cap_size_atr_scale", False) and _atr_sma_now > 0:
+                _atr_spike_ratio = _atr_now / _atr_sma_now
+                _size_floor   = float(self.config.get("cap_size_atr_floor", 0.30))
+                _size_ceiling = float(self.config.get("cap_size_atr_ceiling", 0.90))
+                if _atr_spike_ratio > 1.0:
+                    _scaled_size = used_cap_size_pct / _atr_spike_ratio
+                    used_cap_size_pct = max(_size_floor, min(_size_ceiling, _scaled_size))
+
             # ── Market structure filter ─────────────────────────────────────
             # ms_filter=True: only fire trend-capture when the current close
             # breaks above the recent swing high (bullish HH — allow long) or
@@ -790,12 +849,26 @@ class GridOrderBacktester:
                 # ── Manage existing trend position (trailing stop) ──────────
                 if self.trend_position is not None:
                     tp = self.trend_position
+                    # ── v26 XRPPM16: Dynamic max loss per trade ──────────
+                    # Close immediately if unrealised loss > N × ATR × qty.
+                    # ATR-scaled so the stop widens in normal vol and
+                    # tightens relative to position size in high vol.
+                    _max_loss_atr = float(self.config.get("trend_max_loss_atr", 0.0))
+                    _max_loss_hit = False
+                    if _max_loss_atr > 0:
+                        if tp["side"] == "long":
+                            _unrealised = (price - tp["entry"]) * tp["qty"]
+                        else:
+                            _unrealised = (tp["entry"] - price) * tp["qty"]
+                        _loss_cap = _max_loss_atr * _atr_now * tp["qty"]
+                        if _unrealised < 0 and abs(_unrealised) >= _loss_cap:
+                            _max_loss_hit = True
                     if tp["side"] == "long":
                         if price > tp["peak"]:
                             tp["peak"] = price
                         trail_stop = tp["peak"] * (1 - trail_stop_pct)
-                        # Close if trail hit OR trend fully reversed
-                        close_trend = price <= trail_stop or trending_down
+                        # Close if trail hit OR trend fully reversed OR max loss
+                        close_trend = price <= trail_stop or trending_down or _max_loss_hit
                         if close_trend:
                             fee_cost = tp["qty"] * price * (self.fee / 2)
                             gross_pnl = (price - tp["entry"]) * tp["qty"]
@@ -818,7 +891,7 @@ class GridOrderBacktester:
                         if price < tp["peak"]:
                             tp["peak"] = price
                         trail_stop = tp["peak"] * (1 + trail_stop_pct)
-                        close_trend = price >= trail_stop or trending_up
+                        close_trend = price >= trail_stop or trending_up or _max_loss_hit
                         if close_trend:
                             fee_cost = tp["qty"] * price * (self.fee / 2)
                             gross_pnl = (tp["entry"] - price) * tp["qty"]
@@ -954,7 +1027,68 @@ class GridOrderBacktester:
                                       f"at {price:.4f} size=${cap_margin:.0f}{adx_info}")
 
                 elif self.trend_mode is not None and self.trend_position is None:
-                    if abs(velocity) < vel_threshold * 0.5:
+                    # ── v26: Retry capture when mode is set but position not yet opened.
+                    # With dynamic velocity the detection threshold (vel_threshold)
+                    # can be lower than the capture threshold (cap_vel_threshold),
+                    # so the mode fires before velocity is strong enough for a position.
+                    # Retry until velocity either meets cap threshold or fades.
+                    _retry_up   = (self.trend_mode == "up"   and trend_capture
+                                   and velocity >= cap_vel_threshold
+                                   and not halt_all and adx_allows_trend
+                                   and ema_bias_long and bb_allows_trend
+                                   and rsi_allows_long and vol_confirms
+                                   and ms_allows_long
+                                   and not _parabolic
+                                   and (not _htf_ema_align or _htf_bull))
+                    _retry_down = (self.trend_mode == "down" and trend_capture
+                                   and abs(velocity) >= cap_vel_threshold
+                                   and not halt_all and adx_allows_trend
+                                   and ema_bias_short and bb_allows_trend
+                                   and rsi_allows_short and vol_confirms
+                                   and ms_allows_short
+                                   and not _parabolic
+                                   and (not _htf_ema_align or _htf_bear))
+                    if _retry_up:
+                        current_equity = self._equity(price)
+                        cap_margin = current_equity * used_cap_size_pct * bb_size_boost
+                        cap_margin = min(cap_margin, current_equity * 0.90)
+                        cap_qty = (cap_margin * self.leverage) / price
+                        fee_cost = cap_qty * price * (self.fee / 2)
+                        if cap_margin + fee_cost <= self.balance:
+                            self.balance -= cap_margin + fee_cost
+                            self.trend_position = {
+                                "side": "long", "entry": price, "qty": cap_qty,
+                                "margin": cap_margin, "peak": price,
+                            }
+                            self.trade_history.append((
+                                timestamp, "TREND_BUY", price, cap_qty, "TREND_LONG",
+                                0.0, fee_cost, 0.0,
+                                self._calculate_unrealized_pnl(price), self._equity(price),
+                            ))
+                            adx_info = f" ADX={current_adx:.1f}" if adx_filter else ""
+                            print(f"\U0001f3af [{timestamp}] Trend LONG opened (retry) "
+                                  f"at {price:.4f} size=${cap_margin:.0f}{adx_info}")
+                    elif _retry_down:
+                        current_equity = self._equity(price)
+                        cap_margin = current_equity * used_cap_size_pct * bb_size_boost
+                        cap_margin = min(cap_margin, current_equity * 0.90)
+                        cap_qty = (cap_margin * self.leverage) / price
+                        fee_cost = cap_qty * price * (self.fee / 2)
+                        if cap_margin + fee_cost <= self.balance:
+                            self.balance -= cap_margin + fee_cost
+                            self.trend_position = {
+                                "side": "short", "entry": price, "qty": cap_qty,
+                                "margin": cap_margin, "peak": price,
+                            }
+                            self.trade_history.append((
+                                timestamp, "TREND_SELL", price, cap_qty, "TREND_SHORT",
+                                0.0, fee_cost, 0.0,
+                                self._calculate_unrealized_pnl(price), self._equity(price),
+                            ))
+                            adx_info = f" ADX={current_adx:.1f}" if adx_filter else ""
+                            print(f"\U0001f3af [{timestamp}] Trend SHORT opened (retry) "
+                                  f"at {price:.4f} size=${cap_margin:.0f}{adx_info}")
+                    elif abs(velocity) < vel_threshold * 0.5:
                         self.trend_cooldown_counter += 1
                         if self.trend_cooldown_counter >= cooldown_candles:
                             print(f"\U0001f504 [{timestamp}] Trend {self.trend_mode.upper()} ended "
@@ -2632,8 +2766,16 @@ def _pm_v2_set(
     atr_acceleration: bool = False,      # Approach E: gate only when ATR is rising vs N candles ago
     atr_accel_lookback: int = 10,        #   candles to compare ATR growth
     atr_cooldown: int = 0,               # Approach F: resume entries N candles after gate fires
+    # v26 XRPPM16 — dynamic self-calibrating mechanisms
+    vel_atr_mult: float = 0.0,           # Dynamic velocity: threshold = mult × ATR/price (0=use static)
+    vel_cap_atr_mult: float = 0.0,       # Dynamic capture velocity: cap_threshold = mult × ATR/price (0=use static)
+    gate_decay_scale: float = 0.0,       # Dynamic gate decay: after gate clears, suppress for spike_ratio × scale candles (0=off)
+    cap_size_atr_scale: bool = False,    # Dynamic position sizing: size = base / atr_ratio, capped [0.30, 0.90]
+    cap_size_atr_floor: float = 0.30,    # Minimum trend capture size when ATR is extreme
+    cap_size_atr_ceiling: float = 0.90,  # Maximum trend capture size when ATR is normal
+    trend_max_loss_atr: float = 0.0,     # Dynamic max loss: close if loss > N × ATR × qty (0=off)
 ) -> Dict[str, Any]:
-    """v12/v13/v15/v16/v17/v18/v23/v24 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates."""
+    """v12/v13/v15/v16/v17/v18/v23/v24/v26 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing."""
     return {
         "name": name,
         "use_sl": True,
@@ -2698,6 +2840,15 @@ def _pm_v2_set(
             "atr_accel_lookback": atr_accel_lookback}
            if atr_acceleration else {}),
         **({"atr_cooldown": atr_cooldown} if atr_cooldown > 0 else {}),
+        # v26 XRPPM16 — dynamic self-calibrating mechanisms
+        **({"vel_atr_mult": vel_atr_mult} if vel_atr_mult > 0 else {}),
+        **({"vel_cap_atr_mult": vel_cap_atr_mult} if vel_cap_atr_mult > 0 else {}),
+        **({"gate_decay_scale": gate_decay_scale} if gate_decay_scale > 0 else {}),
+        **({"cap_size_atr_scale": True,
+            "cap_size_atr_floor": cap_size_atr_floor,
+            "cap_size_atr_ceiling": cap_size_atr_ceiling}
+           if cap_size_atr_scale else {}),
+        **({"trend_max_loss_atr": trend_max_loss_atr} if trend_max_loss_atr > 0 else {}),
     }
 
 
@@ -3605,6 +3756,108 @@ XRP_PM_V15_1Y_MID_CONFIG["param_sets"] = _PM15_SETS
 
 
 # ===========================================================================
+# v26 — XRPPM16: Dynamic self-calibrating mechanisms sweep.
+#
+# PM15 winner (pm15_cd4_accel_fixed) achieves +139.58% 2y walk-forward
+# but suffers -10.58% in Dec 2024 post-parabolic correction.  All static
+# gates (4% velocity, 4-candle cooldown, 90% size) fail when ATR is
+# 3-5× normal because the thresholds don't scale with volatility.
+#
+# Three new self-calibrating mechanisms replace static parameters:
+#
+#   1. Dynamic velocity threshold (vel_atr_mult):
+#      vel_threshold = mult × ATR / price.  Auto-scales up in high-vol,
+#      so a 5% bounce in Dec 2024 (noise) doesn't trigger a LONG entry
+#      that the fixed 4% threshold would accept.
+#
+#   2. Dynamic gate decay (gate_decay_scale):
+#      After parabolic gate clears, suppress for spike_ratio × scale
+#      additional candles.  Catches the 2-4 week post-parabolic window
+#      where ATR is still elevated but no longer rising.
+#
+#   3. Dynamic position sizing (cap_size_atr_scale):
+#      size = base / atr_ratio, capped [30%, 90%].  Reduces exposure
+#      automatically when entering during residual high-vol.
+#
+#   4. Dynamic max loss per trade (trend_max_loss_atr):
+#      Close if unrealised loss > N × ATR × qty.  Tighter in calm,
+#      wider in volatile — ATR-proportional.
+#
+# Base: pm15_cd4_accel_fixed (ATR 1.5×, accel_lookback=10, cooldown=4)
+# 12 strategies × 3 windows (6m OOS, 2y walk-forward, mid-year)
+# ===========================================================================
+
+_V16_BASE = {
+    **_V10_BASE,                          # h0, spacing=1.5%, leverage=2.0
+    "atr_parabolic_mult": 1.5,            # pm15 winner settings
+    "atr_acceleration": True,
+    "atr_accel_lookback": 10,
+    "atr_cooldown": 4,
+}
+
+_PM16_SETS = [
+    # Control — pm15 winner baseline (no dynamic mechanisms)
+    _pm_v2_set("pm16_baseline",              **_V16_BASE),
+
+    # ── Dynamic velocity only ─────────────────────────────────
+    _pm_v2_set("pm16_vel08",                 **_V16_BASE,
+               vel_atr_mult=0.8, vel_cap_atr_mult=1.2),
+    _pm_v2_set("pm16_vel10",                 **_V16_BASE,
+               vel_atr_mult=1.0, vel_cap_atr_mult=1.5),
+    _pm_v2_set("pm16_vel12",                 **_V16_BASE,
+               vel_atr_mult=1.2, vel_cap_atr_mult=1.8),
+
+    # ── Dynamic gate decay only ───────────────────────────────
+    _pm_v2_set("pm16_decay3",                **_V16_BASE,
+               gate_decay_scale=3.0),
+    _pm_v2_set("pm16_decay5",                **_V16_BASE,
+               gate_decay_scale=5.0),
+
+    # ── Dynamic sizing only ───────────────────────────────────
+    _pm_v2_set("pm16_sizing",                **_V16_BASE,
+               cap_size_atr_scale=True),
+
+    # ── Velocity + decay combo ────────────────────────────────
+    _pm_v2_set("pm16_vel10_decay3",          **_V16_BASE,
+               vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+               gate_decay_scale=3.0),
+    _pm_v2_set("pm16_vel10_decay5",          **_V16_BASE,
+               vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+               gate_decay_scale=5.0),
+
+    # ── Full stack: velocity + decay + sizing ─────────────────
+    _pm_v2_set("pm16_full_v10d3",            **_V16_BASE,
+               vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+               gate_decay_scale=3.0,
+               cap_size_atr_scale=True),
+    _pm_v2_set("pm16_full_v10d5",            **_V16_BASE,
+               vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+               gate_decay_scale=5.0,
+               cap_size_atr_scale=True),
+
+    # ── Full stack + max loss cap ─────────────────────────────
+    _pm_v2_set("pm16_full_maxloss",          **_V16_BASE,
+               vel_atr_mult=1.0, vel_cap_atr_mult=1.5,
+               gate_decay_scale=3.0,
+               cap_size_atr_scale=True,
+               trend_max_loss_atr=2.0),
+]
+
+XRP_PM_V16_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V16_CONFIG["param_sets"] = _PM16_SETS
+
+XRP_PM_V16_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V16_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V16_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V16_2Y_CONFIG["param_sets"] = _PM16_SETS
+
+XRP_PM_V16_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V16_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V16_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V16_1Y_MID_CONFIG["param_sets"] = _PM16_SETS
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -4029,6 +4282,21 @@ if __name__ == "__main__":
         print("  v25 XRPPM15 cooldown sweep + F+E — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V15_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM16", "PM16"):
+        print("\n" + "=" * 60)
+        print("  v26 XRPPM16 dynamic self-calibrating — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V16_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v26 XRPPM16 dynamic self-calibrating — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V16_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v26 XRPPM16 dynamic self-calibrating — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V16_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
