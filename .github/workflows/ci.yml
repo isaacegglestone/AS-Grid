@@ -66,6 +66,8 @@ jobs:
             dispatch: XRPPM15
           - name: "XRPPM16 — v26 dynamic mechanisms"
             dispatch: XRPPM16
+          - name: "XRPPM17 — v27 directional & outcome-based"
+            dispatch: XRPPM17
 
     steps:
       - uses: actions/checkout@v4

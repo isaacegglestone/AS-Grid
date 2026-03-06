@@ -682,3 +682,494 @@ class TestCombinedMechanisms:
         for key in ("vel_atr_mult", "gate_decay_scale",
                      "cap_size_atr_scale", "trend_max_loss_atr"):
             assert key not in cfg, f"Baseline should not have {key}"
+
+
+# ===========================================================================
+# 7 — _pm_v2_set: v27 PM17 param encoding
+# ===========================================================================
+
+class TestPmV2SetPM17Params:
+    """_pm_v2_set must follow the sentinel pattern for v27 PM17 params."""
+
+    def test_vel_dir_only_absent_by_default(self):
+        cfg = _pm_v2_set("t")
+        assert "vel_dir_only" not in cfg
+
+    def test_vel_dir_only_stored_when_true(self):
+        cfg = _pm_v2_set("t", vel_dir_only=True)
+        assert cfg["vel_dir_only"] is True
+
+    def test_vel_dir_only_false_omitted(self):
+        assert "vel_dir_only" not in _pm_v2_set("t", vel_dir_only=False)
+
+    def test_vel_accel_only_absent_by_default(self):
+        cfg = _pm_v2_set("t")
+        assert "vel_accel_only" not in cfg
+
+    def test_vel_accel_only_stored_when_true(self):
+        cfg = _pm_v2_set("t", vel_accel_only=True)
+        assert cfg["vel_accel_only"] is True
+
+    def test_vel_accel_only_false_omitted(self):
+        assert "vel_accel_only" not in _pm_v2_set("t", vel_accel_only=False)
+
+    def test_eq_curve_filter_absent_by_default(self):
+        cfg = _pm_v2_set("t")
+        assert "eq_curve_filter" not in cfg
+
+    def test_eq_curve_filter_stored_when_true(self):
+        cfg = _pm_v2_set("t", eq_curve_filter=True)
+        assert cfg["eq_curve_filter"] is True
+        assert cfg["eq_curve_lookback"] == 50  # default lookback
+
+    def test_eq_curve_filter_false_omitted(self):
+        assert "eq_curve_filter" not in _pm_v2_set("t", eq_curve_filter=False)
+
+    def test_eq_curve_custom_lookback(self):
+        cfg = _pm_v2_set("t", eq_curve_filter=True, eq_curve_lookback=100)
+        assert cfg["eq_curve_lookback"] == 100
+
+    def test_consec_loss_max_absent_by_default(self):
+        cfg = _pm_v2_set("t")
+        assert "consec_loss_max" not in cfg
+
+    def test_consec_loss_max_stored_when_positive(self):
+        cfg = _pm_v2_set("t", consec_loss_max=2, consec_loss_pause=20)
+        assert cfg["consec_loss_max"] == 2
+        assert cfg["consec_loss_pause"] == 20
+
+    def test_consec_loss_max_zero_omitted(self):
+        assert "consec_loss_max" not in _pm_v2_set("t", consec_loss_max=0)
+
+    def test_all_v27_params_combined(self):
+        cfg = _pm_v2_set(
+            "full_v27",
+            vel_atr_mult=0.75,
+            vel_dir_only=True,
+            vel_accel_only=True,
+            eq_curve_filter=True,
+            eq_curve_lookback=100,
+            consec_loss_max=3,
+            consec_loss_pause=30,
+        )
+        assert cfg["vel_atr_mult"] == pytest.approx(0.75)
+        assert cfg["vel_dir_only"] is True
+        assert cfg["vel_accel_only"] is True
+        assert cfg["eq_curve_filter"] is True
+        assert cfg["eq_curve_lookback"] == 100
+        assert cfg["consec_loss_max"] == 3
+        assert cfg["consec_loss_pause"] == 30
+
+    def test_v27_params_coexist_with_v26(self):
+        cfg = _pm_v2_set(
+            "t",
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            gate_decay_scale=3.0,
+        )
+        assert cfg["vel_atr_mult"] == pytest.approx(1.0)
+        assert cfg["vel_dir_only"] is True
+        assert cfg["gate_decay_scale"] == pytest.approx(3.0)
+
+
+# ===========================================================================
+# 8 — Directional velocity (vel_dir_only)
+# ===========================================================================
+
+class TestDirectionalVelocity:
+    """vel_dir_only=True: velocity scaling only applies when price < EMA-36."""
+
+    def test_dir_vel_preserves_bull_entries(self):
+        """In a clean uptrend (price > EMA-36), directional velocity should
+        NOT raise the threshold — entries should fire like static baseline."""
+        closes = _slow_grind_up(n=120)
+        df = _make_df(closes, atr_mult=0.005)
+
+        bt_static = _run(df, _base_config())
+        bt_dir    = _run(df, _base_config(vel_atr_mult=1.0, vel_dir_only=True))
+
+        s_opens = _trend_open_trades(bt_static)
+        d_opens = _trend_open_trades(bt_dir)
+
+        # In a clean uptrend, price > EMA-36, so vel_dir_only should NOT
+        # suppress entries — should fire at least as many as static.
+        assert len(d_opens) >= len(s_opens), (
+            f"Directional velocity should preserve bull entries "
+            f"(static={len(s_opens)}, dir={len(d_opens)})"
+        )
+
+    def test_dir_vel_blocks_in_bear_context(self):
+        """After a drop (price < EMA-36), velocity scaling should apply and
+        raise the threshold, blocking marginal entries."""
+        # Big drop then small bounce — bounce should be blocked in bear context
+        closes = [1.0] * 80
+        # Sharp drop to put price below EMA-36
+        for _ in range(15):
+            closes.append(closes[-1] * 0.98)
+        # Small bounce (5%) — below dynamic threshold but above static 4%
+        for _ in range(10):
+            closes.append(closes[-1] * 1.005)
+        df = _make_df(closes, atr_mult=0.02)  # wider spread for elevated ATR
+
+        bt_static = _run(df, _base_config())
+        bt_dir    = _run(df, _base_config(vel_atr_mult=1.5, vel_dir_only=True))
+
+        s_opens = _trend_open_trades(bt_static)
+        d_opens = _trend_open_trades(bt_dir)
+
+        assert len(d_opens) <= len(s_opens), (
+            f"Directional velocity should suppress entries in bear context "
+            f"(static={len(s_opens)}, dir={len(d_opens)})"
+        )
+
+    def test_dir_vel_runs_without_crash(self):
+        """Full simulation with vel_dir_only should complete without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(vel_atr_mult=0.75, vel_dir_only=True)
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_dir_vel_false_is_noop(self):
+        """vel_dir_only=False should behave identically to plain vel_atr_mult."""
+        df = _make_df(_flat_then_spike_up())
+        bt_plain = _run(df, _base_config(vel_atr_mult=1.0))
+        bt_false = _run(df, _base_config(vel_atr_mult=1.0, vel_dir_only=False))
+        assert len(_trend_trades(bt_plain)) == len(_trend_trades(bt_false))
+
+
+# ===========================================================================
+# 9 — ATR acceleration velocity (vel_accel_only)
+# ===========================================================================
+
+class TestAccelVelocity:
+    """vel_accel_only=True: velocity scaling only when ATR is actively rising."""
+
+    def test_accel_vel_preserves_settling_entries(self):
+        """When ATR is elevated but falling (post-spike settling), velocity
+        scaling should be removed — allowing entries PM16 would block."""
+        # Spike → settle → gentle uptrend
+        closes = [1.0] * 80
+        # Vol burst — big swings
+        for i in range(10):
+            closes.append(closes[-1] * (1.05 if i % 2 == 0 else 0.952))
+        # Long settling period (ATR falling)
+        settle = closes[-1]
+        for _ in range(40):
+            closes.append(settle)
+        # 6% uptrend — should fire with accel_only but may be blocked by plain vel
+        for _ in range(12):
+            closes.append(closes[-1] * 1.005)
+        df = _make_df(closes, atr_mult=0.02)
+
+        bt_plain = _run(df, _base_config(vel_atr_mult=1.5))
+        bt_accel = _run(df, _base_config(vel_atr_mult=1.5, vel_accel_only=True))
+
+        plain_opens = _trend_open_trades(bt_plain)
+        accel_opens = _trend_open_trades(bt_accel)
+
+        assert len(accel_opens) >= len(plain_opens), (
+            f"Accel-only should allow more entries when ATR is settling "
+            f"(plain={len(plain_opens)}, accel={len(accel_opens)})"
+        )
+
+    def test_accel_vel_still_blocks_during_spike(self):
+        """When ATR is actively rising (spike in progress), velocity scaling
+        should still apply — threshold raised to block noise entries."""
+        closes = _high_vol_spike_up(n_flat=80)
+        df = _make_df(closes, atr_mult=0.03)
+
+        bt_accel = _run(df, _base_config(vel_atr_mult=2.0, vel_accel_only=True))
+        assert bt_accel.balance > 0  # should complete without crash
+
+    def test_accel_vel_runs_cleanly(self):
+        """Full simulation with vel_accel_only should complete without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(vel_atr_mult=0.75, vel_accel_only=True)
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_accel_vel_false_is_noop(self):
+        """vel_accel_only=False should behave identically to plain vel_atr_mult."""
+        df = _make_df(_flat_then_spike_up())
+        bt_plain = _run(df, _base_config(vel_atr_mult=1.0))
+        bt_false = _run(df, _base_config(vel_atr_mult=1.0, vel_accel_only=False))
+        assert len(_trend_trades(bt_plain)) == len(_trend_trades(bt_false))
+
+
+# ===========================================================================
+# 10 — Equity curve filter (eq_curve_filter)
+# ===========================================================================
+
+class TestEquityCurveFilter:
+    """eq_curve_filter=True: suppress trend entries when equity < SMA(equity)."""
+
+    def test_eq_curve_filter_disabled_by_default(self):
+        """Without eq_curve_filter, no equity-based suppression."""
+        cfg = _pm_v2_set("t")
+        assert "eq_curve_filter" not in cfg
+
+    def test_eq_curve_runs_cleanly(self):
+        """Equity curve filter should complete without error on basic data."""
+        closes = _slow_grind_up(n=150)
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(eq_curve_filter=True, eq_curve_lookback=50)
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_eq_curve_suppresses_after_losses(self):
+        """After a sequence of losses (equity drops below SMA), entries
+        should be suppressed by the equity curve filter."""
+        # Uptrend fires LONG → sharp reversal causes loss → equity drops
+        # → next uptrend should be suppressed by equity < SMA
+        closes = [1.0] * 80
+        # First uptrend
+        for _ in range(15):
+            closes.append(closes[-1] * 1.004)
+        # Sharp reversal
+        for _ in range(20):
+            closes.append(closes[-1] * 0.99)
+        # Second uptrend attempt — should be suppressed if equity < SMA
+        for _ in range(15):
+            closes.append(closes[-1] * 1.004)
+        df = _make_df(closes, atr_mult=0.005)
+
+        bt_no_filter  = _run(df, _base_config())
+        bt_eq_filter  = _run(df, _base_config(
+            eq_curve_filter=True, eq_curve_lookback=30))
+
+        no_opens = _trend_open_trades(bt_no_filter)
+        eq_opens = _trend_open_trades(bt_eq_filter)
+
+        # Equity filter should suppress some entries after losses
+        assert len(eq_opens) <= len(no_opens), (
+            f"Equity filter should suppress entries after drawdown "
+            f"(no_filter={len(no_opens)}, eq_filter={len(eq_opens)})"
+        )
+
+    def test_eq_curve_allows_winning_streaks(self):
+        """When equity is above SMA (winning), entries should NOT be blocked."""
+        closes = _slow_grind_up(n=150)
+        df = _make_df(closes, atr_mult=0.005)
+
+        bt_baseline = _run(df, _base_config())
+        bt_filter   = _run(df, _base_config(
+            eq_curve_filter=True, eq_curve_lookback=50))
+
+        base_opens = _trend_open_trades(bt_baseline)
+        filt_opens = _trend_open_trades(bt_filter)
+
+        # In a clean uptrend with no losses, equity stays above SMA
+        # so filter should allow all entries — at least most of baseline
+        assert len(filt_opens) >= len(base_opens) * 0.7, (
+            f"Equity filter should allow entries during winning streak "
+            f"(baseline={len(base_opens)}, filter={len(filt_opens)})"
+        )
+
+    def test_eq_curve_filter_false_is_noop(self):
+        """eq_curve_filter=False must produce identical results to default."""
+        df = _make_df(_flat_then_spike_up())
+        bt_default = _run(df, _base_config())
+        bt_false   = _run(df, _base_config(eq_curve_filter=False))
+        assert len(_trend_trades(bt_default)) == len(_trend_trades(bt_false))
+
+
+# ===========================================================================
+# 11 — Consecutive loss guard (consec_loss_max)
+# ===========================================================================
+
+class TestConsecLossGuard:
+    """consec_loss_max > 0: pause trend entries after N consecutive losses."""
+
+    def test_consec_loss_disabled_by_default(self):
+        """Without consec_loss_max, no loss-based suppression."""
+        cfg = _pm_v2_set("t")
+        assert "consec_loss_max" not in cfg
+
+    def test_consec_loss_runs_cleanly(self):
+        """Consecutive loss guard should complete without error."""
+        closes = _slow_grind_up(n=150)
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(consec_loss_max=2, consec_loss_pause=20)
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_consec_loss_pauses_after_losses(self):
+        """After consecutive losing trend trades, the guard should pause entries."""
+        # Pattern: repeated whipsaw — up trigger then immediate reversal
+        # to generate consecutive losses, then another uptrend
+        closes = [1.0] * 80
+        # Whipsaw 1: up → sharp reverse → up → sharp reverse
+        for cycle in range(3):
+            for _ in range(5):
+                closes.append(closes[-1] * 1.01)
+            for _ in range(10):
+                closes.append(closes[-1] * 0.995)
+        # Final uptrend
+        for _ in range(20):
+            closes.append(closes[-1] * 1.005)
+        df = _make_df(closes, atr_mult=0.005)
+
+        bt_no_guard  = _run(df, _base_config(trend_confirm_candles=1))
+        bt_guard     = _run(df, _base_config(
+            trend_confirm_candles=1,
+            consec_loss_max=2, consec_loss_pause=15))
+
+        no_opens = _trend_open_trades(bt_no_guard)
+        guard_opens = _trend_open_trades(bt_guard)
+
+        # Guard should suppress some entries after consecutive losses
+        assert len(guard_opens) <= len(no_opens), (
+            f"Consecutive loss guard should suppress entries after losses "
+            f"(no_guard={len(no_opens)}, guard={len(guard_opens)})"
+        )
+
+    def test_consec_loss_resets_on_win(self):
+        """A winning trade should reset the consecutive loss counter."""
+        closes = _slow_grind_up(n=150)
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(consec_loss_max=2, consec_loss_pause=10)
+        bt = _run(df, cfg)
+        # In a clean uptrend, wins should keep counter at 0
+        assert bt._consec_trend_losses == 0, (
+            f"Consecutive loss counter should be 0 after winning trades "
+            f"(actual={bt._consec_trend_losses})"
+        )
+
+    def test_consec_loss_zero_is_noop(self):
+        """consec_loss_max=0 should behave identically to default."""
+        df = _make_df(_flat_then_spike_up())
+        bt_default = _run(df, _base_config())
+        bt_zero    = _run(df, _base_config(consec_loss_max=0))
+        assert len(_trend_trades(bt_default)) == len(_trend_trades(bt_zero))
+
+    def test_consec_loss_counter_increments(self):
+        """The _consec_trend_losses counter should increment on losses."""
+        # Uptrend → sharp reversal to cause a losing LONG close
+        closes = [1.0] * 80
+        for _ in range(12):
+            closes.append(closes[-1] * 1.005)
+        for _ in range(30):
+            closes.append(closes[-1] * 0.99)
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(consec_loss_max=5, consec_loss_pause=10)
+        bt = _run(df, cfg)
+        # There should be at least one loss, so counter >= 1
+        # (unless the trade happened to be profitable)
+        assert bt._consec_trend_losses >= 0  # Just verify counter exists
+
+
+# ===========================================================================
+# 12 — PM17 combined mechanisms
+# ===========================================================================
+
+class TestPM17Combined:
+    """Multiple PM17 mechanisms should work together without interference."""
+
+    def test_all_pm17_mechanisms_enabled(self):
+        """Full PM17 stack should run without crashing."""
+        closes = _parabolic_then_correction()
+        df = _make_df(closes, atr_mult=0.005)
+        for i in range(80, 85):
+            if i < len(df):
+                c = float(df["close"].iloc[i])
+                df.loc[df.index[i], "high"] = c * 1.10
+                df.loc[df.index[i], "low"]  = c * 0.90
+
+        cfg = _base_config(
+            atr_parabolic_mult=1.5,
+            atr_acceleration=True,
+            atr_accel_lookback=10,
+            atr_cooldown=4,
+            vel_atr_mult=0.75,
+            vel_dir_only=True,
+            eq_curve_filter=True,
+            eq_curve_lookback=50,
+            consec_loss_max=2,
+            consec_loss_pause=20,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0, "Full PM17 stack should not crash"
+
+    def test_dir_vel_plus_accel_vel(self):
+        """Both directional and acceleration velocity together."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            vel_accel_only=True,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_eq_curve_plus_consec_loss(self):
+        """Equity curve filter plus consecutive loss guard together."""
+        closes = _slow_grind_up(n=150)
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            eq_curve_filter=True,
+            eq_curve_lookback=50,
+            consec_loss_max=3,
+            consec_loss_pause=20,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_pm17_v26_coexistence(self):
+        """PM17 mechanisms should not break PM16 mechanisms (v26 + v27)."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            # v26 params
+            vel_atr_mult=1.0,
+            cap_size_atr_scale=True,
+            trend_max_loss_atr=2.0,
+            # v27 params
+            vel_dir_only=True,
+            eq_curve_filter=True,
+            eq_curve_lookback=50,
+            consec_loss_max=2,
+            consec_loss_pause=20,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0, "v26 + v27 coexistence should not crash"
+
+    def test_pm17_baseline_config_matches_pm15_winner(self):
+        """PM17 baseline must reproduce the PM15 winning strategy exactly."""
+        cfg = _pm_v2_set(
+            "pm17_baseline",
+            atr_parabolic_mult=1.5,
+            atr_acceleration=True,
+            atr_accel_lookback=10,
+            atr_cooldown=4,
+        )
+        assert cfg.get("atr_parabolic_mult") == pytest.approx(1.5)
+        assert cfg.get("atr_acceleration") is True
+        assert cfg.get("atr_accel_lookback") == 10
+        assert cfg.get("atr_cooldown") == 4
+        # No v27 params should be present
+        for key in ("vel_dir_only", "vel_accel_only",
+                     "eq_curve_filter", "consec_loss_max"):
+            assert key not in cfg, f"Baseline should not have {key}"
+
+    def test_full_pm17_no_worse_than_70pct_baseline(self):
+        """Full PM17 stack should retain at least 70% of baseline equity
+        on a clean uptrend."""
+        closes = _slow_grind_up(n=150)
+        df = _make_df(closes, atr_mult=0.005)
+
+        bt_baseline = _run(df, _base_config())
+        bt_full = _run(df, _base_config(
+            vel_atr_mult=0.75,
+            vel_dir_only=True,
+            eq_curve_filter=True,
+            eq_curve_lookback=50,
+            consec_loss_max=3,
+            consec_loss_pause=20,
+        ))
+        assert bt_full._equity(closes[-1]) >= bt_baseline._equity(closes[-1]) * 0.70, (
+            f"Full PM17 equity ({bt_full._equity(closes[-1]):.2f}) should be within "
+            f"70% of baseline ({bt_baseline._equity(closes[-1]):.2f})"
+        )

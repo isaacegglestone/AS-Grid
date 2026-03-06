@@ -84,6 +84,10 @@ class GridOrderBacktester:
         self.dd_halt_counter: int = 0      # candles remaining in DD halt/resume pause
         self._gate_fire_counter: int = 0   # ATR gate consecutive fire count (Approach F cooldown)
 
+        # v27 PM17 — consecutive loss guard state
+        self._consec_trend_losses: int = 0    # running count of consecutive trend losses
+        self._consec_loss_pause_counter: int = 0  # candles remaining in loss pause
+
         # Pre-compute ADX series for the full dataset (used by ADX filter)
         self.adx_series = self._compute_adx(
             self.df,
@@ -576,12 +580,33 @@ class GridOrderBacktester:
             # keeps the threshold unchanged.  In high-vol (ratio 3-4×),
             # threshold rises 3-4× so post-parabolic bounces are ignored.
             #   threshold = static_vel × max(1.0, vel_atr_mult × ATR/SMA)
+            #
+            # v27 XRPPM17 directional modifiers:
+            #   vel_dir_only:   only scale when price < EMA-36 (bearish context)
+            #   vel_accel_only: only scale when ATR is actively rising
             _vel_atr_mult = float(self.config.get("vel_atr_mult", 0.0))
             if _vel_atr_mult > 0 and _atr_sma_now > 0:
-                _atr_ratio_vel = _atr_now / _atr_sma_now
-                _vel_scale = max(1.0, _vel_atr_mult * _atr_ratio_vel)
-                vel_threshold     = vel_threshold * _vel_scale
-                cap_vel_threshold = cap_vel_threshold * _vel_scale
+                _apply_vel_scaling = True
+
+                # v27: Directional filter — only scale in bearish context
+                if self.config.get("vel_dir_only", False):
+                    _ema36_val = float(self.htf_ema_fast_series.iloc[idx])
+                    if price >= _ema36_val:
+                        _apply_vel_scaling = False  # bullish — leave static
+
+                # v27: Acceleration filter — only scale when ATR is rising
+                if _apply_vel_scaling and self.config.get("vel_accel_only", False):
+                    _accel_lb = max(1, int(self.config.get("atr_accel_lookback", 10)))
+                    _prev_idx = max(0, idx - _accel_lb)
+                    _atr_prev = float(self.atr_series.iloc[_prev_idx])
+                    if _atr_now <= _atr_prev:
+                        _apply_vel_scaling = False  # ATR flat/falling — leave static
+
+                if _apply_vel_scaling:
+                    _atr_ratio_vel = _atr_now / _atr_sma_now
+                    _vel_scale = max(1.0, _vel_atr_mult * _atr_ratio_vel)
+                    vel_threshold     = vel_threshold * _vel_scale
+                    cap_vel_threshold = cap_vel_threshold * _vel_scale
 
             # Start with the fixed multiplier (0 = disabled)
             _atr_parabolic_mult = float(self.config.get("atr_parabolic_mult", 0.0))
@@ -890,6 +915,15 @@ class GridOrderBacktester:
                             ))
                             print(f"\U0001f3af [{timestamp}] Trend LONG closed "
                                   f"entry={tp['entry']:.4f} exit={price:.4f} pnl={net_pnl:+.2f}")
+                            # v27: consecutive loss tracking
+                            if net_pnl < 0:
+                                self._consec_trend_losses += 1
+                                _clm = int(self.config.get("consec_loss_max", 0))
+                                if _clm > 0 and self._consec_trend_losses >= _clm:
+                                    self._consec_loss_pause_counter = int(
+                                        self.config.get("consec_loss_pause", 20))
+                            else:
+                                self._consec_trend_losses = 0
                             self.trend_position = None
                             if trend_reentry_fast:
                                 # Reset mode so the confirmation counter can re-fire immediately
@@ -913,6 +947,15 @@ class GridOrderBacktester:
                             ))
                             print(f"\U0001f3af [{timestamp}] Trend SHORT closed "
                                   f"entry={tp['entry']:.4f} exit={price:.4f} pnl={net_pnl:+.2f}")
+                            # v27: consecutive loss tracking
+                            if net_pnl < 0:
+                                self._consec_trend_losses += 1
+                                _clm = int(self.config.get("consec_loss_max", 0))
+                                if _clm > 0 and self._consec_trend_losses >= _clm:
+                                    self._consec_loss_pause_counter = int(
+                                        self.config.get("consec_loss_pause", 20))
+                            else:
+                                self._consec_trend_losses = 0
                             self.trend_position = None
                             if trend_reentry_fast:
                                 self.trend_mode = None
@@ -943,6 +986,27 @@ class GridOrderBacktester:
                 confirmed_down = (self.trend_pending_dir == "down" and
                                   self.trend_confirm_counter >= confirm_candles)
 
+                # ── v27 XRPPM17: Equity curve filter ───────────────────────
+                # Suppress trend entries when equity is below its SMA.
+                # Self-calibrating: based on the bot's own P&L trajectory.
+                _eq_curve_blocked = False
+                if self.config.get("eq_curve_filter", False):
+                    _eq_lb = int(self.config.get("eq_curve_lookback", 50))
+                    if len(self.equity_curve) >= _eq_lb:
+                        _recent_eq = [e[2] for e in self.equity_curve[-_eq_lb:]]
+                        _eq_sma = sum(_recent_eq) / len(_recent_eq)
+                        _current_eq = self._equity(price)
+                        if _current_eq < _eq_sma:
+                            _eq_curve_blocked = True
+
+                # ── v27 XRPPM17: Consecutive loss guard ────────────────────
+                # After N consecutive losing trend trades, pause entries for
+                # M candles — pure outcome-based risk management.
+                _consec_blocked = False
+                if self._consec_loss_pause_counter > 0:
+                    self._consec_loss_pause_counter -= 1
+                    _consec_blocked = True
+
                 # ── Act on confirmed trend ──────────────────────────────────
                 if confirmed_up and self.trend_mode != "up":
                     self.trend_mode = "up"
@@ -967,7 +1031,9 @@ class GridOrderBacktester:
                             and adx_allows_trend and ema_bias_long and bb_allows_trend
                             and rsi_allows_long and vol_confirms and ms_allows_long
                             and not _parabolic                            # Layer 1
-                            and (not _htf_ema_align or _htf_bull)):     # Layer 2
+                            and (not _htf_ema_align or _htf_bull)         # Layer 2
+                            and not _eq_curve_blocked                     # v27 equity curve
+                            and not _consec_blocked):                     # v27 consecutive loss
                         if velocity >= cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * used_cap_size_pct * bb_size_boost
@@ -1013,7 +1079,9 @@ class GridOrderBacktester:
                             and adx_allows_trend and ema_bias_short and bb_allows_trend
                             and rsi_allows_short and vol_confirms and ms_allows_short
                             and not _parabolic                            # Layer 1
-                            and (not _htf_ema_align or _htf_bear)):     # Layer 2
+                            and (not _htf_ema_align or _htf_bear)         # Layer 2
+                            and not _eq_curve_blocked                     # v27 equity curve
+                            and not _consec_blocked):                     # v27 consecutive loss
                         if velocity <= -cap_vel_threshold:
                             current_equity = self._equity(price)
                             cap_margin = current_equity * used_cap_size_pct * bb_size_boost
@@ -1048,7 +1116,9 @@ class GridOrderBacktester:
                                    and rsi_allows_long and vol_confirms
                                    and ms_allows_long
                                    and not _parabolic
-                                   and (not _htf_ema_align or _htf_bull))
+                                   and (not _htf_ema_align or _htf_bull)
+                                   and not _eq_curve_blocked
+                                   and not _consec_blocked)
                     _retry_down = (self.trend_mode == "down" and trend_capture
                                    and abs(velocity) >= cap_vel_threshold
                                    and not halt_all and adx_allows_trend
@@ -1056,7 +1126,9 @@ class GridOrderBacktester:
                                    and rsi_allows_short and vol_confirms
                                    and ms_allows_short
                                    and not _parabolic
-                                   and (not _htf_ema_align or _htf_bear))
+                                   and (not _htf_ema_align or _htf_bear)
+                                   and not _eq_curve_blocked
+                                   and not _consec_blocked)
                     if _retry_up:
                         current_equity = self._equity(price)
                         cap_margin = current_equity * used_cap_size_pct * bb_size_boost
@@ -1833,6 +1905,10 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "gate_decay_scale",
                     "cap_size_atr_scale", "cap_size_atr_floor", "cap_size_atr_ceiling",
                     "trend_max_loss_atr",
+                    # v27 XRPPM17 — directional & outcome-based mechanisms
+                    "vel_dir_only", "vel_accel_only",
+                    "eq_curve_filter", "eq_curve_lookback",
+                    "consec_loss_max", "consec_loss_pause",
                 ) if k in params}),
             }
         )
@@ -2787,8 +2863,15 @@ def _pm_v2_set(
     cap_size_atr_floor: float = 0.30,    # Minimum trend capture size when ATR is extreme
     cap_size_atr_ceiling: float = 0.90,  # Maximum trend capture size when ATR is normal
     trend_max_loss_atr: float = 0.0,     # Dynamic max loss: close if loss > N × ATR × qty (0=off)
+    # v27 XRPPM17 — directional & outcome-based mechanisms
+    vel_dir_only: bool = False,          # Only apply velocity scaling when price < EMA-36 (falling)
+    vel_accel_only: bool = False,        # Only apply velocity scaling when ATR is actively rising
+    eq_curve_filter: bool = False,       # Suppress trend entries when equity < SMA(equity)
+    eq_curve_lookback: int = 50,         # Lookback for equity SMA
+    consec_loss_max: int = 0,            # Pause trend entries after N consecutive losses (0=off)
+    consec_loss_pause: int = 20,         # Candles to pause after consecutive loss threshold hit
 ) -> Dict[str, Any]:
-    """v12/v13/v15/v16/v17/v18/v23/v24/v26 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing."""
+    """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard."""
     return {
         "name": name,
         "use_sl": True,
@@ -2861,6 +2944,15 @@ def _pm_v2_set(
             "cap_size_atr_ceiling": cap_size_atr_ceiling}
            if cap_size_atr_scale else {}),
         **({"trend_max_loss_atr": trend_max_loss_atr} if trend_max_loss_atr > 0 else {}),
+        # v27 XRPPM17 — directional & outcome-based mechanisms
+        **({"vel_dir_only": True} if vel_dir_only else {}),
+        **({"vel_accel_only": True} if vel_accel_only else {}),
+        **({"eq_curve_filter": True,
+            "eq_curve_lookback": eq_curve_lookback}
+           if eq_curve_filter else {}),
+        **({"consec_loss_max": consec_loss_max,
+            "consec_loss_pause": consec_loss_pause}
+           if consec_loss_max > 0 else {}),
     }
 
 
@@ -3874,6 +3966,101 @@ XRP_PM_V16_1Y_MID_CONFIG["param_sets"] = _PM16_SETS
 
 
 # ===========================================================================
+# v27 — XRPPM17: Directional & outcome-based mechanisms sweep.
+#
+# PM16 showed that magnitude-based ATR scaling (velocity, decay, sizing,
+# max loss) hurts returns because high ATR is needed for profitable trends
+# too.  The "ATR Paradox": restricting activity when ATR is high inevitably
+# restricts profit-making entries alongside loss-making ones.
+#
+# PM17 addresses this with DIRECTIONAL and OUTCOME-BASED mechanisms:
+#
+#   1. Directional velocity (vel_dir_only):
+#      Only apply velocity scaling when price < EMA-36 (bearish context).
+#      In bull regimes (price >= EMA-36), velocity stays at static 4%.
+#      Preserves bull-market entries while raising threshold in corrections.
+#
+#   2. ATR acceleration velocity (vel_accel_only):
+#      Only apply velocity scaling when ATR is actively rising (vs N ago).
+#      When ATR is elevated but falling (post-spike settling), scaling
+#      is removed — allowing recovery entries that PM16 would block.
+#
+#   3. Equity curve filter (eq_curve_filter):
+#      Suppress trend entries when equity < SMA(equity, N).
+#      Self-calibrating: based on actual P&L, not market conditions.
+#      Source: Van Tharp / Andrea Unger systematic trading.
+#
+#   4. Consecutive loss guard (consec_loss_max):
+#      After N consecutive losing trend trades, pause entries for
+#      M candles.  Pure outcome-based — detects when the bot's edge
+#      has temporarily vanished regardless of market structure.
+#
+# Base: pm15 winner (ATR 1.5×, accel_lookback=10, cooldown=4)
+# 11 strategies × 3 windows (6m OOS, 2y walk-forward, mid-year)
+# ===========================================================================
+
+_V17_BASE = {
+    **_V10_BASE,                          # h0, spacing=1.5%, leverage=2.0
+    "atr_parabolic_mult": 1.5,            # pm15 winner settings
+    "atr_acceleration": True,
+    "atr_accel_lookback": 10,
+    "atr_cooldown": 4,
+}
+
+_PM17_SETS = [
+    # Control — pm15 winner baseline (no PM17 mechanisms)
+    _pm_v2_set("pm17_baseline",              **_V17_BASE),
+
+    # ── Directional velocity only ─────────────────────────────
+    # Scales threshold only when price < EMA-36 (bearish)
+    _pm_v2_set("pm17_dirvel075",             **_V17_BASE,
+               vel_atr_mult=0.75, vel_dir_only=True),
+    _pm_v2_set("pm17_dirvel10",              **_V17_BASE,
+               vel_atr_mult=1.0,  vel_dir_only=True),
+
+    # ── ATR acceleration velocity only ────────────────────────
+    # Scales threshold only when ATR is actively rising
+    _pm_v2_set("pm17_accelvel075",           **_V17_BASE,
+               vel_atr_mult=0.75, vel_accel_only=True),
+    _pm_v2_set("pm17_accelvel10",            **_V17_BASE,
+               vel_atr_mult=1.0,  vel_accel_only=True),
+
+    # ── Equity curve filter only ──────────────────────────────
+    _pm_v2_set("pm17_eqcurve50",             **_V17_BASE,
+               eq_curve_filter=True, eq_curve_lookback=50),
+    _pm_v2_set("pm17_eqcurve100",            **_V17_BASE,
+               eq_curve_filter=True, eq_curve_lookback=100),
+
+    # ── Consecutive loss guard only ───────────────────────────
+    _pm_v2_set("pm17_closs2",                **_V17_BASE,
+               consec_loss_max=2, consec_loss_pause=20),
+    _pm_v2_set("pm17_closs3",                **_V17_BASE,
+               consec_loss_max=3, consec_loss_pause=30),
+
+    # ── Combos ────────────────────────────────────────────────
+    _pm_v2_set("pm17_dirvel_eqcurve",        **_V17_BASE,
+               vel_atr_mult=0.75, vel_dir_only=True,
+               eq_curve_filter=True, eq_curve_lookback=50),
+    _pm_v2_set("pm17_dirvel_closs",          **_V17_BASE,
+               vel_atr_mult=0.75, vel_dir_only=True,
+               consec_loss_max=2, consec_loss_pause=20),
+]
+
+XRP_PM_V17_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V17_CONFIG["param_sets"] = _PM17_SETS
+
+XRP_PM_V17_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V17_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V17_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V17_2Y_CONFIG["param_sets"] = _PM17_SETS
+
+XRP_PM_V17_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V17_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V17_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V17_1Y_MID_CONFIG["param_sets"] = _PM17_SETS
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -4313,6 +4500,21 @@ if __name__ == "__main__":
         print("  v26 XRPPM16 dynamic self-calibrating — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V16_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM17", "PM17"):
+        print("\n" + "=" * 60)
+        print("  v27 XRPPM17 directional & outcome-based — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V17_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v27 XRPPM17 directional & outcome-based — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V17_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v27 XRPPM17 directional & outcome-based — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V17_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
