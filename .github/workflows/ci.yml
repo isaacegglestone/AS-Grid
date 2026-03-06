@@ -64,6 +64,8 @@ jobs:
             dispatch: XRPPM13
           - name: "XRPPM15 — v25 cooldown sweep + F+E"
             dispatch: XRPPM15
+          - name: "XRPPM16 — v26 dynamic mechanisms"
+            dispatch: XRPPM16
 
     steps:
       - uses: actions/checkout@v4
