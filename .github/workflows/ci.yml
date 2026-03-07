@@ -50,34 +50,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "XRPPM6 — v16 comprehensive sweep"
-            dispatch: XRPPM6
-          - name: "XRPPM7 — v17 leverage + sizing"
-            dispatch: XRPPM7
-          - name: "XRPPM8 — v18 hysteresis + spacing"
-            dispatch: XRPPM8
-          - name: "XRPPM11 — v21 ATR+HTF+RegimeVote"
-            dispatch: XRPPM11
-          - name: "XRPPM12 — v22 full fix + grid sleep"
-            dispatch: XRPPM12
-          - name: "XRPPM13 — v23 adaptive ATR gate"
-            dispatch: XRPPM13
-          - name: "XRPPM15 — v25 cooldown sweep + F+E"
-            dispatch: XRPPM15
-          - name: "XRPPM16 — v26 dynamic mechanisms"
-            dispatch: XRPPM16
-          - name: "XRPPM17 — v27 directional & outcome-based"
-            dispatch: XRPPM17
-          - name: "XRPPM18 — v28 push dirvel limits"
-            dispatch: XRPPM18
-          - name: "XRPPM19 — v29 combination sweep"
-            dispatch: XRPPM19
-          - name: "XRPPM20 — v30 mult fine-tune"
-            dispatch: XRPPM20
-          - name: "XRPPM21 — v31 fine-grain cliff"
-            dispatch: XRPPM21
-          - name: "XRPPM22 — v32 combos at m1.6"
-            dispatch: XRPPM22
+          # ── Only the two PM21 survivors across the full 6.5yr stitched cache ──
+          - name: "PM21 FULL — baseline vs m166 (6.5yr)"
+            dispatch: XRPPM21FULL
+          # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
+          #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
+          #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
+          #   XRPPM17 (v27), XRPPM18 (v28), XRPPM19 (v29), XRPPM20 (v30),
+          #   XRPPM21 (v31), XRPPM22 (v32)
+          # These are fully superseded; run locally if needed.
 
     steps:
       - uses: actions/checkout@v4

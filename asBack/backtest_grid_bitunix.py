@@ -4366,6 +4366,21 @@ XRP_PM_V21_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
 XRP_PM_V21_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
 XRP_PM_V21_1Y_MID_CONFIG["param_sets"] = _PM21_SETS
 
+# ---------------------------------------------------------------------------
+# PM21 FULL — only the two survivors across the full 6.5-year stitched cache
+# ---------------------------------------------------------------------------
+_PM21_FULL_SETS = [
+    _pm_v2_set("pm21_baseline", **_V21_BASE,
+               vel_atr_mult=1.60, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm21_m166",     **_V21_BASE,
+               vel_atr_mult=1.66, vel_dir_only=True, vel_dir_ema_period=120),
+]
+
+XRP_PM_V21_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V21_FULL_CONFIG["start_date"] = datetime(2019, 10, 1)   # Binance stitched start
+XRP_PM_V21_FULL_CONFIG["end_date"]   = datetime(2026, 3, 8)    # latest cache date
+XRP_PM_V21_FULL_CONFIG["param_sets"] = _PM21_FULL_SETS
+
 
 # ===========================================================================
 # v32 — XRPPM22: PM19 combination winners re-tested at mult 1.6.
@@ -4957,6 +4972,11 @@ if __name__ == "__main__":
         print("  v32 XRPPM22 combos at m1.6 — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V22_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM21FULL", "PM21FULL"):
+        print("\n" + "=" * 60)
+        print("  PM21 FULL — baseline vs m166 across 6.5yr stitched cache  (Oct 2019 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V21_FULL_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
