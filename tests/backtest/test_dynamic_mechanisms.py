@@ -1173,3 +1173,446 @@ class TestPM17Combined:
             f"Full PM17 equity ({bt_full._equity(closes[-1]):.2f}) should be within "
             f"70% of baseline ({bt_baseline._equity(closes[-1]):.2f})"
         )
+
+
+# ===========================================================================
+# v28 — XRPPM18: Fine-tuning directional velocity
+#
+# Tests for:
+#   - vel_dir_ema_period param encoding in _pm_v2_set
+#   - Configurable EMA period for directional velocity check
+#   - EMA-84 / EMA-120 / EMA-200 directional filters
+#   - Dual filter (vel_dir_only + vel_accel_only)
+#   - Confirm candle variations
+#   - Trail stop variations
+# ===========================================================================
+
+class TestPmV2SetPM18Params:
+    """_pm_v2_set must follow the sentinel pattern for v28 PM18 params."""
+
+    def test_vel_dir_ema_period_absent_when_36(self):
+        """Default EMA period (36) should NOT emit the key (sentinel pattern)."""
+        cfg = _pm_v2_set("t", vel_dir_only=True)
+        assert "vel_dir_ema_period" not in cfg
+
+    def test_vel_dir_ema_period_absent_when_explicit_36(self):
+        cfg = _pm_v2_set("t", vel_dir_only=True, vel_dir_ema_period=36)
+        assert "vel_dir_ema_period" not in cfg
+
+    def test_vel_dir_ema_period_stored_when_84(self):
+        cfg = _pm_v2_set("t", vel_dir_only=True, vel_dir_ema_period=84)
+        assert cfg["vel_dir_ema_period"] == 84
+
+    def test_vel_dir_ema_period_stored_when_120(self):
+        cfg = _pm_v2_set("t", vel_dir_only=True, vel_dir_ema_period=120)
+        assert cfg["vel_dir_ema_period"] == 120
+
+    def test_vel_dir_ema_period_stored_when_200(self):
+        cfg = _pm_v2_set("t", vel_dir_only=True, vel_dir_ema_period=200)
+        assert cfg["vel_dir_ema_period"] == 200
+
+    def test_v28_coexists_with_v27_and_v26(self):
+        """All param versions should coexist without conflicts."""
+        cfg = _pm_v2_set(
+            "combo",
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            vel_dir_ema_period=84,
+            vel_accel_only=True,
+            gate_decay_scale=3.0,
+        )
+        assert cfg["vel_atr_mult"] == pytest.approx(1.0)
+        assert cfg["vel_dir_only"] is True
+        assert cfg["vel_dir_ema_period"] == 84
+        assert cfg["vel_accel_only"] is True
+        assert cfg["gate_decay_scale"] == pytest.approx(3.0)
+
+    def test_pm18_baseline_matches_pm17_dirvel10(self):
+        """PM18 baseline should be identical to pm17_dirvel10 winner."""
+        cfg = _pm_v2_set(
+            "pm18_baseline",
+            atr_parabolic_mult=1.5,
+            atr_acceleration=True,
+            atr_accel_lookback=10,
+            atr_cooldown=4,
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+        )
+        assert cfg["vel_atr_mult"] == pytest.approx(1.0)
+        assert cfg["vel_dir_only"] is True
+        assert "vel_dir_ema_period" not in cfg  # defaults to 36
+
+
+# ===========================================================================
+# 14 — Configurable EMA period for directional velocity
+# ===========================================================================
+
+class TestConfigurableEMAPeriod:
+    """vel_dir_ema_period controls which EMA is used for bearish context check."""
+
+    def test_ema84_uses_slower_ema(self):
+        """With EMA-84, the directional filter should be slower to flag
+        bearish context — preserving more entries in choppy markets."""
+        # Create a choppy pattern: up then gentle dip that crosses EMA-36
+        # but stays above EMA-84
+        closes = [1.0] * 40
+        # Gradual rise
+        for _ in range(30):
+            closes.append(closes[-1] * 1.003)
+        # Gentle dip — crosses below EMA-36 but stays above EMA-84
+        for _ in range(10):
+            closes.append(closes[-1] * 0.995)
+        # Bounce up — should be caught by EMA-84 filter
+        for _ in range(20):
+            closes.append(closes[-1] * 1.005)
+        df = _make_df(closes, atr_mult=0.008)
+
+        bt_ema36 = _run(df, _base_config(vel_atr_mult=1.0, vel_dir_only=True))
+        bt_ema84 = _run(df, _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=84
+        ))
+
+        # EMA-84 is slower, so should allow at least as many entries as EMA-36
+        e36_opens = _trend_open_trades(bt_ema36)
+        e84_opens = _trend_open_trades(bt_ema84)
+        assert len(e84_opens) >= len(e36_opens), (
+            f"EMA-84 should be less restrictive: e84={len(e84_opens)}, e36={len(e36_opens)}"
+        )
+
+    def test_ema120_runs_without_crash(self):
+        """EMA-120 directional filter should run without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=120)
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_ema200_runs_without_crash(self):
+        """EMA-200 directional filter should run without error."""
+        closes = _slow_grind_up(n=250)
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=200)
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_ema36_default_matches_no_period(self):
+        """vel_dir_ema_period=36 should behave identically to omitting it."""
+        df = _make_df(_flat_then_spike_up())
+        bt_default = _run(df, _base_config(vel_atr_mult=1.0, vel_dir_only=True))
+        bt_explicit = _run(df, _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=36
+        ))
+        assert len(_trend_trades(bt_default)) == len(_trend_trades(bt_explicit))
+
+    def test_vel_dir_ema_series_is_htf_fast_for_36(self):
+        """When period=36, vel_dir_ema_series should be htf_ema_fast_series."""
+        df = _make_df([1.0] * 50)
+        cfg = _base_config(vel_atr_mult=1.0, vel_dir_only=True)
+        bt = GridOrderBacktester(df, cfg["long_settings"]["down_spacing"], cfg)
+        assert bt.vel_dir_ema_series is bt.htf_ema_fast_series
+
+    def test_vel_dir_ema_series_is_htf_slow_for_84(self):
+        """When period=84, vel_dir_ema_series should be htf_ema_slow_series."""
+        df = _make_df([1.0] * 100)
+        cfg = _base_config(vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=84)
+        bt = GridOrderBacktester(df, cfg["long_settings"]["down_spacing"], cfg)
+        assert bt.vel_dir_ema_series is bt.htf_ema_slow_series
+
+    def test_vel_dir_ema_series_is_custom_for_120(self):
+        """When period=120, a new EMA series should be computed."""
+        df = _make_df([1.0] * 150)
+        cfg = _base_config(vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=120)
+        bt = GridOrderBacktester(df, cfg["long_settings"]["down_spacing"], cfg)
+        # Should NOT be the same object as fast or slow
+        assert bt.vel_dir_ema_series is not bt.htf_ema_fast_series
+        assert bt.vel_dir_ema_series is not bt.htf_ema_slow_series
+
+    def test_longer_ema_preserves_entries_in_bear_dip(self):
+        """After a moderate dip, EMA-200 should still be above price less often
+        than EMA-36, so it should block fewer entries."""
+        closes = [1.0] * 80
+        # Sharp drop
+        for _ in range(15):
+            closes.append(closes[-1] * 0.98)
+        # Recovery bounce
+        for _ in range(15):
+            closes.append(closes[-1] * 1.005)
+        df = _make_df(closes, atr_mult=0.02)
+
+        bt_36 = _run(df, _base_config(vel_atr_mult=1.5, vel_dir_only=True))
+        bt_200 = _run(df, _base_config(
+            vel_atr_mult=1.5, vel_dir_only=True, vel_dir_ema_period=200
+        ))
+
+        # EMA-200 barely moves during a short dip, so price stays above it
+        # longer — should allow at least as many entries
+        t36 = _trend_open_trades(bt_36)
+        t200 = _trend_open_trades(bt_200)
+        assert len(t200) >= len(t36), (
+            f"EMA-200 should block fewer entries in brief dip: "
+            f"200={len(t200)}, 36={len(t36)}"
+        )
+
+
+# ===========================================================================
+# 15 — Dual filter (vel_dir_only + vel_accel_only)
+# ===========================================================================
+
+class TestDualFilter:
+    """Both directional and acceleration filters applied together."""
+
+    def test_dual_filter_runs_without_crash(self):
+        """Dual filter should complete without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, vel_accel_only=True
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_dual_is_less_aggressive_than_single(self):
+        """Dual filter applies scaling less often (AND logic), so it should
+        block fewer entries than dir-only (which scales whenever bearish)."""
+        # Pattern: drop (bearish) + mixed ATR
+        closes = [1.0] * 80
+        for _ in range(15):
+            closes.append(closes[-1] * 0.98)
+        for _ in range(10):
+            closes.append(closes[-1] * 1.005)
+        df = _make_df(closes, atr_mult=0.02)
+
+        bt_dir = _run(df, _base_config(vel_atr_mult=1.5, vel_dir_only=True))
+        bt_dual = _run(df, _base_config(
+            vel_atr_mult=1.5, vel_dir_only=True, vel_accel_only=True
+        ))
+
+        d_opens = _trend_open_trades(bt_dir)
+        dual_opens = _trend_open_trades(bt_dual)
+        # Dual requires BOTH bearish + rising ATR to scale, so it scales
+        # less often → lower effective threshold → allows more entries
+        assert len(dual_opens) >= len(d_opens), (
+            f"Dual filter should be less aggressive (scales less): "
+            f"dir={len(d_opens)}, dual={len(dual_opens)}"
+        )
+
+    def test_dual_preserves_bull_entries(self):
+        """In a clean uptrend (price > EMA, ATR stable), dual filter should
+        NOT suppress entries."""
+        closes = _slow_grind_up(n=120)
+        df = _make_df(closes, atr_mult=0.005)
+
+        bt_static = _run(df, _base_config())
+        bt_dual = _run(df, _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, vel_accel_only=True
+        ))
+
+        s_opens = _trend_open_trades(bt_static)
+        d_opens = _trend_open_trades(bt_dual)
+        assert len(d_opens) >= len(s_opens), (
+            f"Dual filter should preserve bull entries: "
+            f"static={len(s_opens)}, dual={len(d_opens)}"
+        )
+
+
+# ===========================================================================
+# 16 — Confirm candle and trail stop variations
+# ===========================================================================
+
+class TestConfirmAndTrail:
+    """Override trend_confirm_candles and trend_trailing_stop_pct."""
+
+    def test_confirm1_runs_without_crash(self):
+        """Single confirm candle should run without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, trend_confirm_candles=1
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_confirm5_runs_without_crash(self):
+        """Five confirm candles should run without error."""
+        closes = _flat_then_spike_up(n_flat=120)
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, trend_confirm_candles=5
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_fewer_confirms_catches_more_trends(self):
+        """Fewer confirm candles should catch at least as many trends."""
+        df = _make_df(_slow_grind_up(n=150), atr_mult=0.005)
+
+        bt_1 = _run(df, _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, trend_confirm_candles=1
+        ))
+        bt_5 = _run(df, _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, trend_confirm_candles=5
+        ))
+
+        opens_1 = _trend_open_trades(bt_1)
+        opens_5 = _trend_open_trades(bt_5)
+        assert len(opens_1) >= len(opens_5), (
+            f"Fewer confirms should catch more trends: "
+            f"1-conf={len(opens_1)}, 5-conf={len(opens_5)}"
+        )
+
+    def test_trail03_runs_without_crash(self):
+        """3% trailing stop should run without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, trend_trailing_stop_pct=0.03
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_trail06_runs_without_crash(self):
+        """6% trailing stop should run without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, trend_trailing_stop_pct=0.06
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_wider_trail_holds_longer(self):
+        """Wider trail should hold trend positions at least as long."""
+        # Gradual rise then pullback — wider trail stays in longer
+        closes = _slow_grind_up(n=80)
+        # Small pullback
+        for _ in range(10):
+            closes.append(closes[-1] * 0.995)
+        # Continue up
+        for _ in range(20):
+            closes.append(closes[-1] * 1.005)
+        df = _make_df(closes, atr_mult=0.005)
+
+        bt_3 = _run(df, _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, trend_trailing_stop_pct=0.03
+        ))
+        bt_6 = _run(df, _base_config(
+            vel_atr_mult=1.0, vel_dir_only=True, trend_trailing_stop_pct=0.06
+        ))
+
+        closes_3 = [t for t in bt_3.trade_history if "TRAIL" in str(t)]
+        closes_6 = [t for t in bt_6.trade_history if "TRAIL" in str(t)]
+        # Tighter trail fires more often
+        assert len(closes_3) >= len(closes_6), (
+            f"Tighter trail should fire more often: "
+            f"3%={len(closes_3)}, 6%={len(closes_6)}"
+        )
+
+
+# ===========================================================================
+# 17 — PM18 combined sanity
+# ===========================================================================
+
+class TestPM18Combined:
+    """Integration tests for PM18 parameter combinations."""
+
+    def test_pm18_ema84_with_dual_filter(self):
+        """EMA-84 + dual filter should run without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            vel_accel_only=True,
+            vel_dir_ema_period=84,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_pm18_ema120_with_trail05(self):
+        """EMA-120 + 5% trail should run without error."""
+        closes = _slow_grind_up(n=150)
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            vel_dir_ema_period=120,
+            trend_trailing_stop_pct=0.05,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_pm18_full_stack_no_worse_than_70pct(self):
+        """Full PM18 stack should retain at least 70% of baseline equity."""
+        closes = _slow_grind_up(n=150)
+        df = _make_df(closes, atr_mult=0.005)
+
+        bt_baseline = _run(df, _base_config())
+        bt_full = _run(df, _base_config(
+            vel_atr_mult=1.5,
+            vel_dir_only=True,
+            vel_dir_ema_period=84,
+            vel_accel_only=True,
+            trend_trailing_stop_pct=0.05,
+            trend_confirm_candles=2,
+        ))
+        assert bt_full._equity(closes[-1]) >= bt_baseline._equity(closes[-1]) * 0.70, (
+            f"Full PM18 equity ({bt_full._equity(closes[-1]):.2f}) should be within "
+            f"70% of baseline ({bt_baseline._equity(closes[-1]):.2f})"
+        )
+
+    def test_all_pm18_sweep_configs_valid(self):
+        """All 15 PM18 sweep configs should have required base keys."""
+        from asBack.backtest_grid_bitunix import _PM18_SETS
+        assert len(_PM18_SETS) == 15
+        for cfg in _PM18_SETS:
+            assert "name" in cfg
+            assert cfg["name"].startswith("pm18_")
+            assert cfg.get("trend_detection") is True
+            assert cfg.get("trend_capture") is True
+
+    def test_pm18_baseline_has_dirvel10_settings(self):
+        """PM18 baseline should match pm17_dirvel10 winner settings."""
+        from asBack.backtest_grid_bitunix import _PM18_SETS
+        baseline = next(c for c in _PM18_SETS if c["name"] == "pm18_baseline")
+        assert baseline["vel_atr_mult"] == pytest.approx(1.0)
+        assert baseline["vel_dir_only"] is True
+        assert baseline.get("atr_parabolic_mult") == pytest.approx(1.5)
+        assert baseline.get("atr_cooldown") == 4
+
+    def test_pm18_ema_strategies_have_correct_periods(self):
+        """EMA sweep strategies should have the right periods set."""
+        from asBack.backtest_grid_bitunix import _PM18_SETS
+        ema84 = next(c for c in _PM18_SETS if c["name"] == "pm18_ema84")
+        ema120 = next(c for c in _PM18_SETS if c["name"] == "pm18_ema120")
+        ema200 = next(c for c in _PM18_SETS if c["name"] == "pm18_ema200")
+        assert ema84["vel_dir_ema_period"] == 84
+        assert ema120["vel_dir_ema_period"] == 120
+        assert ema200["vel_dir_ema_period"] == 200
+
+    def test_pm18_confirm_overrides_work(self):
+        """Confirm candle overrides should override _pm_v2_set defaults."""
+        from asBack.backtest_grid_bitunix import _PM18_SETS
+        c1 = next(c for c in _PM18_SETS if c["name"] == "pm18_confirm1")
+        c2 = next(c for c in _PM18_SETS if c["name"] == "pm18_confirm2")
+        c5 = next(c for c in _PM18_SETS if c["name"] == "pm18_confirm5")
+        assert c1["trend_confirm_candles"] == 1
+        assert c2["trend_confirm_candles"] == 2
+        assert c5["trend_confirm_candles"] == 5
+
+    def test_pm18_trail_overrides_work(self):
+        """Trail stop overrides should override _pm_v2_set defaults."""
+        from asBack.backtest_grid_bitunix import _PM18_SETS
+        t3 = next(c for c in _PM18_SETS if c["name"] == "pm18_trail03")
+        t5 = next(c for c in _PM18_SETS if c["name"] == "pm18_trail05")
+        t6 = next(c for c in _PM18_SETS if c["name"] == "pm18_trail06")
+        assert t3["trend_trailing_stop_pct"] == pytest.approx(0.03)
+        assert t5["trend_trailing_stop_pct"] == pytest.approx(0.05)
+        assert t6["trend_trailing_stop_pct"] == pytest.approx(0.06)
+
+    def test_pm18_dual_has_both_filters(self):
+        """Dual filter strategy should have both vel_dir_only and vel_accel_only."""
+        from asBack.backtest_grid_bitunix import _PM18_SETS
+        dual = next(c for c in _PM18_SETS if c["name"] == "pm18_dual")
+        assert dual["vel_dir_only"] is True
+        assert dual["vel_accel_only"] is True
+        assert dual["vel_atr_mult"] == pytest.approx(1.0)

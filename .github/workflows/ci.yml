@@ -68,6 +68,8 @@ jobs:
             dispatch: XRPPM16
           - name: "XRPPM17 — v27 directional & outcome-based"
             dispatch: XRPPM17
+          - name: "XRPPM18 — v28 push dirvel limits"
+            dispatch: XRPPM18
 
     steps:
       - uses: actions/checkout@v4

@@ -120,6 +120,15 @@ class GridOrderBacktester:
         self.htf_ema_fast_series = _close_s.ewm(span=36, adjust=False).mean()
         self.htf_ema_slow_series = _close_s.ewm(span=84, adjust=False).mean()
 
+        # v28 PM18: Pre-compute directional velocity EMA (configurable period)
+        _vel_dir_period = int(self.config.get("vel_dir_ema_period", 36))
+        if _vel_dir_period == 36:
+            self.vel_dir_ema_series = self.htf_ema_fast_series
+        elif _vel_dir_period == 84:
+            self.vel_dir_ema_series = self.htf_ema_slow_series
+        else:
+            self.vel_dir_ema_series = _close_s.ewm(span=_vel_dir_period, adjust=False).mean()
+
         # Pre-compute 30min- and 1hr-equivalent regime EMAs (Layer 3 — multi-TF vote)
         # EMA-87 ≈ 30min TF equivalent; EMA-42 ≈ 1hr TF equivalent.
         # regime_vote_mode=True requires 2-of-3 (EMA-175, EMA-87, EMA-42) to
@@ -590,8 +599,8 @@ class GridOrderBacktester:
 
                 # v27: Directional filter — only scale in bearish context
                 if self.config.get("vel_dir_only", False):
-                    _ema36_val = float(self.htf_ema_fast_series.iloc[idx])
-                    if price >= _ema36_val:
+                    _ema_dir_val = float(self.vel_dir_ema_series.iloc[idx])
+                    if price >= _ema_dir_val:
                         _apply_vel_scaling = False  # bullish — leave static
 
                 # v27: Acceleration filter — only scale when ATR is rising
@@ -1909,6 +1918,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "vel_dir_only", "vel_accel_only",
                     "eq_curve_filter", "eq_curve_lookback",
                     "consec_loss_max", "consec_loss_pause",
+                    # v28 XRPPM18 — fine-tuning directional velocity
+                    "vel_dir_ema_period",
                 ) if k in params}),
             }
         )
@@ -2870,8 +2881,10 @@ def _pm_v2_set(
     eq_curve_lookback: int = 50,         # Lookback for equity SMA
     consec_loss_max: int = 0,            # Pause trend entries after N consecutive losses (0=off)
     consec_loss_pause: int = 20,         # Candles to pause after consecutive loss threshold hit
+    # v28 XRPPM18 — fine-tuning directional velocity
+    vel_dir_ema_period: int = 36,        # EMA period for directional check (36=fast, 84=slow, 120/200=smoother)
 ) -> Dict[str, Any]:
-    """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard."""
+    """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA."""
     return {
         "name": name,
         "use_sl": True,
@@ -2953,6 +2966,8 @@ def _pm_v2_set(
         **({"consec_loss_max": consec_loss_max,
             "consec_loss_pause": consec_loss_pause}
            if consec_loss_max > 0 else {}),
+        # v28 XRPPM18 — fine-tuning directional velocity
+        **({"vel_dir_ema_period": vel_dir_ema_period} if vel_dir_ema_period != 36 else {}),
     }
 
 
@@ -4061,6 +4076,110 @@ XRP_PM_V17_1Y_MID_CONFIG["param_sets"] = _PM17_SETS
 
 
 # ===========================================================================
+# v28 — XRPPM18: Push dirvel10 to its limits.
+#
+# PM17 confirmed directional velocity as the breakthrough mechanism:
+#   pm17_dirvel10 = +93.93% 2y WF (+9.83pp), +4.74% mid-year (+16.17pp)
+#
+# However, the 6m OOS cost is ~26% (106.77% → 79.01%).  This cost comes
+# from EMA-36 being too responsive — in choppy bull markets, price
+# temporarily dips below EMA-36, triggering velocity scaling when it
+# shouldn't.  PM18 explores:
+#
+#   1. Multiplier fine-tuning: 0.5, 1.25, 1.5, 2.0 with vel_dir_only=True
+#      (we already have 0.75 and 1.0 from PM17)
+#
+#   2. Longer EMA periods for directional check (vel_dir_ema_period):
+#      EMA-84 (slow), EMA-120, EMA-200 — smoother = fewer false bearish
+#      signals in bull markets, reducing OOS cost while keeping crash guard
+#
+#   3. Dual filter (vel_dir_only + vel_accel_only):
+#      Require BOTH conditions before scaling — most conservative filter
+#
+#   4. Confirm candle variations: 1, 2, 5 (base = 3)
+#      Fewer confirms = catch trends earlier but more false signals
+#
+#   5. Trail stop variations: 3%, 5%, 6% (base = 4%)
+#      Wider trail = ride trends longer but give back more on reversals
+#
+# Base: pm17_dirvel10 (vel_atr_mult=1.0, vel_dir_only=True + pm15 winner)
+# 15 strategies × 3 windows
+# ===========================================================================
+
+_V18_BASE = {
+    **_V10_BASE,                          # h0, spacing=1.5%, leverage=2.0
+    "atr_parabolic_mult": 1.5,            # pm15 winner settings
+    "atr_acceleration": True,
+    "atr_accel_lookback": 10,
+    "atr_cooldown": 4,
+}
+
+_PM18_SETS = [
+    # Control — pm17_dirvel10 winner (vel_atr_mult=1.0, vel_dir_only, EMA-36)
+    _pm_v2_set("pm18_baseline",              **_V18_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True),
+
+    # ── Multiplier sweep with directional filter ──────────────
+    _pm_v2_set("pm18_dirvel05",              **_V18_BASE,
+               vel_atr_mult=0.5,  vel_dir_only=True),
+    _pm_v2_set("pm18_dirvel125",             **_V18_BASE,
+               vel_atr_mult=1.25, vel_dir_only=True),
+    _pm_v2_set("pm18_dirvel15",              **_V18_BASE,
+               vel_atr_mult=1.5,  vel_dir_only=True),
+    _pm_v2_set("pm18_dirvel20",              **_V18_BASE,
+               vel_atr_mult=2.0,  vel_dir_only=True),
+
+    # ── Longer EMA periods for directional check ─────────────
+    # Smoother EMA = fewer false "bearish" signals in choppy bull markets
+    _pm_v2_set("pm18_ema84",                 **_V18_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=84),
+    _pm_v2_set("pm18_ema120",                **_V18_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm18_ema200",                **_V18_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=200),
+
+    # ── Dual filter (direction + acceleration) ───────────────
+    _pm_v2_set("pm18_dual",                  **_V18_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True, vel_accel_only=True),
+
+    # ── Confirm candle variations ─────────────────────────────
+    {**_pm_v2_set("pm18_confirm1",           **_V18_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True),
+     "trend_confirm_candles": 1},
+    {**_pm_v2_set("pm18_confirm2",           **_V18_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True),
+     "trend_confirm_candles": 2},
+    {**_pm_v2_set("pm18_confirm5",           **_V18_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True),
+     "trend_confirm_candles": 5},
+
+    # ── Trail stop variations ─────────────────────────────────
+    {**_pm_v2_set("pm18_trail03",            **_V18_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True),
+     "trend_trailing_stop_pct": 0.03},
+    {**_pm_v2_set("pm18_trail05",            **_V18_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True),
+     "trend_trailing_stop_pct": 0.05},
+    {**_pm_v2_set("pm18_trail06",            **_V18_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True),
+     "trend_trailing_stop_pct": 0.06},
+]
+
+XRP_PM_V18_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V18_CONFIG["param_sets"] = _PM18_SETS
+
+XRP_PM_V18_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V18_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V18_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V18_2Y_CONFIG["param_sets"] = _PM18_SETS
+
+XRP_PM_V18_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V18_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V18_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V18_1Y_MID_CONFIG["param_sets"] = _PM18_SETS
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -4515,6 +4634,21 @@ if __name__ == "__main__":
         print("  v27 XRPPM17 directional & outcome-based — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V17_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM18", "PM18"):
+        print("\n" + "=" * 60)
+        print("  v28 XRPPM18 push dirvel limits — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V18_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v28 XRPPM18 push dirvel limits — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V18_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v28 XRPPM18 push dirvel limits — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V18_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
