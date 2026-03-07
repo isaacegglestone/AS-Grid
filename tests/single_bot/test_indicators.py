@@ -527,8 +527,9 @@ class TestSwingHighLow:
 class TestCandleBufferSeed:
     @pytest.mark.asyncio
     async def test_seed_populates_closed_from_client(self):
-        """``seed()`` should translate get_klines rows into Candle objects."""
-        from unittest.mock import AsyncMock
+        """``seed()`` should translate get_klines rows into Candle objects
+        when no parquet cache is available (REST fallback path)."""
+        from unittest.mock import AsyncMock, patch
 
         fake_rows = [
             {"open_time": TS_BASE + i * TS_STEP,
@@ -544,7 +545,8 @@ class TestCandleBufferSeed:
         mock_client.get_klines = AsyncMock(return_value=fake_rows)
 
         buf = CandleBuffer(maxlen=200, interval="15min")
-        await buf.seed(mock_client, "XRPUSDT")
+        with patch.object(buf, "_find_parquet", return_value=None):
+            await buf.seed(mock_client, "XRPUSDT")
 
         assert len(buf._closed) == 50
         assert buf._closed[0].ts == TS_BASE
@@ -553,14 +555,48 @@ class TestCandleBufferSeed:
 
     @pytest.mark.asyncio
     async def test_seed_respects_maxlen_cap(self):
-        """seed() is capped at min(maxlen, 200) rows requested from REST."""
-        from unittest.mock import AsyncMock, call
+        """seed() is capped at min(maxlen, 200) rows requested from REST
+        when no parquet cache is available."""
+        from unittest.mock import AsyncMock, call, patch
 
         mock_client = AsyncMock()
         mock_client.get_klines = AsyncMock(return_value=[])
 
         buf = CandleBuffer(maxlen=50, interval="15min")
-        await buf.seed(mock_client, "XRPUSDT")
+        with patch.object(buf, "_find_parquet", return_value=None):
+            await buf.seed(mock_client, "XRPUSDT")
 
         # Expect exactly one get_klines call with limit=50
         mock_client.get_klines.assert_called_once_with("XRPUSDT", "15min", limit=50)
+
+    @pytest.mark.asyncio
+    async def test_seed_uses_parquet_when_available(self):
+        """seed() should prefer the parquet cache and skip the REST call."""
+        from unittest.mock import AsyncMock, patch
+        import tempfile, pandas as pd
+
+        # Create a tiny parquet file
+        n = 30
+        df = pd.DataFrame({
+            "open_time": pd.date_range("2025-01-01", periods=n, freq="15min", tz="UTC"),
+            "open": [1.0 + i * 0.001 for i in range(n)],
+            "high": [1.0 + i * 0.001 + 0.005 for i in range(n)],
+            "low":  [1.0 + i * 0.001 - 0.005 for i in range(n)],
+            "close": [1.0 + i * 0.001 for i in range(n)],
+            "volume": [1500000.0] * n,
+        })
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            df.to_parquet(f.name)
+            tmp_path = f.name
+
+        try:
+            mock_client = AsyncMock()
+            buf = CandleBuffer(maxlen=200, interval="15min")
+            with patch.object(buf, "_find_parquet", return_value=tmp_path):
+                await buf.seed(mock_client, "XRPUSDT")
+
+            assert len(buf._closed) == n
+            mock_client.get_klines.assert_not_called()
+        finally:
+            import os
+            os.unlink(tmp_path)
