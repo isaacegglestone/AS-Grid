@@ -587,9 +587,14 @@ class TestDirVelScaling:
         atr: float = 0.01,
         atr_sma: float = 0.01,
         htf_ema_fast: float = 1.0,
+        vel_dir_ema: float | None = None,
         base_close: float = 1.0,
     ) -> GridTradingBot:
-        """Create a bot with dirvel params and appropriate signals."""
+        """Create a bot with dirvel params and appropriate signals.
+
+        ``vel_dir_ema`` defaults to ``htf_ema_fast`` when not supplied,
+        which preserves backward compatibility with pre-PM18 tests.
+        """
         bot = _make_bot()
         bot.vel_atr_mult = vel_atr_mult
         bot.vel_dir_only = vel_dir_only
@@ -601,6 +606,7 @@ class TestDirVelScaling:
             atr=atr,
             atr_sma=atr_sma,
             htf_ema_fast=htf_ema_fast,
+            vel_dir_ema=vel_dir_ema if vel_dir_ema is not None else htf_ema_fast,
         )
         return bot
 
@@ -826,3 +832,88 @@ class TestDirVelScaling:
         await bot._evaluate_trend(price)
         # -5% is past static -4% threshold but not past scaled -12%
         assert bot.trend_pending_dir is None
+
+    # -- Configurable directional EMA (L5c: vel_dir_ema_period) ------------
+
+    @pytest.mark.asyncio
+    async def test_vel_dir_ema_120_bullish_skips_scaling(self):
+        """vel_dir_ema set to a higher value (EMA-120 proxy); price above → no scaling."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            atr=0.03,
+            atr_sma=0.01,
+            htf_ema_fast=2.0,    # EMA-36 says bearish
+            vel_dir_ema=1.0,     # EMA-120 says bullish (price ≈ 1.05 > 1.0)
+        )
+        # 5% velocity — above static 4% but below scaled 12%
+        # EMA-120 (vel_dir_ema=1.0) is below price → bullish → no scaling
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir == "up"
+
+    @pytest.mark.asyncio
+    async def test_vel_dir_ema_120_bearish_applies_scaling(self):
+        """vel_dir_ema set high (EMA-120 proxy); price below → scaling applied."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            atr=0.03,
+            atr_sma=0.01,
+            htf_ema_fast=1.0,    # EMA-36 says bullish
+            vel_dir_ema=2.0,     # EMA-120 says bearish (price ≈ 1.05 < 2.0)
+        )
+        # 5% velocity — above static 4% but below scaled 12%
+        # EMA-120 (vel_dir_ema=2.0) is above price → bearish → scaling applied
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir is None  # scaled threshold blocks it
+
+    @pytest.mark.asyncio
+    async def test_vel_dir_ema_zero_skips_filter(self):
+        """vel_dir_ema=0 (EMA not warmed up) → filter skipped, scaling applies."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            atr=0.03,
+            atr_sma=0.01,
+            htf_ema_fast=1.0,
+            vel_dir_ema=0.0,     # not computed yet
+        )
+        # 5% velocity — above static 4% but below scaled 12%
+        # vel_dir_ema=0 → filter skipped → conservative: scaling applied
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir is None
+
+    @pytest.mark.asyncio
+    async def test_vel_dir_ema_defaults_to_htf_ema_fast(self):
+        """When vel_dir_ema not specified, defaults to htf_ema_fast value."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            atr=0.03,
+            atr_sma=0.01,
+            htf_ema_fast=1.0,  # bullish — no explicit vel_dir_ema
+        )
+        # Should behave same as old EMA-36 test: price >= EMA → bullish → no scaling
+        assert bot.latest_signals.vel_dir_ema == 1.0
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir == "up"
+
+    @pytest.mark.asyncio
+    async def test_vel_dir_ema_independent_of_htf_ema_fast(self):
+        """vel_dir_ema and htf_ema_fast can differ — only vel_dir_ema matters for L5b."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            atr=0.03,
+            atr_sma=0.01,
+            htf_ema_fast=2.0,    # EMA-36 bearish (price < 2.0)
+            vel_dir_ema=0.5,     # EMA-120 bullish (price > 0.5)
+        )
+        # vel_dir_ema=0.5 → bullish → no scaling → 5% velocity trends
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir == "up"

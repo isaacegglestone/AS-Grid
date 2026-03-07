@@ -139,7 +139,8 @@ HTF_EMA_ALIGN:         bool  = os.getenv("HTF_EMA_ALIGN", "false").lower() == "t
 REGIME_VOTE_MODE:      bool  = os.getenv("REGIME_VOTE_MODE", "false").lower() == "true"  # L3: 2-of-3 vote for bear halt
 GRID_SLEEP_ATR_THRESH: float = float(os.getenv("GRID_SLEEP_ATR_THRESH", "0.0"))   # L4: pause grid when ATR/price < threshold
 VEL_ATR_MULT:          float = float(os.getenv("VEL_ATR_MULT",          "0.0"))   # L5: dynamic velocity: threshold *= max(1, mult × ATR/SMA) (0=static)
-VEL_DIR_ONLY:          bool  = os.getenv("VEL_DIR_ONLY", "false").lower() == "true"  # L5b: only scale when price < EMA-36 (bearish context)
+VEL_DIR_ONLY:          bool  = os.getenv("VEL_DIR_ONLY", "false").lower() == "true"  # L5b: only scale when price < directional EMA (bearish context)
+VEL_DIR_EMA_PERIOD:    int   = int(os.getenv("VEL_DIR_EMA_PERIOD",     "36"))    # L5c: EMA period for directional filter (36=default, 120=PM20 winner)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -232,6 +233,7 @@ class GridTradingBot(BitunixExchange):
         self.grid_sleep_atr_thresh: float = GRID_SLEEP_ATR_THRESH  # L4: 0=off
         self.vel_atr_mult: float = VEL_ATR_MULT              # L5: dynamic velocity scaling (0=off)
         self.vel_dir_only: bool = VEL_DIR_ONLY                # L5b: directional filter (bearish only)
+        self.vel_dir_ema_period: int = VEL_DIR_EMA_PERIOD     # L5c: EMA period for directional filter
         self.initial_quantity = initial_quantity
         self.leverage = leverage
 
@@ -302,6 +304,7 @@ class GridTradingBot(BitunixExchange):
             vol_period=20,
             ms_lookback=20,
             atr_accel_lookback=self.atr_accel_lookback,
+            vel_dir_ema_period=self.vel_dir_ema_period,
         )
         # Latest computed indicator snapshot (refreshed on each candle close).
         self.latest_signals: Optional[Signals] = None
@@ -560,8 +563,10 @@ class GridTradingBot(BitunixExchange):
         # rises so post-parabolic bounces are ignored.
         #   threshold = static_vel × max(1.0, vel_atr_mult × ATR/SMA)
         #
-        # L5b: vel_dir_only — only scale when price < EMA-36 (bearish
-        # context).  When price is above the fast EMA the market is
+        # L5b: vel_dir_only — only scale when price < directional EMA
+        # (bearish context).  The EMA period is configurable via
+        # VEL_DIR_EMA_PERIOD (default 36; PM20 winner uses 120).
+        # When price is above the directional EMA the market is
         # bullish and we leave the static threshold untouched to catch
         # legitimate uptrends.
         effective_vel_pct = TREND_VELOCITY_PCT
@@ -572,8 +577,8 @@ class GridTradingBot(BitunixExchange):
                 _apply_vel_scaling = True
 
                 # L5b: Directional filter — only scale in bearish context
-                if self.vel_dir_only and sig.htf_ema_fast > 0:
-                    if price >= sig.htf_ema_fast:
+                if self.vel_dir_only and sig.vel_dir_ema > 0:
+                    if price >= sig.vel_dir_ema:
                         _apply_vel_scaling = False  # bullish — leave static
 
                 if _apply_vel_scaling:

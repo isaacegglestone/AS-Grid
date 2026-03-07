@@ -96,6 +96,9 @@ class Signals:
     htf_ema_fast: float = 0.0   # 1hr-equiv fast EMA (default 36 on 15m = 9hr)
     htf_ema_slow: float = 0.0   # 1hr-equiv slow EMA (default 84 on 15m = 21hr)
 
+    # ── Layer 5c: Configurable directional-velocity EMA ───────────────────
+    vel_dir_ema: float = 0.0    # EMA used for L5b directional filter (default=htf_ema_fast)
+
     # ── Layer 3: Regime vote mode ─────────────────────────────────────────
     regime_ema_87: float = 0.0  # secondary regime EMA (span 87)
     regime_ema_42: float = 0.0  # tertiary  regime EMA (span 42)
@@ -174,6 +177,7 @@ class CandleBuffer:
         regime_ema_42_period: int = 42,
         atr_sma_period: int = 20,
         atr_accel_lookback: int = 10,
+        vel_dir_ema_period: int = 36,
     ) -> None:
         self.maxlen = maxlen
         self.interval = interval
@@ -193,6 +197,7 @@ class CandleBuffer:
         self.regime_ema_42_period = regime_ema_42_period
         self.atr_sma_period = atr_sma_period
         self.atr_accel_lookback = atr_accel_lookback
+        self.vel_dir_ema_period = vel_dir_ema_period
 
         self._closed: Deque[Candle] = deque(maxlen=maxlen)
         self._live: Optional[Candle] = None   # current in-progress candle
@@ -316,6 +321,16 @@ class CandleBuffer:
         swing_hi                   = self._swing_high(highs, self.ms_lookback)
         swing_lo                   = self._swing_low(lows, self.ms_lookback)
 
+        # L5c: Configurable directional-velocity EMA — reuse existing
+        # series when the period matches to avoid redundant computation.
+        _vd_period = self.vel_dir_ema_period
+        if _vd_period == self.htf_ema_fast_period:
+            vel_dir_ema_val = htf_ema_f
+        elif _vd_period == self.htf_ema_slow_period:
+            vel_dir_ema_val = htf_ema_s
+        else:
+            vel_dir_ema_val = self._ema(closes, _vd_period)
+
         last_vol = volumes[-1]
         return Signals(
             adx=adx_val,
@@ -333,6 +348,7 @@ class CandleBuffer:
             atr_sma=atr_sma_val,
             htf_ema_fast=htf_ema_f,
             htf_ema_slow=htf_ema_s,
+            vel_dir_ema=vel_dir_ema_val,
             regime_ema_87=regime_ema_87_val,
             regime_ema_42=regime_ema_42_val,
             volume=last_vol,
