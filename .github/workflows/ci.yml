@@ -72,6 +72,8 @@ jobs:
             dispatch: XRPPM18
           - name: "XRPPM19 — v29 combination sweep"
             dispatch: XRPPM19
+          - name: "XRPPM20 — v30 mult fine-tune"
+            dispatch: XRPPM20
 
     steps:
       - uses: actions/checkout@v4

@@ -3,6 +3,8 @@ asBack/backtest_grid_bitunix.py
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Bitunix-flavoured grid backtest, based on backtest_grid_auto.py.
 
+Sweep history: v16–v29 (PM6–PM19).  v30 = PM20 multiplier fine-tune.
+
 Differences from the Binance version
 --------------------------------------
 - Historical klines are fetched directly from the Bitunix public REST API
@@ -4260,6 +4262,65 @@ XRP_PM_V19_1Y_MID_CONFIG["param_sets"] = _PM19_SETS
 
 
 # ===========================================================================
+# v30 — XRPPM20: Multiplier fine-tune around the PM19 winner (EMA-120 + m1.5).
+#
+# PM19 showed EMA-120 + mult 1.5 = +206.04% combined (+114.84% 2y WF,
+# +24.14% mid-year crash).  This sweep narrows the multiplier to find
+# the exact optimal value, keeping EMA-120 fixed.
+#
+# 10 multiplier steps from 1.1 → 1.9 in 0.1 increments, plus two EMA
+# variations (100, 140) at mult=1.5 to confirm 120 is optimal.
+# ===========================================================================
+
+_V20_BASE = {
+    **_V19_BASE,                          # inherits h0, spacing=1.5%, leverage=2.0, atr_parabolic_mult=1.5
+}
+
+_PM20_SETS = [
+    # ── Multiplier sweep with EMA-120 fixed ───────────────────
+    _pm_v2_set("pm20_m110",   **_V20_BASE,
+               vel_atr_mult=1.1, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm20_m120",   **_V20_BASE,
+               vel_atr_mult=1.2, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm20_m130",   **_V20_BASE,
+               vel_atr_mult=1.3, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm20_m140",   **_V20_BASE,
+               vel_atr_mult=1.4, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm20_baseline", **_V20_BASE,       # control = PM19 winner
+               vel_atr_mult=1.5, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm20_m160",   **_V20_BASE,
+               vel_atr_mult=1.6, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm20_m170",   **_V20_BASE,
+               vel_atr_mult=1.7, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm20_m175",   **_V20_BASE,
+               vel_atr_mult=1.75, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm20_m180",   **_V20_BASE,
+               vel_atr_mult=1.8, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm20_m190",   **_V20_BASE,
+               vel_atr_mult=1.9, vel_dir_only=True, vel_dir_ema_period=120),
+
+    # ── EMA period variations at mult=1.5 ─────────────────────
+    _pm_v2_set("pm20_ema100", **_V20_BASE,
+               vel_atr_mult=1.5, vel_dir_only=True, vel_dir_ema_period=100),
+    _pm_v2_set("pm20_ema140", **_V20_BASE,
+               vel_atr_mult=1.5, vel_dir_only=True, vel_dir_ema_period=140),
+]
+
+XRP_PM_V20_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V20_CONFIG["param_sets"] = _PM20_SETS
+
+XRP_PM_V20_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V20_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V20_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V20_2Y_CONFIG["param_sets"] = _PM20_SETS
+
+XRP_PM_V20_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V20_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V20_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V20_1Y_MID_CONFIG["param_sets"] = _PM20_SETS
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -4744,6 +4805,21 @@ if __name__ == "__main__":
         print("  v29 XRPPM19 combination sweep — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V19_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM20", "PM20"):
+        print("\n" + "=" * 60)
+        print("  v30 XRPPM20 mult fine-tune — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V20_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v30 XRPPM20 mult fine-tune — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V20_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v30 XRPPM20 mult fine-tune — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V20_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")

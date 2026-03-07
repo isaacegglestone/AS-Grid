@@ -1772,3 +1772,108 @@ class TestPM19CombinationSweep:
             f"Dual+m15 equity ({bt_combo._equity(closes[-1]):.2f}) should be within "
             f"70% of baseline ({bt_baseline._equity(closes[-1]):.2f})"
         )
+
+
+# ── PM20: Multiplier Fine-Tune Tests ─────────────────────────────────────
+
+
+class TestPM20MultFineTune:
+    """Tests for PM20 v30 — multiplier fine-tune around PM19 winner (EMA-120 + m1.5)."""
+
+    def test_all_pm20_sweep_configs_valid(self):
+        """All 12 PM20 sweep configs should have required base keys."""
+        from asBack.backtest_grid_bitunix import _PM20_SETS
+        assert len(_PM20_SETS) == 12
+        for cfg in _PM20_SETS:
+            assert "name" in cfg
+            assert cfg["name"].startswith("pm20_")
+            assert cfg.get("trend_detection") is True
+            assert cfg.get("trend_capture") is True
+
+    def test_pm20_all_have_ema120_except_ema_variants(self):
+        """All mult-sweep strategies should use EMA-120; EMA variants differ."""
+        from asBack.backtest_grid_bitunix import _PM20_SETS
+        for cfg in _PM20_SETS:
+            if cfg["name"].startswith("pm20_ema"):
+                assert cfg["vel_dir_ema_period"] != 120, (
+                    f"{cfg['name']} is an EMA variant but has period 120"
+                )
+            else:
+                assert cfg["vel_dir_ema_period"] == 120, (
+                    f"{cfg['name']} should have EMA-120"
+                )
+
+    def test_pm20_multiplier_sweep_coverage(self):
+        """Mult sweep should cover 1.1 through 1.9 in 0.1 steps (with 1.75 extra)."""
+        from asBack.backtest_grid_bitunix import _PM20_SETS
+        mult_cfgs = [c for c in _PM20_SETS if not c["name"].startswith("pm20_ema")]
+        mults = sorted(c["vel_atr_mult"] for c in mult_cfgs)
+        expected = [1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.75, 1.8, 1.9]
+        assert mults == pytest.approx(expected), f"Expected {expected}, got {mults}"
+
+    def test_pm20_baseline_matches_pm19_winner(self):
+        """PM20 baseline should match pm19_ema120_m15 winner settings."""
+        from asBack.backtest_grid_bitunix import _PM20_SETS
+        baseline = next(c for c in _PM20_SETS if c["name"] == "pm20_baseline")
+        assert baseline["vel_atr_mult"] == pytest.approx(1.5)
+        assert baseline["vel_dir_only"] is True
+        assert baseline["vel_dir_ema_period"] == 120
+        assert baseline.get("atr_parabolic_mult") == pytest.approx(1.5)
+
+    def test_pm20_ema_variants_at_correct_mult(self):
+        """EMA-100 and EMA-140 variants should use mult=1.5."""
+        from asBack.backtest_grid_bitunix import _PM20_SETS
+        ema100 = next(c for c in _PM20_SETS if c["name"] == "pm20_ema100")
+        ema140 = next(c for c in _PM20_SETS if c["name"] == "pm20_ema140")
+        assert ema100["vel_atr_mult"] == pytest.approx(1.5)
+        assert ema100["vel_dir_ema_period"] == 100
+        assert ema140["vel_atr_mult"] == pytest.approx(1.5)
+        assert ema140["vel_dir_ema_period"] == 140
+
+    def test_pm20_all_have_dirvel(self):
+        """Every PM20 config should have vel_dir_only=True."""
+        from asBack.backtest_grid_bitunix import _PM20_SETS
+        for cfg in _PM20_SETS:
+            assert cfg.get("vel_dir_only") is True, f"{cfg['name']} missing vel_dir_only"
+
+    def test_pm20_no_duplicate_names(self):
+        """All PM20 strategy names should be unique."""
+        from asBack.backtest_grid_bitunix import _PM20_SETS
+        names = [c["name"] for c in _PM20_SETS]
+        assert len(names) == len(set(names)), f"Duplicate names: {names}"
+
+    def test_pm20_window_configs_exist(self):
+        """All three PM20 window configs should reference _PM20_SETS."""
+        from asBack.backtest_grid_bitunix import (
+            XRP_PM_V20_CONFIG,
+            XRP_PM_V20_2Y_CONFIG,
+            XRP_PM_V20_1Y_MID_CONFIG,
+            _PM20_SETS,
+        )
+        assert XRP_PM_V20_CONFIG["param_sets"] is _PM20_SETS
+        assert XRP_PM_V20_2Y_CONFIG["param_sets"] is _PM20_SETS
+        assert XRP_PM_V20_1Y_MID_CONFIG["param_sets"] is _PM20_SETS
+
+    def test_pm20_integration_baseline_runs(self):
+        """PM20 baseline (EMA-120 + m1.5) should run without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.5,
+            vel_dir_only=True,
+            vel_dir_ema_period=120,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_pm20_integration_high_mult_runs(self):
+        """High multiplier (1.9) should run without crashing."""
+        closes = _slow_grind_up(n=150)
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.9,
+            vel_dir_only=True,
+            vel_dir_ema_period=120,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
