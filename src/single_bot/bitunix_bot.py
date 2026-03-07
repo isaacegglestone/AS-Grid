@@ -3,6 +3,25 @@ src/single_bot/bitunix_bot.py
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Bitunix grid-trading bot for AS-Grid.
 
+Dual-timeframe architecture
+---------------------------
+All short-period indicators (ATR, ADX, RSI, EMA, velocity, BB) are computed
+on **1-minute** candles to match the backtest engine exactly.  Regime EMAs
+(175 / 87 / 42) remain on **15-minute** candles — the only indicator the
+backtest loads from the 15min file.
+
+Two ``CandleBuffer`` instances run concurrently:
+
+* ``candle_buffer_1m``  — ``market_kline_1min`` WS channel, maxlen=350
+    Provides: ATR, ADX, RSI, EMA-9/21, BB, volume, velocity lookback,
+    HTF EMAs, vel_dir_ema, atr_sma, swing-high/low.
+* ``candle_buffer``     — ``market_kline_15min`` WS channel, maxlen=210
+    Provides: regime_ema (175), regime_ema_87, regime_ema_42.
+
+On every 1-min candle close the two signal sets are merged into
+``self.latest_signals`` and trend evaluation runs.  On 15-min close the
+regime EMAs are refreshed (stored in ``self._regime_signals``).
+
 Follows the same structure as gate_bot.py:
   - Module-level constants from environment variables
   - ``validate_config()`` guard
@@ -12,14 +31,14 @@ Follows the same structure as gate_bot.py:
       * place_order / place_take_profit_order / place_long_orders / place_short_orders
       * cancel_order / cancel_orders_for_side / check_orders_status
       * run() → connect_websocket() with per-channel subscription + dispatch
-      * Per-channel WS handlers (ticker, position, order, balance)
+      * Per-channel WS handlers (ticker, kline-1m, kline-15m, position, order, balance)
       * Periodic REST reconciliation
       * Telegram notification helpers
   - ``main()`` + ``__main__`` guard
 
 WebSocket channels used
 -----------------------
-Public  (wss://fapi.bitunix.com/public/) :  ticker
+Public  (wss://fapi.bitunix.com/public/) :  ticker, market_kline_1min, market_kline_15min
 Private (wss://fapi.bitunix.com/private/): position, order, balance
   Private channels require a login frame sent immediately after connect.
 
@@ -108,13 +127,16 @@ ORDER_FIRST_TIME: int = 1       # s: pause before placing first grid
 # Trend-capture configuration
 # ---------------------------------------------------------------------------
 # These values mirror the confirmed-optimal params from XRP_CONFIG / FINAL_s90_l10.
-# They will be locked in after the full backtest chain results are analysed.
+# All candle-count constants are in **1-minute candles** (matching the backtest):
+#   - LOOKBACK 10 = 10-minute velocity window
+#   - CONFIRM  3  = 3-minute confirmation
+#   - COOLDOWN 30 = 30-minute cooldown
 # ---------------------------------------------------------------------------
-TREND_LOOKBACK_CANDLES: int   = 10    # price velocity window (candles)
+TREND_LOOKBACK_CANDLES: int   = 10    # price velocity window (1-min candles)
 TREND_VELOCITY_PCT:     float = 0.04  # 4% move over lookback → trend detected
 TREND_CAP_VEL_PCT:      float = 0.06  # 6% minimum to actually open a capture position
-TREND_CONFIRM_CANDLES:  int   = 3     # consecutive above-threshold candles before acting
-TREND_COOLDOWN_CANDLES: int   = 30    # quiet candles before resuming hedge mode
+TREND_CONFIRM_CANDLES:  int   = 3     # consecutive above-threshold 1-min candles before acting
+TREND_COOLDOWN_CANDLES: int   = 30    # quiet 1-min candles before resuming hedge mode
 TREND_TRAIL_PCT:        float = 0.04  # trailing stop distance (4% from peak)
 TREND_SIZE_PCT:         float = 0.90  # capture position size as fraction of equity
 TREND_FORCE_CLOSE_GRID: bool  = True  # close opposing grid side on trend fire
@@ -299,9 +321,31 @@ class GridTradingBot(BitunixExchange):
         self.risk_reduction_alerted: bool = False
 
         # ── Candle buffer + indicator engine ──────────────────────────────
-        # Seeded from REST on startup; kept live via WS kline channel.
-        # regime_ema_period=175 matches the winning backtest config (h0, BTBW).
-        # maxlen=210 ensures the 175-period EMA has a comfortable warm-up margin.
+        # Dual-timeframe: 1min for short-period indicators, 15min for regime EMAs.
+        # This matches the backtest engine exactly: all indicators (ATR, ADX,
+        # velocity, EMAs, BB, RSI) are computed on 1min candles; only the
+        # regime EMA (175/87/42) comes from 15min data.
+        #
+        # candle_buffer_1m: maxlen=350 gives vel_dir_ema (120) plenty of warm-up.
+        # candle_buffer:    maxlen=210 gives regime EMA (175) adequate warm-up.
+        # regime_ema_period=1 on 1min buffer disables the regime EMA there
+        # (we overlay regime values from the 15min buffer instead).
+        self.candle_buffer_1m: CandleBuffer = CandleBuffer(
+            maxlen=350,
+            interval="1min",
+            adx_period=14,
+            atr_period=14,
+            rsi_period=14,
+            bb_period=20,
+            bb_mult=2.0,
+            ema_fast=9,
+            ema_slow=21,
+            regime_ema_period=1,     # disabled — regime comes from 15min buffer
+            vol_period=20,
+            ms_lookback=20,
+            atr_accel_lookback=self.atr_accel_lookback,
+            vel_dir_ema_period=self.vel_dir_ema_period,
+        )
         self.candle_buffer: CandleBuffer = CandleBuffer(
             maxlen=210,
             interval="15min",
@@ -318,8 +362,11 @@ class GridTradingBot(BitunixExchange):
             atr_accel_lookback=self.atr_accel_lookback,
             vel_dir_ema_period=self.vel_dir_ema_period,
         )
-        # Latest computed indicator snapshot (refreshed on each candle close).
+        # Latest computed indicator snapshot (refreshed on each 1min candle close).
+        # Merges 1min indicators with 15min regime EMAs.
         self.latest_signals: Optional[Signals] = None
+        # Latest 15min regime-only signals (refreshed on each 15min candle close).
+        self._regime_signals: Optional[Signals] = None
 
         # ── Trend-capture runtime state ───────────────────────────────────
         # Mirrors the backtest GridSearch fields of the same names.
@@ -351,16 +398,45 @@ class GridTradingBot(BitunixExchange):
         Prepare the exchange connection: set leverage and position mode.
 
         Called once at startup before entering the WebSocket loop.
-        Bitunix rejects set_position_mode if there are open positions, so we
-        check first and skip if already in HEDGE mode.
+        Seeds both 1-min and 15-min candle buffers from parquet cache / REST.
         """
         logger.info("Setting leverage %dx on %s…", self.leverage, self.symbol)
         await self.set_leverage(self.symbol, self.leverage)
         logger.info("Setting HEDGE position mode…")
         await self.set_position_mode(hedge_mode=True)
-        logger.info("Seeding candle buffer for %s…", self.symbol)
+
+        # Seed 1min buffer (ATR/ADX/velocity/EMA indicators)
+        logger.info("Seeding 1min candle buffer for %s…", self.symbol)
+        await self.candle_buffer_1m.seed(self, self.symbol)
+        logger.info(
+            "1min candle buffer ready – %d closed candles loaded",
+            len(self.candle_buffer_1m._closed),
+        )
+
+        # Seed 15min buffer (regime EMAs only)
+        logger.info("Seeding 15min candle buffer for %s…", self.symbol)
         await self.candle_buffer.seed(self, self.symbol)
-        logger.info("Candle buffer ready – %d closed candles loaded", len(self.candle_buffer._closed))
+        logger.info(
+            "15min candle buffer ready – %d closed candles loaded",
+            len(self.candle_buffer._closed),
+        )
+
+        # Pre-compute initial signals so regime EMAs are available immediately.
+        regime_sig = self.candle_buffer.signals()
+        if regime_sig is not None:
+            self._regime_signals = regime_sig
+            logger.info(
+                "Initial regime EMA loaded: ema175=%.4f",
+                regime_sig.regime_ema,
+            )
+        sig_1m = self.candle_buffer_1m.signals()
+        if sig_1m is not None:
+            self.latest_signals = self._merge_signals(sig_1m)
+            logger.info(
+                "Initial 1min signals loaded: adx=%.1f atr=%.6f close=%.4f",
+                self.latest_signals.adx, self.latest_signals.atr,
+                self.latest_signals.close,
+            )
 
     # ------------------------------------------------------------------
     # State persistence helpers
@@ -615,10 +691,11 @@ class GridTradingBot(BitunixExchange):
 
     async def _evaluate_trend(self, price: float) -> None:
         """
-        Called on every closed 15-min candle.  Mirrors the trend-detection and
-        trend-capture logic from ``backtest_grid_bitunix.GridSearch`` exactly:
+        Called on every closed **1-min** candle.  Mirrors the trend-detection
+        and trend-capture logic from ``backtest_grid_bitunix.GridSearch``
+        exactly (both use 1-min candle data for velocity computation):
 
-        1. Compute price velocity over ``TREND_LOOKBACK_CANDLES``.
+        1. Compute price velocity over ``TREND_LOOKBACK_CANDLES`` (1-min candles).
         2. Manage existing trend position (trailing-stop check).
         3. Accumulate confirmation counter.
         4. On confirmation:
@@ -626,8 +703,8 @@ class GridTradingBot(BitunixExchange):
            b. Open a directional capture position if velocity ≥ TREND_CAP_VEL_PCT.
         5. Count down cooldown once trend fades and no position is open.
         """
-        # ── 1. Velocity ────────────────────────────────────────────────
-        closed = list(self.candle_buffer._closed)
+        # ── 1. Velocity (from 1-min buffer — matches backtest) ─────────
+        closed = list(self.candle_buffer_1m._closed)
         if len(closed) < TREND_LOOKBACK_CANDLES:
             return  # not enough history yet
 
@@ -1229,7 +1306,7 @@ class GridTradingBot(BitunixExchange):
                 await asyncio.sleep(5)
 
     async def _public_ws_loop(self) -> None:
-        """Connect to the public WS and subscribe to the ticker + kline channels."""
+        """Connect to the public WS and subscribe to ticker + 1min + 15min kline channels."""
         while True:
             try:
                 async with websockets.connect(WS_PUBLIC) as ws:
@@ -1241,12 +1318,20 @@ class GridTradingBot(BitunixExchange):
                     await ws.send(
                         json.dumps(
                             self.build_subscribe_payload(
+                                "market_kline_1min", self.symbol
+                            )
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            self.build_subscribe_payload(
                                 "market_kline_15min", self.symbol
                             )
                         )
                     )
                     logger.info(
-                        "Public WS: subscribed ticker + market_kline_15min for %s",
+                        "Public WS: subscribed ticker + market_kline_1min + "
+                        "market_kline_15min for %s",
                         self.symbol,
                     )
                     await self._recv_loop(ws, private=False)
@@ -1296,6 +1381,8 @@ class GridTradingBot(BitunixExchange):
 
                 if ch == "ticker":
                     await self.handle_ticker_update(data)
+                elif ch == "market_kline_1min":
+                    await self.handle_kline_1m_update(data)
                 elif ch == "market_kline_15min":
                     await self.handle_kline_update(data)
                 elif ch == "position":
@@ -1361,9 +1448,92 @@ class GridTradingBot(BitunixExchange):
         except Exception as exc:
             logger.error("handle_ticker_update error: %s", exc)
 
+    async def handle_kline_1m_update(self, data: Dict[str, Any]) -> None:
+        """
+        Handle a ``market_kline_1min`` WS push (~every 500 ms).
+
+        This is the **primary indicator channel**: ATR, ADX, velocity, EMAs,
+        BB, RSI, and all Layer-1–5 gate inputs are computed from 1-min candles
+        to match the backtest engine exactly.
+
+        On candle close, the 1-min signals are merged with 15-min regime EMAs
+        (from ``_regime_signals``) and trend evaluation runs.
+        """
+        try:
+            kline_data = data.get("data", {})
+            ts_ms = int(data.get("ts", 0))
+            if not ts_ms or not kline_data:
+                return
+
+            candle_closed = self.candle_buffer_1m.update(
+                o=float(kline_data.get("o", 0)),
+                h=float(kline_data.get("h", 0)),
+                l=float(kline_data.get("l", 0)),
+                c=float(kline_data.get("c", 0)),
+                volume=float(kline_data.get("q", 0)),   # USDT notional
+                ts_ms=ts_ms,
+            )
+
+            if candle_closed:
+                sig_1m = self.candle_buffer_1m.signals()
+                if sig_1m is not None:
+                    self.latest_signals = self._merge_signals(sig_1m)
+                    regime_status = "–"
+                    if self.latest_signals.regime_ema > 0:
+                        regime_status = (
+                            "bull" if self.latest_signals.close >= self.latest_signals.regime_ema
+                            else "bear"
+                        )
+                    logger.debug(
+                        "1m closed | close=%.4f  adx=%.1f  rsi=%.1f  "
+                        "bb_w=%.4f  vol_ratio=%.2f  ema_bias=%s  regime=%s(ema175=%.4f)",
+                        self.latest_signals.close,
+                        self.latest_signals.adx,
+                        self.latest_signals.rsi,
+                        self.latest_signals.bb_width,
+                        self.latest_signals.vol_ratio,
+                        "long" if self.latest_signals.ema_bias_long else
+                        "short" if self.latest_signals.ema_bias_short else "flat",
+                        regime_status,
+                        self.latest_signals.regime_ema,
+                    )
+                    await self._evaluate_trend(self.latest_signals.close)
+
+        except Exception as exc:
+            logger.error("handle_kline_1m_update error: %s", exc)
+
+    def _merge_signals(self, sig_1m: Signals) -> Signals:
+        """
+        Overlay 15-min regime EMAs onto *sig_1m* (1-min indicators).
+
+        Returns a new ``Signals`` object with all short-period indicators
+        from the 1-min buffer and regime_ema / regime_ema_87 / regime_ema_42
+        from the most recent 15-min computation.
+        """
+        regime = self._regime_signals
+        if regime is not None:
+            sig_1m.regime_ema    = regime.regime_ema
+            sig_1m.regime_ema_87 = regime.regime_ema_87
+            sig_1m.regime_ema_42 = regime.regime_ema_42
+        else:
+            # No 15min data yet — leave regime fields at 0 (safe: all
+            # consumers guard with ``if regime_ema > 0``).
+            sig_1m.regime_ema    = 0.0
+            sig_1m.regime_ema_87 = 0.0
+            sig_1m.regime_ema_42 = 0.0
+        return sig_1m
+
     async def handle_kline_update(self, data: Dict[str, Any]) -> None:
         """
         Handle a ``market_kline_15min`` WS push (~every 500 ms).
+
+        This channel is used **only** for regime EMA computation (EMA-175,
+        EMA-87, EMA-42).  All short-period indicators now come from the
+        1-min channel instead.
+
+        On 15-min candle close, the regime signals are stored in
+        ``self._regime_signals`` and will be merged into the next 1-min
+        signal snapshot.
 
         Bitunix kline WS payload::
 
@@ -1377,18 +1547,6 @@ class GridTradingBot(BitunixExchange):
                 "q": "3150000"            ← USDT notional (== REST baseVol)
               }
             }
-
-        We store USDT notional (``q``) as volume to match the parquet cache
-        field (confirmed: ``q / b`` ≈ close price).
-
-        A candle closes when the ``ts`` timestamp changes.  On close,
-        ``self.latest_signals`` is refreshed and filter logic can be applied.
-
-        Note
-        ----
-        Trend-capture entry logic is intentionally **not** implemented here
-        yet.  This handler is the scaffolding stub — filter gates will be
-        added once backtest results confirm the winning configuration.
         """
         try:
             kline_data = data.get("data", {})
@@ -1406,28 +1564,16 @@ class GridTradingBot(BitunixExchange):
             )
 
             if candle_closed:
-                self.latest_signals = self.candle_buffer.signals()
-                if self.latest_signals:
-                    regime_status = "–"
-                    if self.latest_signals.regime_ema > 0:
-                        regime_status = (
-                            "bull" if self.latest_signals.close >= self.latest_signals.regime_ema
-                            else "bear"
-                        )
+                sig_15m = self.candle_buffer.signals()
+                if sig_15m is not None:
+                    self._regime_signals = sig_15m
                     logger.debug(
-                        "Candle closed | close=%.4f  adx=%.1f  rsi=%.1f  "
-                        "bb_w=%.4f  vol_ratio=%.2f  ema_bias=%s  regime=%s(ema175=%.4f)",
-                        self.latest_signals.close,
-                        self.latest_signals.adx,
-                        self.latest_signals.rsi,
-                        self.latest_signals.bb_width,
-                        self.latest_signals.vol_ratio,
-                        "long" if self.latest_signals.ema_bias_long else
-                        "short" if self.latest_signals.ema_bias_short else "flat",
-                        regime_status,
-                        self.latest_signals.regime_ema,
+                        "15m closed | regime_ema175=%.4f  ema87=%.4f  ema42=%.4f  close=%.4f",
+                        sig_15m.regime_ema,
+                        sig_15m.regime_ema_87,
+                        sig_15m.regime_ema_42,
+                        sig_15m.close,
                     )
-                    await self._evaluate_trend(self.latest_signals.close)
 
         except Exception as exc:
             logger.error("handle_kline_update error: %s", exc)

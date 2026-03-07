@@ -187,25 +187,29 @@ class TestHandleKlineUpdateSignals:
         bot = _make_bot()
         mock_buf = MagicMock(spec=CandleBuffer)
         mock_buf.update.return_value = False
-        bot.candle_buffer = mock_buf
+        bot.candle_buffer_1m = mock_buf
 
-        await bot.handle_kline_update(_kline_payload(ts=TS_BASE))
+        await bot.handle_kline_1m_update(_kline_payload(ts=TS_BASE))
         assert bot.latest_signals is None
 
     @pytest.mark.asyncio
     async def test_latest_signals_updated_when_candle_closes(self):
-        """On candle close, latest_signals should be set to whatever signals() returns."""
+        """On 1min candle close, latest_signals should be set (merged with regime)."""
         bot = _make_bot()
         mock_buf = MagicMock(spec=CandleBuffer)
         mock_buf.update.return_value = True  # simulate candle close
         fake_signals = Signals(adx=30.0, rsi=55.0, bb_width=0.03, close=1.26)
         mock_buf.signals.return_value = fake_signals
-        bot.candle_buffer = mock_buf
+        bot.candle_buffer_1m = mock_buf
 
-        await bot.handle_kline_update(_kline_payload(ts=TS_BASE))
+        await bot.handle_kline_1m_update(_kline_payload(ts=TS_BASE))
 
         mock_buf.signals.assert_called_once()
-        assert bot.latest_signals is fake_signals
+        assert bot.latest_signals is not None
+        assert bot.latest_signals.adx == 30.0
+        assert bot.latest_signals.close == 1.26
+        # No regime data yet → regime_ema should be 0
+        assert bot.latest_signals.regime_ema == 0.0
 
     @pytest.mark.asyncio
     async def test_latest_signals_none_when_buffer_not_warmed(self):
@@ -214,28 +218,28 @@ class TestHandleKlineUpdateSignals:
         mock_buf = MagicMock(spec=CandleBuffer)
         mock_buf.update.return_value = True
         mock_buf.signals.return_value = None   # warm-up period
-        bot.candle_buffer = mock_buf
+        bot.candle_buffer_1m = mock_buf
 
         initial = bot.latest_signals
-        await bot.handle_kline_update(_kline_payload(ts=TS_BASE))
+        await bot.handle_kline_1m_update(_kline_payload(ts=TS_BASE))
         assert bot.latest_signals is initial  # unchanged
 
     @pytest.mark.asyncio
     async def test_real_buffer_signals_populated_after_two_candles(self):
         """
-        Integration flavour: use a real pre-seeded buffer; send two successive
+        Integration flavour: use a real pre-seeded 1min buffer; send two successive
         messages with different timestamps.  The second message triggers a
         candle close; latest_signals should be non-None (enough history).
         """
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=60)
+        bot.candle_buffer_1m = _seeded_buffer(n=60)
 
         # First message — opens in-progress candle
-        await bot.handle_kline_update(_kline_payload(ts=TS_BASE + 5_000))
+        await bot.handle_kline_1m_update(_kline_payload(ts=TS_BASE + 5_000))
         assert bot.latest_signals is None  # no close yet
 
         # Second message — new ts → closes previous, triggers signals()
-        await bot.handle_kline_update(
+        await bot.handle_kline_1m_update(
             _kline_payload(ts=TS_BASE + TS_STEP, c="1.28", q="2800000")
         )
         # Buffer had 60 candles; after close it has 61 → enough for signals
@@ -248,15 +252,15 @@ class TestHandleKlineUpdateSignals:
         """latest_signals.close should match the ``c`` field from the WS message
         that triggered the *next* candle (the committed candle's close)."""
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=60)
+        bot.candle_buffer_1m = _seeded_buffer(n=60)
 
         close_price = "1.3500"
         # Open candle 1 at ts1
-        await bot.handle_kline_update(
+        await bot.handle_kline_1m_update(
             _kline_payload(ts=TS_BASE + 1_000, c=close_price, q="3000000")
         )
         # Open candle 2 at ts2 — commits candle 1
-        await bot.handle_kline_update(
+        await bot.handle_kline_1m_update(
             _kline_payload(ts=TS_BASE + TS_STEP + 1_000, c="1.36", q="3100000")
         )
         assert bot.latest_signals is not None

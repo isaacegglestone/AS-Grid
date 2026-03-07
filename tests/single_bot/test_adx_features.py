@@ -210,7 +210,7 @@ class TestAdxMinTrendLong:
         → velocity ≈ 0.074 > TREND_CAP_VEL_PCT(0.06) ✓
         """
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=1.0)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=1.0)
         # Pre-warm confirm counter to CONFIRM_CANDLES - 1
         bot.trend_pending_dir = "up"
         bot.trend_confirm_counter = TREND_CONFIRM_CANDLES - 1
@@ -276,7 +276,7 @@ class TestAdxMinTrendShort:
         velocity = (0.92 - 1.005) / 1.005 ≈ -0.085 < -TREND_CAP_VEL_PCT(-0.06) ✓
         """
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=1.0)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=1.0)
         bot.trend_pending_dir = "down"
         bot.trend_confirm_counter = TREND_CONFIRM_CANDLES - 1
         bot.trend_mode = None

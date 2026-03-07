@@ -84,7 +84,7 @@ def _seeded_buffer(n: int = 200, base_close: float = 1.0) -> CandleBuffer:
 def _trend_up_bot(adx: float = 30.0, **bot_overrides) -> GridTradingBot:
     """Bot pre-wired for confirmed-up on next ``_evaluate_trend(1.08)``."""
     bot = _make_bot(**bot_overrides)
-    bot.candle_buffer = _seeded_buffer(n=15)
+    bot.candle_buffer_1m = _seeded_buffer(n=15)
     bot.trend_pending_dir = "up"
     bot.trend_confirm_counter = TREND_CONFIRM_CANDLES - 1
     bot.trend_mode = None
@@ -97,7 +97,7 @@ def _trend_up_bot(adx: float = 30.0, **bot_overrides) -> GridTradingBot:
 def _trend_down_bot(adx: float = 30.0, **bot_overrides) -> GridTradingBot:
     """Bot pre-wired for confirmed-down on next ``_evaluate_trend(0.92)``."""
     bot = _make_bot(**bot_overrides)
-    bot.candle_buffer = _seeded_buffer(n=15)
+    bot.candle_buffer_1m = _seeded_buffer(n=15)
     bot.trend_pending_dir = "down"
     bot.trend_confirm_counter = TREND_CONFIRM_CANDLES - 1
     bot.trend_mode = None

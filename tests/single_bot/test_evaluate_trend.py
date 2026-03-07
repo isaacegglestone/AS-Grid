@@ -98,7 +98,7 @@ class TestTrailingStopLong:
     def _setup(self, base_close: float = 1.06) -> GridTradingBot:
         """Bot with long trend_position; peak=1.10, entry=1.05."""
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=base_close)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=base_close)
         bot.trend_mode = "up"
         bot.trend_position = {
             "side": "long", "entry": 1.05, "qty": 10, "peak": 1.10,
@@ -165,7 +165,7 @@ class TestTrailingStopShort:
     def _setup(self, base_close: float = 0.94) -> GridTradingBot:
         """Bot with short trend_position; peak=0.95, entry=1.00."""
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=base_close)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=base_close)
         bot.trend_mode = "down"
         bot.trend_position = {
             "side": "short", "entry": 1.00, "qty": 10, "peak": 0.95,
@@ -213,7 +213,7 @@ class TestConfirmCounter:
     def _neutral_bot(self) -> GridTradingBot:
         """Bot with clean state; no trend position."""
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=1.0)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=1.0)
         bot.trend_mode = None
         bot.trend_position = None
         bot.trend_pending_dir = None
@@ -231,7 +231,7 @@ class TestConfirmCounter:
         await bot._evaluate_trend(1.08)
         assert bot.trend_confirm_counter == 1
         assert bot.trend_pending_dir == "up"
-        _append_candle(bot.candle_buffer, 1.08, idx=15)
+        _append_candle(bot.candle_buffer_1m, 1.08, idx=15)
         await bot._evaluate_trend(1.08)
         assert bot.trend_confirm_counter == 2
 
@@ -242,7 +242,7 @@ class TestConfirmCounter:
         await bot._evaluate_trend(0.92)
         assert bot.trend_confirm_counter == 1
         assert bot.trend_pending_dir == "down"
-        _append_candle(bot.candle_buffer, 0.92, idx=15)
+        _append_candle(bot.candle_buffer_1m, 0.92, idx=15)
         await bot._evaluate_trend(0.92)
         assert bot.trend_confirm_counter == 2
 
@@ -251,7 +251,7 @@ class TestConfirmCounter:
         """Switching from up to down resets counter to 1."""
         bot = self._neutral_bot()
         await bot._evaluate_trend(1.08)  # trending_up  → counter=1
-        _append_candle(bot.candle_buffer, 1.08, idx=15)
+        _append_candle(bot.candle_buffer_1m, 1.08, idx=15)
         await bot._evaluate_trend(0.92)  # trending_down → dir changes, counter=1
         assert bot.trend_confirm_counter == 1
         assert bot.trend_pending_dir == "down"
@@ -261,7 +261,7 @@ class TestConfirmCounter:
         """Neutral velocity → counter=0, pending_dir=None."""
         bot = self._neutral_bot()
         await bot._evaluate_trend(1.08)   # counter=1, dir="up"
-        _append_candle(bot.candle_buffer, 1.08, idx=15)
+        _append_candle(bot.candle_buffer_1m, 1.08, idx=15)
         await bot._evaluate_trend(1.01)   # neutral → counter=0
         assert bot.trend_confirm_counter == 0
         assert bot.trend_pending_dir is None
@@ -290,7 +290,7 @@ class TestForceCloseGrid:
     def _confirmed_up_bot(self) -> GridTradingBot:
         """Bot wired for confirmed-up on next call with price=1.08."""
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=1.0)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=1.0)
         bot.trend_pending_dir = "up"
         bot.trend_confirm_counter = TREND_CONFIRM_CANDLES - 1
         bot.trend_mode = None
@@ -302,7 +302,7 @@ class TestForceCloseGrid:
     def _confirmed_down_bot(self) -> GridTradingBot:
         """Bot wired for confirmed-down on next call with price=0.92."""
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=1.0)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=1.0)
         bot.trend_pending_dir = "down"
         bot.trend_confirm_counter = TREND_CONFIRM_CANDLES - 1
         bot.trend_mode = None
@@ -377,7 +377,7 @@ class TestTrendCooldown:
     def _cooldown_bot(self, counter: int = 0) -> GridTradingBot:
         """Bot in trend_mode='up' with no position → ready for cooldown."""
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=1.0)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=1.0)
         bot.trend_mode = "up"
         bot.trend_position = None
         bot.trend_cooldown_counter = counter
@@ -439,7 +439,7 @@ class TestEvaluateTrendGuards:
     async def test_returns_early_when_buffer_too_small(self):
         """< TREND_LOOKBACK_CANDLES closed candles → no state changes."""
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(
+        bot.candle_buffer_1m = _seeded_buffer(
             n=TREND_LOOKBACK_CANDLES - 1, base_close=1.0,
         )
         bot.trend_pending_dir = None
@@ -450,11 +450,11 @@ class TestEvaluateTrendGuards:
     async def test_returns_early_when_past_price_zero(self):
         """Oldest relevant candle close ≤ 0 → returns early."""
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=1.0)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=1.0)
         # Overwrite the lookback candle to have close=0
-        idx = len(bot.candle_buffer._closed) - TREND_LOOKBACK_CANDLES
-        old = bot.candle_buffer._closed[idx]
-        bot.candle_buffer._closed[idx] = Candle(
+        idx = len(bot.candle_buffer_1m._closed) - TREND_LOOKBACK_CANDLES
+        old = bot.candle_buffer_1m._closed[idx]
+        bot.candle_buffer_1m._closed[idx] = Candle(
             ts=old.ts, open=0, high=0, low=0, close=0, volume=0,
         )
         bot.trend_pending_dir = None
@@ -465,7 +465,7 @@ class TestEvaluateTrendGuards:
     async def test_confirmed_up_does_not_refire(self):
         """Already in trend_mode='up' → confirmed_up block skipped."""
         bot = _make_bot()
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=1.0)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=1.0)
         bot.trend_mode = "up"
         bot.trend_pending_dir = "up"
         bot.trend_confirm_counter = TREND_CONFIRM_CANDLES - 1
@@ -492,7 +492,7 @@ class TestEvaluateTrendEndToEnd:
         """Long lifecycle: confirm → capture → peak track → trail close."""
         bot = _make_bot()
         bot.balance = {"USDT": {"available": 1000.0, "margin": 0.0}}
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=1.0)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=1.0)
         bot.short_position = 5.0
         bot.latest_signals = Signals(adx=30.0)
         bot.place_market_order = AsyncMock(return_value={"orderId": "x"})
@@ -503,7 +503,7 @@ class TestEvaluateTrendEndToEnd:
         for i in range(TREND_CONFIRM_CANDLES):
             price = 1.08 + i * 0.01
             await bot._evaluate_trend(price)
-            _append_candle(bot.candle_buffer, price, idx=15 + i)
+            _append_candle(bot.candle_buffer_1m, price, idx=15 + i)
 
         assert bot.trend_mode == "up"
         assert bot.trend_position is not None
@@ -514,14 +514,14 @@ class TestEvaluateTrendEndToEnd:
 
         # Phase 2 — price rises, peak tracks
         higher = entry + 0.10
-        _append_candle(bot.candle_buffer, higher, idx=18)
+        _append_candle(bot.candle_buffer_1m, higher, idx=18)
         await bot._evaluate_trend(higher)
         assert bot.trend_position["peak"] == higher
 
         # Phase 3 — price drops to trail stop → close
         trail_stop = higher * (1.0 - TREND_TRAIL_PCT)
         close_price = trail_stop - 0.01
-        _append_candle(bot.candle_buffer, close_price, idx=19)
+        _append_candle(bot.candle_buffer_1m, close_price, idx=19)
         await bot._evaluate_trend(close_price)
 
         # TREND_REENTRY_FAST=True → mode resets immediately
@@ -533,7 +533,7 @@ class TestEvaluateTrendEndToEnd:
         """Short lifecycle: confirm → capture → peak track → trail close."""
         bot = _make_bot()
         bot.balance = {"USDT": {"available": 1000.0, "margin": 0.0}}
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=1.0)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=1.0)
         bot.long_position = 5.0
         bot.latest_signals = Signals(adx=30.0)
         bot.place_market_order = AsyncMock(return_value={"orderId": "x"})
@@ -544,7 +544,7 @@ class TestEvaluateTrendEndToEnd:
         for i in range(TREND_CONFIRM_CANDLES):
             price = 0.92 - i * 0.01
             await bot._evaluate_trend(price)
-            _append_candle(bot.candle_buffer, price, idx=15 + i)
+            _append_candle(bot.candle_buffer_1m, price, idx=15 + i)
 
         assert bot.trend_mode == "down"
         assert bot.trend_position is not None
@@ -554,14 +554,14 @@ class TestEvaluateTrendEndToEnd:
 
         # Phase 2 — price drops further, peak tracks
         lower = entry - 0.10
-        _append_candle(bot.candle_buffer, lower, idx=18)
+        _append_candle(bot.candle_buffer_1m, lower, idx=18)
         await bot._evaluate_trend(lower)
         assert bot.trend_position["peak"] == lower
 
         # Phase 3 — price rises to trail stop → close
         trail_stop = lower * (1.0 + TREND_TRAIL_PCT)
         close_price = trail_stop + 0.01
-        _append_candle(bot.candle_buffer, close_price, idx=19)
+        _append_candle(bot.candle_buffer_1m, close_price, idx=19)
         await bot._evaluate_trend(close_price)
 
         assert bot.trend_position is None
@@ -598,7 +598,7 @@ class TestDirVelScaling:
         bot = _make_bot()
         bot.vel_atr_mult = vel_atr_mult
         bot.vel_dir_only = vel_dir_only
-        bot.candle_buffer = _seeded_buffer(n=15, base_close=base_close)
+        bot.candle_buffer_1m = _seeded_buffer(n=15, base_close=base_close)
         bot.trend_pending_dir = None
         bot.trend_confirm_counter = 0
         bot.latest_signals = Signals(
@@ -745,7 +745,7 @@ class TestDirVelScaling:
         # to exceed the scaled vel threshold (12%) and register trending
         for i in range(TREND_CONFIRM_CANDLES):
             price = 1.15 + i * 0.01 + TREND_LOOKBACK_CANDLES * 0.001
-            _append_candle(bot.candle_buffer, price, idx=15 + i)
+            _append_candle(bot.candle_buffer_1m, price, idx=15 + i)
             await bot._evaluate_trend(price)
 
         # trend_mode should flip — the velocity was 15% > scaled 12%
@@ -827,7 +827,7 @@ class TestDirVelScaling:
             base_close=1.5,   # start higher so we can drop 5%
         )
         # 5% drop, above static -4% but below -12% scaled
-        past = bot.candle_buffer._closed[-TREND_LOOKBACK_CANDLES].close
+        past = bot.candle_buffer_1m._closed[-TREND_LOOKBACK_CANDLES].close
         price = past * 0.95   # -5% velocity
         await bot._evaluate_trend(price)
         # -5% is past static -4% threshold but not past scaled -12%

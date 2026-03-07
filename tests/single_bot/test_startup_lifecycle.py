@@ -70,19 +70,22 @@ class TestSetupSequence:
     async def test_setup_seeds_candle_buffer(self):
         bot = _make_bot()
         bot.candle_buffer.seed = AsyncMock()
+        bot.candle_buffer_1m.seed = AsyncMock()
         await bot.setup()
+        bot.candle_buffer_1m.seed.assert_awaited_once_with(bot, "XRPUSDT")
         bot.candle_buffer.seed.assert_awaited_once_with(bot, "XRPUSDT")
 
     @pytest.mark.asyncio
     async def test_setup_sequence_order(self):
-        """Leverage → position mode → candle seed (strict ordering)."""
+        """Leverage → position mode → 1min seed → 15min seed (strict ordering)."""
         bot = _make_bot()
         call_order = []
         bot.set_leverage = AsyncMock(side_effect=lambda *a: call_order.append("leverage"))
         bot.set_position_mode = AsyncMock(side_effect=lambda **kw: call_order.append("pos_mode"))
-        bot.candle_buffer.seed = AsyncMock(side_effect=lambda *a: call_order.append("seed"))
+        bot.candle_buffer_1m.seed = AsyncMock(side_effect=lambda *a: call_order.append("seed_1m"))
+        bot.candle_buffer.seed = AsyncMock(side_effect=lambda *a: call_order.append("seed_15m"))
         await bot.setup()
-        assert call_order == ["leverage", "pos_mode", "seed"]
+        assert call_order == ["leverage", "pos_mode", "seed_1m", "seed_15m"]
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +112,7 @@ class TestSetupErrors:
     @pytest.mark.asyncio
     async def test_seed_failure_propagates(self):
         bot = _make_bot()
-        bot.candle_buffer.seed = AsyncMock(side_effect=RuntimeError("no data"))
+        bot.candle_buffer_1m.seed = AsyncMock(side_effect=RuntimeError("no data"))
         with pytest.raises(RuntimeError, match="no data"):
             await bot.setup()
 

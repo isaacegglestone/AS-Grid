@@ -80,38 +80,38 @@ def _grid_bot(
 
 
 # ===========================================================================
-# TestHandleKlineUpdateTrend — wiring from kline feed to _evaluate_trend
+# TestHandleKline1mUpdateTrend — wiring from 1min kline feed to _evaluate_trend
 # ===========================================================================
 
 
 class TestHandleKlineUpdateTrend:
-    """handle_kline_update should call _evaluate_trend on candle close."""
+    """handle_kline_1m_update should call _evaluate_trend on 1min candle close."""
 
     @pytest.mark.asyncio
     async def test_evaluate_trend_called_on_candle_close(self):
-        """Candle closes + signals valid → _evaluate_trend called."""
+        """1min candle closes + signals valid → _evaluate_trend called."""
         bot = _make_bot()
-        bot.candle_buffer = MagicMock()
-        bot.candle_buffer.update = MagicMock(return_value=True)
-        bot.candle_buffer.signals = MagicMock(
+        bot.candle_buffer_1m = MagicMock()
+        bot.candle_buffer_1m.update = MagicMock(return_value=True)
+        bot.candle_buffer_1m.signals = MagicMock(
             return_value=Signals(close=1.50, adx=20.0),
         )
         bot._evaluate_trend = AsyncMock()
 
-        await bot.handle_kline_update(_kline_data())
+        await bot.handle_kline_1m_update(_kline_data())
 
         bot._evaluate_trend.assert_called_once_with(1.50)
 
     @pytest.mark.asyncio
     async def test_evaluate_trend_not_called_when_signals_none(self):
-        """Candle closes but signals() returns None → no evaluation."""
+        """1min candle closes but signals() returns None → no evaluation."""
         bot = _make_bot()
-        bot.candle_buffer = MagicMock()
-        bot.candle_buffer.update = MagicMock(return_value=True)
-        bot.candle_buffer.signals = MagicMock(return_value=None)
+        bot.candle_buffer_1m = MagicMock()
+        bot.candle_buffer_1m.update = MagicMock(return_value=True)
+        bot.candle_buffer_1m.signals = MagicMock(return_value=None)
         bot._evaluate_trend = AsyncMock()
 
-        await bot.handle_kline_update(_kline_data())
+        await bot.handle_kline_1m_update(_kline_data())
 
         bot._evaluate_trend.assert_not_called()
 
@@ -119,27 +119,27 @@ class TestHandleKlineUpdateTrend:
     async def test_evaluate_trend_not_called_when_candle_not_closed(self):
         """Intra-candle update → no evaluation."""
         bot = _make_bot()
-        bot.candle_buffer = MagicMock()
-        bot.candle_buffer.update = MagicMock(return_value=False)
+        bot.candle_buffer_1m = MagicMock()
+        bot.candle_buffer_1m.update = MagicMock(return_value=False)
         bot._evaluate_trend = AsyncMock()
 
-        await bot.handle_kline_update(_kline_data())
+        await bot.handle_kline_1m_update(_kline_data())
 
         bot._evaluate_trend.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_exception_in_evaluate_trend_swallowed(self):
-        """If _evaluate_trend raises, handle_kline_update catches it."""
+        """If _evaluate_trend raises, handle_kline_1m_update catches it."""
         bot = _make_bot()
-        bot.candle_buffer = MagicMock()
-        bot.candle_buffer.update = MagicMock(return_value=True)
-        bot.candle_buffer.signals = MagicMock(
+        bot.candle_buffer_1m = MagicMock()
+        bot.candle_buffer_1m.update = MagicMock(return_value=True)
+        bot.candle_buffer_1m.signals = MagicMock(
             return_value=Signals(close=1.50, adx=20.0),
         )
         bot._evaluate_trend = AsyncMock(side_effect=ValueError("test error"))
 
         # Should NOT raise
-        await bot.handle_kline_update(_kline_data())
+        await bot.handle_kline_1m_update(_kline_data())
 
 
 # ===========================================================================

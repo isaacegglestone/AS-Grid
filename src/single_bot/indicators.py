@@ -18,8 +18,14 @@ Design
 
 Seeding
 -------
-On startup, call ``await buf.seed(client, symbol)`` to prefill the buffer
-from the REST kline endpoint so indicators are immediately valid.
+On startup, call ``await buf.seed(client, symbol)`` to prefill the buffer.
+The seed method first checks for a local parquet cache (the same files used
+by the backtest engine), giving instant warm-up with hundreds of candles.
+If no cache is found, it falls back to the REST kline endpoint.
+
+Cache search order (first match wins):
+  1. ``asBack/klines_cache/{symbol}_{interval}.parquet``  — repo-local / CI
+  2. ``~/git/data/asgrid-klines/{symbol}_{interval}.parquet`` — local dev copy
 
 Usage example
 -------------
@@ -37,12 +43,16 @@ Usage example
 
 from __future__ import annotations
 
+import logging
 import math
+import os
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -203,17 +213,87 @@ class CandleBuffer:
         self._live: Optional[Candle] = None   # current in-progress candle
 
     # ------------------------------------------------------------------
-    # Seeding from REST
+    # Seeding: parquet cache → REST fallback
     # ------------------------------------------------------------------
+
+    # Paths checked for a pre-generated parquet file (same as backtest engine).
+    _CACHE_DIRS: Tuple[str, ...] = (
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "asBack", "klines_cache"),
+        os.path.expanduser(os.path.join("~", "git", "data", "asgrid-klines")),
+    )
+
+    def _find_parquet(self, symbol: str) -> Optional[str]:
+        """Return the first existing parquet cache path, or ``None``."""
+        fname = f"{symbol}_{self.interval}.parquet"
+        for d in self._CACHE_DIRS:
+            path = os.path.join(d, fname)
+            if os.path.exists(path):
+                return path
+        return None
+
+    def _seed_from_parquet(self, path: str) -> int:
+        """
+        Load the most recent ``maxlen`` candles from a parquet file.
+
+        Returns the number of candles loaded.
+        """
+        import pandas as pd  # deferred import — only needed when cache exists
+
+        df = pd.read_parquet(path)
+        if df["open_time"].dt.tz is None:
+            df["open_time"] = df["open_time"].dt.tz_localize("UTC")
+
+        # Take the most recent `maxlen` rows (sorted ascending).
+        df = df.sort_values("open_time").tail(self.maxlen).reset_index(drop=True)
+
+        for _, row in df.iterrows():
+            self._closed.append(
+                Candle(
+                    ts=int(row["open_time"].timestamp() * 1000),
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=float(row["volume"]),
+                )
+            )
+        return len(df)
 
     async def seed(self, client: object, symbol: str) -> None:
         """
-        Prefill the buffer with historical candles from the REST API.
+        Prefill the buffer with historical candles.
 
-        ``client`` is a ``BitunixExchange`` instance.  Fetches ``maxlen``
-        candles (capped at 200 per request — the Bitunix API hard limit).
-        Makes multiple requests if ``maxlen > 200``.
+        **Strategy** (first success wins):
+
+        1. **Parquet cache** — loads the most recent ``maxlen`` candles from
+           the same parquet files used by the backtest engine:
+           - ``asBack/klines_cache/{symbol}_{interval}.parquet``
+           - ``~/git/data/asgrid-klines/{symbol}_{interval}.parquet``
+           This is instant (~milliseconds) and provides up to 6.5 years of
+           warm-up data for EMA/regime indicators.
+
+        2. **REST API fallback** — fetches ``maxlen`` candles from Bitunix
+           (capped at 200 per request).  Works everywhere but limited to
+           ~200 candles (~2 days at 15min).
         """
+        parquet_path = self._find_parquet(symbol)
+        if parquet_path is not None:
+            try:
+                count = self._seed_from_parquet(parquet_path)
+                logger.info(
+                    "Candle buffer seeded from parquet cache: %d candles (%s)",
+                    count,
+                    os.path.basename(parquet_path),
+                )
+                return
+            except Exception:
+                logger.warning(
+                    "Failed to seed from parquet %s — falling back to REST",
+                    parquet_path,
+                    exc_info=True,
+                )
+
+        # Fallback: REST API
         limit = min(self.maxlen, 200)
         candles_raw = await client.get_klines(symbol, self.interval, limit=limit)
         for c in candles_raw:
@@ -227,6 +307,7 @@ class CandleBuffer:
                     volume=float(c["volume"]),
                 )
             )
+        logger.info("Candle buffer seeded from REST API: %d candles", len(candles_raw))
 
     # ------------------------------------------------------------------
     # Live updates (called on every WS kline push ~500 ms)
@@ -305,8 +386,13 @@ class CandleBuffer:
         volumes = np.array([c.volume for c in candles], dtype=float)
 
         adx_val, plus_di, minus_di = self._adx(highs, lows, closes, self.adx_period)
-        atr_val, atr_prev_val      = self._atr(highs, lows, closes, self.atr_period,
-                                                prev_lookback=self.atr_accel_lookback)
+        _atr_result                = self._atr(highs, lows, closes, self.atr_period,
+                                               prev_lookback=self.atr_accel_lookback)
+        if isinstance(_atr_result, tuple):
+            atr_val, atr_prev_val = _atr_result
+        else:
+            atr_val = _atr_result
+            atr_prev_val = 0.0
         rsi_val                    = self._rsi(closes, self.rsi_period)
         bb_w                       = self._bb_width(closes, self.bb_period, self.bb_mult)
         ema_f                      = self._ema(closes, self.ema_fast)
