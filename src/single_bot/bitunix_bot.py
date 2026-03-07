@@ -53,6 +53,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from src.exchange.bitunix import BitunixExchange, WS_PUBLIC, WS_PRIVATE  # noqa: E402
 from src.single_bot.indicators import CandleBuffer, Signals  # noqa: E402
+from src.single_bot.state_manager import BotState, create_state_backend  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Load .env
@@ -141,6 +142,17 @@ GRID_SLEEP_ATR_THRESH: float = float(os.getenv("GRID_SLEEP_ATR_THRESH", "0.0")) 
 VEL_ATR_MULT:          float = float(os.getenv("VEL_ATR_MULT",          "0.0"))   # L5: dynamic velocity: threshold *= max(1, mult × ATR/SMA) (0=static)
 VEL_DIR_ONLY:          bool  = os.getenv("VEL_DIR_ONLY", "false").lower() == "true"  # L5b: only scale when price < directional EMA (bearish context)
 VEL_DIR_EMA_PERIOD:    int   = int(os.getenv("VEL_DIR_EMA_PERIOD",     "36"))    # L5c: EMA period for directional filter (36=default, 120=PM20 winner)
+
+# ---------------------------------------------------------------------------
+# State persistence (crash recovery)
+# ---------------------------------------------------------------------------
+# Default: atomic local file.  Set STATE_S3_BUCKET for S3 backup,
+# or STATE_DYNAMODB_TABLE for DynamoDB (HA deployments).
+# ---------------------------------------------------------------------------
+STATE_DIR:             str = os.getenv("STATE_DIR",             "state")
+STATE_S3_BUCKET:       str = os.getenv("STATE_S3_BUCKET",       "")
+STATE_S3_PREFIX:       str = os.getenv("STATE_S3_PREFIX",       "state")
+STATE_DYNAMODB_TABLE:  str = os.getenv("STATE_DYNAMODB_TABLE",  "")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -321,6 +333,15 @@ class GridTradingBot(BitunixExchange):
         # ── Gate state (cooldown counter for L1c) ────────────────────────
         self._gate_fire_counter: int = 0
 
+        # ── State persistence backend ────────────────────────────────────
+        self.state_backend = create_state_backend(
+            symbol=self.symbol,
+            state_dir=STATE_DIR,
+            s3_bucket=STATE_S3_BUCKET or None,
+            s3_prefix=STATE_S3_PREFIX,
+            dynamodb_table=STATE_DYNAMODB_TABLE or None,
+        )
+
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
@@ -340,6 +361,63 @@ class GridTradingBot(BitunixExchange):
         logger.info("Seeding candle buffer for %s…", self.symbol)
         await self.candle_buffer.seed(self, self.symbol)
         logger.info("Candle buffer ready – %d closed candles loaded", len(self.candle_buffer._closed))
+
+    # ------------------------------------------------------------------
+    # State persistence helpers
+    # ------------------------------------------------------------------
+
+    def _persist_state(self) -> None:
+        """Snapshot critical in-memory state to the configured backend."""
+        state = BotState(
+            trend_position=self.trend_position,
+            trend_mode=self.trend_mode,
+            trend_pending_dir=self.trend_pending_dir,
+            trend_confirm_counter=self.trend_confirm_counter,
+            trend_cooldown_counter=self.trend_cooldown_counter,
+            gate_fire_counter=self._gate_fire_counter,
+            symbol=self.symbol,
+        )
+        self.state_backend.save(state)
+
+    def _restore_state(self) -> None:
+        """
+        Restore persisted state from the configured backend.
+
+        Called once during ``run()`` after ``setup()`` but before entering
+        the WebSocket loop.  Logs a warning if a trend position is recovered
+        (indicates a previous crash while a trend trade was open).
+        """
+        state = self.state_backend.load()
+        if state is None:
+            logger.info("No persisted state to restore")
+            return
+        if state.symbol and state.symbol != self.symbol:
+            logger.warning(
+                "State file symbol mismatch: %s vs %s — ignoring",
+                state.symbol, self.symbol,
+            )
+            return
+
+        self.trend_position = state.trend_position
+        self.trend_mode = state.trend_mode
+        self.trend_pending_dir = state.trend_pending_dir
+        self.trend_confirm_counter = state.trend_confirm_counter
+        self.trend_cooldown_counter = state.trend_cooldown_counter
+        self._gate_fire_counter = state.gate_fire_counter
+
+        logger.info(
+            "Restored state: trend_mode=%s confirm=%d cooldown=%d gate_fires=%d",
+            self.trend_mode, self.trend_confirm_counter,
+            self.trend_cooldown_counter, self._gate_fire_counter,
+        )
+        if self.trend_position:
+            tp = self.trend_position
+            logger.warning(
+                "⚠️ Recovered trend position from persisted state: "
+                "%s %s entry=%.4f qty=%d peak=%.4f",
+                tp["side"], self.symbol,
+                tp["entry"], tp["qty"], tp["peak"],
+            )
 
     # ------------------------------------------------------------------
     # Trend-capture helpers
@@ -483,6 +561,7 @@ class GridTradingBot(BitunixExchange):
                 f"🎯 *Trend {side.upper()} opened*\n"
                 f"Price: `{price:.4f}`  Qty: `{qty_contracts}`  Margin≈`${cap_margin:.0f}`"
             )
+            self._persist_state()
         else:
             logger.error("_open_trend_trade: market order failed for %s", side)
 
@@ -530,6 +609,7 @@ class GridTradingBot(BitunixExchange):
                 self.trend_mode = None
                 self.trend_confirm_counter = 0
                 self.trend_pending_dir = None
+            self._persist_state()
         else:
             logger.error("_close_trend_trade: market close order failed for %s", tp["side"])
 
@@ -714,6 +794,9 @@ class GridTradingBot(BitunixExchange):
                     self.trend_confirm_counter = 0
             else:
                 self.trend_cooldown_counter = 0
+
+        # Persist state after any trend evaluation (counters/mode may have changed)
+        self._persist_state()
 
     # ------------------------------------------------------------------
     # Grid price helpers
@@ -1109,6 +1192,9 @@ class GridTradingBot(BitunixExchange):
         We also schedule the stale-order watchdog as a background task.
         """
         await self.setup()
+
+        # Restore persisted state (trend position, counters) from last run
+        self._restore_state()
 
         self.long_position, self.short_position = await self.get_position()
         logger.info(

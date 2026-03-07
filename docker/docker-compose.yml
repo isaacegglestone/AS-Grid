@@ -1,6 +1,6 @@
 services:
   grid-trader:
-    build: 
+    build:
       context: ..
       dockerfile: docker/Dockerfile
       args:
@@ -9,7 +9,7 @@ services:
     image: grid-trading-bot:latest
     container_name: grid-trader
     restart: unless-stopped
-    
+
     # 环境变量 - 使用 .env 文件
     env_file:
       - ../config/.env
@@ -23,30 +23,35 @@ services:
       - ENABLE_NOTIFICATIONS=${ENABLE_NOTIFICATIONS:-true}
       - NOTIFICATION_INTERVAL=${NOTIFICATION_INTERVAL:-3600}
       - GRID_MODE=${GRID_MODE:-single}
-    
+      - STATE_DIR=${STATE_DIR:-state}
+      - STATE_S3_BUCKET=${STATE_S3_BUCKET:-}
+      - STATE_S3_PREFIX=${STATE_S3_PREFIX:-state}
+      - STATE_DYNAMODB_TABLE=${STATE_DYNAMODB_TABLE:-}
+
     # 挂载卷 - 持久化日志和配置
     volumes:
       - ../log:/app/log
-      - ../config:/app/config:ro  # 只读配置目录
-      - ../config/.env:/app/.env:ro  # 环境变量文件
-      - ../config/symbols.yaml:/app/config/symbols.yaml:ro  # 多币种配置文件
-      - ../config/symbols.json:/app/config/symbols.json:ro  # 多币种配置文件（可选）
-      - ../src/multi_bot/state:/app/src/multi_bot/state  # 装死状态文件目录
-    
+      - ../config:/app/config:ro # 只读配置目录
+      - ../config/.env:/app/.env:ro # 环境变量文件
+      - ../config/symbols.yaml:/app/config/symbols.yaml:ro # 多币种配置文件
+      - ../config/symbols.json:/app/config/symbols.json:ro # 多币种配置文件（可选）
+      - ../src/multi_bot/state:/app/src/multi_bot/state # 装死状态文件目录
+      - ../state:/app/state # single-bot state persistence (crash recovery)
+
     # 网络配置
     networks:
       - trader-network
-    
+
     # 资源限制
     deploy:
       resources:
         limits:
           memory: 512M
-          cpus: '0.5'
+          cpus: "0.5"
         reservations:
           memory: 256M
-          cpus: '0.25'
-    
+          cpus: "0.25"
+
     # 健康检查
     healthcheck:
       test: ["CMD", "python", "/app/scripts/health_check.py"]
@@ -54,7 +59,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-    
+
     # 日志配置
     logging:
       driver: "json-file"
@@ -68,4 +73,4 @@ networks:
 
 volumes:
   log-data:
-    driver: local 
+    driver: local
