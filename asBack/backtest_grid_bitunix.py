@@ -1787,6 +1787,112 @@ def _print_weekly_breakdown(bt: "GridOrderBacktester", initial_balance: float) -
     print("     " + "\u2500" * 60)
 
 
+def _print_daily_breakdown(bt: "GridOrderBacktester", initial_balance: float) -> None:
+    """Print a day-by-day equity + trade breakdown from the backtester.
+
+    For each calendar day shows:
+      - Opening / closing equity and daily % change
+      - Cumulative return from initial balance
+      - Number of trades executed that day
+      - Realized P&L for that day
+
+    Flags:
+      \u25c4  daily return < -1% (significant down day)
+      \u2605  daily return >  2% (notable up day)
+      \u00b7  zero-trade day (no activity)
+
+    Designed for the full 6.5-year backtest so we can identify exactly which
+    days drive or hurt performance and find remaining gaps.
+    """
+    if len(bt.equity_curve) < 2:
+        return
+
+    # \u2500\u2500 Equity curve by day \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    ec_df = pd.DataFrame(
+        bt.equity_curve,
+        columns=["time", "price", "equity", "realized", "unrealized"],
+    )
+    ec_df["time"] = pd.to_datetime(ec_df["time"])
+    ec_df = ec_df.set_index("time")
+
+    d_end = ec_df["equity"].resample("D").last().dropna()
+    if d_end.empty:
+        return
+
+    # \u2500\u2500 Trade counts & realized P&L by day \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    if bt.trade_history:
+        tr_df = pd.DataFrame(
+            bt.trade_history,
+            columns=[
+                "time", "action", "price", "quantity", "direction",
+                "pnl", "fee_cost", "gross_pnl", "unrealized_pnl", "total_equity",
+            ],
+        )
+        tr_df["time"] = pd.to_datetime(tr_df["time"])
+        tr_df["date"] = tr_df["time"].dt.date
+        trades_per_day   = tr_df.groupby("date").size()
+        realized_per_day = tr_df.groupby("date")["pnl"].sum()
+    else:
+        trades_per_day   = pd.Series(dtype=int)
+        realized_per_day = pd.Series(dtype=float)
+
+    # \u2500\u2500 Accumulators for summary stats \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    total_days      = 0
+    loss_days       = 0
+    zero_trade_days = 0
+    best_day        = ("", -999.0)
+    worst_day       = ("", 999.0)
+
+    prev_eq = initial_balance
+    header = (
+        "     \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n"
+        "     \u2502     Date     \u2502   Equity $  \u2502   Daily %   \u2502  Cum %  \u2502 Trades \u2502 Real P&L  \u2502\n"
+        "     \u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524"
+    )
+    print("     " + "\u2500" * 76)
+    print("     Day-by-day breakdown:")
+    print(header)
+
+    for d_date, eq in d_end.items():
+        d_return   = (eq - prev_eq) / prev_eq * 100 if prev_eq else 0.0
+        cum_return = (eq - initial_balance) / initial_balance * 100
+        day_key    = d_date.date() if hasattr(d_date, "date") else d_date
+        n_trades   = int(trades_per_day.get(day_key, 0))
+        day_pnl    = float(realized_per_day.get(day_key, 0.0))
+
+        flag = ""
+        if d_return < -1:
+            flag = " \u25c4"
+            loss_days += 1
+        elif d_return > 2:
+            flag = " \u2605"
+        if n_trades == 0:
+            flag += " \u00b7"
+            zero_trade_days += 1
+
+        total_days += 1
+        if d_return > best_day[1]:
+            best_day = (str(day_key), d_return)
+        if d_return < worst_day[1]:
+            worst_day = (str(day_key), d_return)
+
+        print(
+            f"     \u2502 {str(day_key):>12s} \u2502 ${eq:>10,.2f} \u2502 {d_return:>+9.2f}%  \u2502{cum_return:>+7.1f}% \u2502 {n_trades:>5d}  \u2502 ${day_pnl:>+8.2f} \u2502{flag}"
+        )
+        prev_eq = eq
+
+    print(
+        "     \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518"
+    )
+
+    # \u2500\u2500 Summary stats \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    active_days = total_days - zero_trade_days
+    print(f"     Summary: {total_days} days total, {active_days} active, {zero_trade_days} idle, {loss_days} loss days (< -1%)")
+    print(f"     Best day:  {best_day[0]}  {best_day[1]:>+.2f}%")
+    print(f"     Worst day: {worst_day[0]}  {worst_day[1]:>+.2f}%")
+    print("     " + "\u2500" * 76)
+
+
 # ===========================================================================
 # Grid-search orchestrator
 # ===========================================================================
@@ -1957,6 +2063,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
         )
         _print_quarterly_breakdown(bt, config["initial_balance"])
         _print_weekly_breakdown(bt, config["initial_balance"])
+        if config.get("daily_breakdown"):
+            _print_daily_breakdown(bt, config["initial_balance"])
 
         if best_result is None or result["return_pct"] > best_result["return_pct"]:
             best_result = result
@@ -4377,9 +4485,10 @@ _PM21_FULL_SETS = [
 ]
 
 XRP_PM_V21_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
-XRP_PM_V21_FULL_CONFIG["start_date"] = datetime(2019, 10, 1)   # Binance stitched start
-XRP_PM_V21_FULL_CONFIG["end_date"]   = datetime(2026, 3, 8)    # latest cache date
-XRP_PM_V21_FULL_CONFIG["param_sets"] = _PM21_FULL_SETS
+XRP_PM_V21_FULL_CONFIG["start_date"]      = datetime(2019, 10, 1)   # Binance stitched start
+XRP_PM_V21_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)    # latest cache date
+XRP_PM_V21_FULL_CONFIG["param_sets"]      = _PM21_FULL_SETS
+XRP_PM_V21_FULL_CONFIG["daily_breakdown"] = True                    # emit day-by-day table
 
 
 # ===========================================================================
