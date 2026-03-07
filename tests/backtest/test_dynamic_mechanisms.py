@@ -1616,3 +1616,159 @@ class TestPM18Combined:
         assert dual["vel_dir_only"] is True
         assert dual["vel_accel_only"] is True
         assert dual["vel_atr_mult"] == pytest.approx(1.0)
+
+
+# ── PM19: Combination Sweep Tests ─────────────────────────────────────────
+
+
+class TestPM19CombinationSweep:
+    """Tests for PM19 v29 — systematic combinations of PM18 winners."""
+
+    def test_all_pm19_sweep_configs_valid(self):
+        """All 12 PM19 sweep configs should have required base keys."""
+        from asBack.backtest_grid_bitunix import _PM19_SETS
+        assert len(_PM19_SETS) == 12
+        for cfg in _PM19_SETS:
+            assert "name" in cfg
+            assert cfg["name"].startswith("pm19_")
+            assert cfg.get("trend_detection") is True
+            assert cfg.get("trend_capture") is True
+
+    def test_pm19_configs_have_dirvel_base(self):
+        """Every PM19 config should inherit dirvel (vel_dir_only=True)."""
+        from asBack.backtest_grid_bitunix import _PM19_SETS
+        for cfg in _PM19_SETS:
+            assert cfg.get("vel_dir_only") is True, f"{cfg['name']} missing vel_dir_only"
+            assert cfg.get("vel_atr_mult", 0) > 0, f"{cfg['name']} missing vel_atr_mult"
+
+    def test_pm19_ema120_combos_have_correct_period(self):
+        """All EMA-120 strategies should set vel_dir_ema_period=120."""
+        from asBack.backtest_grid_bitunix import _PM19_SETS
+        ema120_names = [c["name"] for c in _PM19_SETS if "ema120" in c["name"]]
+        assert len(ema120_names) >= 8  # 8 combos use EMA-120
+        for cfg in _PM19_SETS:
+            if "ema120" in cfg["name"]:
+                assert cfg["vel_dir_ema_period"] == 120, f"{cfg['name']} has wrong EMA period"
+
+    def test_pm19_dual_combos_have_accel_filter(self):
+        """All dual-filter strategies should set vel_accel_only=True."""
+        from asBack.backtest_grid_bitunix import _PM19_SETS
+        dual_names = [c["name"] for c in _PM19_SETS if "dual" in c["name"]]
+        assert len(dual_names) >= 5  # 5 combos use dual
+        for cfg in _PM19_SETS:
+            if "dual" in cfg["name"]:
+                assert cfg.get("vel_accel_only") is True, f"{cfg['name']} missing vel_accel_only"
+
+    def test_pm19_m15_combos_have_correct_mult(self):
+        """All mult-1.5 strategies should set vel_atr_mult=1.5."""
+        from asBack.backtest_grid_bitunix import _PM19_SETS
+        m15_names = [c["name"] for c in _PM19_SETS if "m15" in c["name"]]
+        assert len(m15_names) >= 5  # 5 combos use mult 1.5
+        for cfg in _PM19_SETS:
+            if "m15" in cfg["name"]:
+                assert cfg["vel_atr_mult"] == pytest.approx(1.5), f"{cfg['name']} has wrong mult"
+
+    def test_pm19_c5_combos_have_correct_confirms(self):
+        """All confirm-5 strategies should override trend_confirm_candles to 5."""
+        from asBack.backtest_grid_bitunix import _PM19_SETS
+        c5_names = [c["name"] for c in _PM19_SETS if c["name"].endswith("_c5")]
+        assert len(c5_names) >= 5  # 5 combos use confirm-5
+        for cfg in _PM19_SETS:
+            if cfg["name"].endswith("_c5"):
+                assert cfg["trend_confirm_candles"] == 5, f"{cfg['name']} has wrong confirm count"
+
+    def test_pm19_c4_combos_have_correct_confirms(self):
+        """Confirm-4 compromise strategies should override trend_confirm_candles to 4."""
+        from asBack.backtest_grid_bitunix import _PM19_SETS
+        c4_cfgs = [c for c in _PM19_SETS if c["name"].endswith("_c4")]
+        assert len(c4_cfgs) == 2
+        for cfg in c4_cfgs:
+            assert cfg["trend_confirm_candles"] == 4, f"{cfg['name']} has wrong confirm count"
+            assert cfg["vel_dir_ema_period"] == 120, f"{cfg['name']} should also have EMA-120"
+
+    def test_pm19_non_confirm_combos_have_default_confirms(self):
+        """Strategies without confirm override should use default (3)."""
+        from asBack.backtest_grid_bitunix import _PM19_SETS
+        for cfg in _PM19_SETS:
+            if not cfg["name"].endswith(("_c4", "_c5")):
+                assert cfg["trend_confirm_candles"] == 3, (
+                    f"{cfg['name']} should have default confirm=3, got {cfg['trend_confirm_candles']}"
+                )
+
+    def test_pm19_kitchen_sink_has_all_four_winners(self):
+        """Kitchen-sink (ema120_dual_m15_c5) should combine all 4 PM18 winners."""
+        from asBack.backtest_grid_bitunix import _PM19_SETS
+        ks = next(c for c in _PM19_SETS if c["name"] == "pm19_ema120_dual_m15_c5")
+        assert ks["vel_dir_ema_period"] == 120
+        assert ks["vel_accel_only"] is True
+        assert ks["vel_atr_mult"] == pytest.approx(1.5)
+        assert ks["trend_confirm_candles"] == 5
+
+    def test_pm19_non_ema120_strategies_use_default_ema(self):
+        """Strategies without ema120 in name should use default EMA period (36)."""
+        from asBack.backtest_grid_bitunix import _PM19_SETS
+        for cfg in _PM19_SETS:
+            if "ema120" not in cfg["name"]:
+                period = cfg.get("vel_dir_ema_period", 36)
+                assert period == 36, f"{cfg['name']} should use default EMA-36, got {period}"
+
+    def test_pm19_no_duplicate_names(self):
+        """All PM19 strategy names should be unique."""
+        from asBack.backtest_grid_bitunix import _PM19_SETS
+        names = [c["name"] for c in _PM19_SETS]
+        assert len(names) == len(set(names)), f"Duplicate names: {names}"
+
+    def test_pm19_window_configs_exist(self):
+        """All three PM19 window configs should reference _PM19_SETS."""
+        from asBack.backtest_grid_bitunix import (
+            XRP_PM_V19_CONFIG,
+            XRP_PM_V19_2Y_CONFIG,
+            XRP_PM_V19_1Y_MID_CONFIG,
+            _PM19_SETS,
+        )
+        assert XRP_PM_V19_CONFIG["param_sets"] is _PM19_SETS
+        assert XRP_PM_V19_2Y_CONFIG["param_sets"] is _PM19_SETS
+        assert XRP_PM_V19_1Y_MID_CONFIG["param_sets"] is _PM19_SETS
+
+    def test_pm19_integration_ema120_c5_runs(self):
+        """EMA-120 + confirm 5 combo should run a backtest without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            vel_dir_ema_period=120,
+            trend_confirm_candles=5,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_pm19_integration_kitchen_sink_runs(self):
+        """Kitchen-sink combo (all 4 winners) should run without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.5,
+            vel_dir_only=True,
+            vel_dir_ema_period=120,
+            vel_accel_only=True,
+            trend_confirm_candles=5,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0
+
+    def test_pm19_integration_dual_m15_no_worse_than_70pct(self):
+        """Dual + mult 1.5 combo should retain at least 70% of baseline equity."""
+        closes = _slow_grind_up(n=150)
+        df = _make_df(closes, atr_mult=0.005)
+
+        bt_baseline = _run(df, _base_config())
+        bt_combo = _run(df, _base_config(
+            vel_atr_mult=1.5,
+            vel_dir_only=True,
+            vel_accel_only=True,
+        ))
+        assert bt_combo._equity(closes[-1]) >= bt_baseline._equity(closes[-1]) * 0.70, (
+            f"Dual+m15 equity ({bt_combo._equity(closes[-1]):.2f}) should be within "
+            f"70% of baseline ({bt_baseline._equity(closes[-1]):.2f})"
+        )

@@ -2884,7 +2884,7 @@ def _pm_v2_set(
     # v28 XRPPM18 — fine-tuning directional velocity
     vel_dir_ema_period: int = 36,        # EMA period for directional check (36=fast, 84=slow, 120/200=smoother)
 ) -> Dict[str, Any]:
-    """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA."""
+    """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28/v29 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA, combination sweep."""
     return {
         "name": name,
         "use_sl": True,
@@ -4180,6 +4180,86 @@ XRP_PM_V18_1Y_MID_CONFIG["param_sets"] = _PM18_SETS
 
 
 # ===========================================================================
+# v29 — XRPPM19: Combination sweep of PM18 top performers.
+#
+# PM18 identified four winning dimensions:
+#   1. EMA-120:   +100.68% 2y WF, +8.35% mid-year  (vs baseline +93.93%, +4.74%)
+#   2. Dual:      +98.19%  2y WF, +7.02% mid-year   (AND: vel_dir + vel_accel)
+#   3. Confirm 5: +84.71%  2y WF, +21.64% mid-year  (best crash protection)
+#   4. Mult 1.5:  +93.75%  2y WF, +12.05% mid-year  (higher multiplier)
+#
+# PM19 systematically combines these to find the optimal cocktail.
+# ===========================================================================
+
+_V19_BASE = {
+    **_V18_BASE,                          # h0, spacing=1.5%, leverage=2.0, atr_parabolic_mult=1.5
+}
+
+_PM19_SETS = [
+    # ── Two-way combinations ──────────────────────────────────
+    # EMA-120 + each other winner
+    {**_pm_v2_set("pm19_ema120_c5",          **_V19_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=120),
+     "trend_confirm_candles": 5},
+    _pm_v2_set("pm19_ema120_dual",           **_V19_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=120,
+               vel_accel_only=True),
+    _pm_v2_set("pm19_ema120_m15",            **_V19_BASE,
+               vel_atr_mult=1.5, vel_dir_only=True, vel_dir_ema_period=120),
+
+    # Other two-way combos (no EMA change — keep EMA-36 default)
+    {**_pm_v2_set("pm19_dual_c5",            **_V19_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True, vel_accel_only=True),
+     "trend_confirm_candles": 5},
+    _pm_v2_set("pm19_dual_m15",              **_V19_BASE,
+               vel_atr_mult=1.5, vel_dir_only=True, vel_accel_only=True),
+    {**_pm_v2_set("pm19_m15_c5",             **_V19_BASE,
+               vel_atr_mult=1.5, vel_dir_only=True),
+     "trend_confirm_candles": 5},
+
+    # ── Three-way combinations ────────────────────────────────
+    {**_pm_v2_set("pm19_ema120_dual_c5",     **_V19_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=120,
+               vel_accel_only=True),
+     "trend_confirm_candles": 5},
+    {**_pm_v2_set("pm19_ema120_m15_c5",      **_V19_BASE,
+               vel_atr_mult=1.5, vel_dir_only=True, vel_dir_ema_period=120),
+     "trend_confirm_candles": 5},
+    _pm_v2_set("pm19_ema120_dual_m15",       **_V19_BASE,
+               vel_atr_mult=1.5, vel_dir_only=True, vel_dir_ema_period=120,
+               vel_accel_only=True),
+
+    # ── Four-way kitchen sink ─────────────────────────────────
+    {**_pm_v2_set("pm19_ema120_dual_m15_c5", **_V19_BASE,
+               vel_atr_mult=1.5, vel_dir_only=True, vel_dir_ema_period=120,
+               vel_accel_only=True),
+     "trend_confirm_candles": 5},
+
+    # ── Confirm 4 compromises (between default 3 and winner 5) ─
+    {**_pm_v2_set("pm19_ema120_c4",          **_V19_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=120),
+     "trend_confirm_candles": 4},
+    {**_pm_v2_set("pm19_ema120_dual_c4",     **_V19_BASE,
+               vel_atr_mult=1.0, vel_dir_only=True, vel_dir_ema_period=120,
+               vel_accel_only=True),
+     "trend_confirm_candles": 4},
+]
+
+XRP_PM_V19_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V19_CONFIG["param_sets"] = _PM19_SETS
+
+XRP_PM_V19_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V19_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V19_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V19_2Y_CONFIG["param_sets"] = _PM19_SETS
+
+XRP_PM_V19_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V19_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V19_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V19_1Y_MID_CONFIG["param_sets"] = _PM19_SETS
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -4649,6 +4729,21 @@ if __name__ == "__main__":
         print("  v28 XRPPM18 push dirvel limits — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V18_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM19", "PM19"):
+        print("\n" + "=" * 60)
+        print("  v29 XRPPM19 combination sweep — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V19_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v29 XRPPM19 combination sweep — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V19_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v29 XRPPM19 combination sweep — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V19_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")

@@ -70,6 +70,8 @@ jobs:
             dispatch: XRPPM17
           - name: "XRPPM18 — v28 push dirvel limits"
             dispatch: XRPPM18
+          - name: "XRPPM19 — v29 combination sweep"
+            dispatch: XRPPM19
 
     steps:
       - uses: actions/checkout@v4
