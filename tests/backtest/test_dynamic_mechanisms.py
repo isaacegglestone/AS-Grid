@@ -1877,3 +1877,71 @@ class TestPM20MultFineTune:
         )
         bt = _run(df, cfg)
         assert bt.balance > 0
+
+
+# ── PM21: Fine-Grain Cliff Mapping Tests ──────────────────────────────────
+
+
+class TestPM21FineGrainCliff:
+    """Tests for PM21 v31 — fine-grain multiplier cliff mapping (1.54–1.70)."""
+
+    def test_all_pm21_sweep_configs_valid(self):
+        """All 9 PM21 sweep configs should have required base keys."""
+        from asBack.backtest_grid_bitunix import _PM21_SETS
+        assert len(_PM21_SETS) == 9
+        for cfg in _PM21_SETS:
+            assert "name" in cfg
+            assert cfg["name"].startswith("pm21_")
+            assert cfg.get("trend_detection") is True
+            assert cfg.get("trend_capture") is True
+
+    def test_pm21_all_use_ema120(self):
+        """Every PM21 config should use EMA-120."""
+        from asBack.backtest_grid_bitunix import _PM21_SETS
+        for cfg in _PM21_SETS:
+            assert cfg["vel_dir_ema_period"] == 120, f"{cfg['name']} has wrong EMA"
+
+    def test_pm21_multiplier_sweep_even_steps(self):
+        """Mult sweep should cover 1.54–1.70 in 0.02 steps."""
+        from asBack.backtest_grid_bitunix import _PM21_SETS
+        mults = sorted(c["vel_atr_mult"] for c in _PM21_SETS)
+        expected = [1.54, 1.56, 1.58, 1.60, 1.62, 1.64, 1.66, 1.68, 1.70]
+        assert mults == pytest.approx(expected), f"Expected {expected}, got {mults}"
+
+    def test_pm21_baseline_matches_pm20_winner(self):
+        """PM21 baseline should match PM20 winner at mult=1.60."""
+        from asBack.backtest_grid_bitunix import _PM21_SETS
+        baseline = next(c for c in _PM21_SETS if c["name"] == "pm21_baseline")
+        assert baseline["vel_atr_mult"] == pytest.approx(1.60)
+        assert baseline["vel_dir_only"] is True
+        assert baseline["vel_dir_ema_period"] == 120
+
+    def test_pm21_no_duplicate_names(self):
+        """All PM21 strategy names should be unique."""
+        from asBack.backtest_grid_bitunix import _PM21_SETS
+        names = [c["name"] for c in _PM21_SETS]
+        assert len(names) == len(set(names))
+
+    def test_pm21_window_configs_exist(self):
+        """All three PM21 window configs should reference _PM21_SETS."""
+        from asBack.backtest_grid_bitunix import (
+            XRP_PM_V21_CONFIG,
+            XRP_PM_V21_2Y_CONFIG,
+            XRP_PM_V21_1Y_MID_CONFIG,
+            _PM21_SETS,
+        )
+        assert XRP_PM_V21_CONFIG["param_sets"] is _PM21_SETS
+        assert XRP_PM_V21_2Y_CONFIG["param_sets"] is _PM21_SETS
+        assert XRP_PM_V21_1Y_MID_CONFIG["param_sets"] is _PM21_SETS
+
+    def test_pm21_integration_cliff_edge_runs(self):
+        """Strategy at cliff edge (m1.68) should run without crash."""
+        closes = _slow_grind_up(n=150)
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.68,
+            vel_dir_only=True,
+            vel_dir_ema_period=120,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0

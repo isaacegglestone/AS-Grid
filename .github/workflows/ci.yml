@@ -74,6 +74,8 @@ jobs:
             dispatch: XRPPM19
           - name: "XRPPM20 — v30 mult fine-tune"
             dispatch: XRPPM20
+          - name: "XRPPM21 — v31 fine-grain cliff"
+            dispatch: XRPPM21
 
     steps:
       - uses: actions/checkout@v4

@@ -3,7 +3,7 @@ asBack/backtest_grid_bitunix.py
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Bitunix-flavoured grid backtest, based on backtest_grid_auto.py.
 
-Sweep history: v16–v29 (PM6–PM19).  v30 = PM20 multiplier fine-tune.
+Sweep history: v16–v31 (PM6–PM21).  v31 = PM21 fine-grain mult cliff.
 
 Differences from the Binance version
 --------------------------------------
@@ -4321,6 +4321,53 @@ XRP_PM_V20_1Y_MID_CONFIG["param_sets"] = _PM20_SETS
 
 
 # ===========================================================================
+# v31 — XRPPM21: Fine-grain multiplier cliff-mapping.
+#
+# PM20 showed a massive cliff between mult 1.6 (+258.28%) and 1.7 (-1.32%).
+# This sweep uses 0.02 steps from 1.54 to 1.70 to pinpoint the exact edge.
+# All strategies use EMA-120 + vel_dir_only=True (the PM19/PM20 base).
+# ===========================================================================
+
+_V21_BASE = {
+    **_V20_BASE,
+}
+
+_PM21_SETS = [
+    _pm_v2_set("pm21_m154",     **_V21_BASE,
+               vel_atr_mult=1.54, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm21_m156",     **_V21_BASE,
+               vel_atr_mult=1.56, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm21_m158",     **_V21_BASE,
+               vel_atr_mult=1.58, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm21_baseline", **_V21_BASE,       # control = PM20 winner
+               vel_atr_mult=1.60, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm21_m162",     **_V21_BASE,
+               vel_atr_mult=1.62, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm21_m164",     **_V21_BASE,
+               vel_atr_mult=1.64, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm21_m166",     **_V21_BASE,
+               vel_atr_mult=1.66, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm21_m168",     **_V21_BASE,
+               vel_atr_mult=1.68, vel_dir_only=True, vel_dir_ema_period=120),
+    _pm_v2_set("pm21_m170",     **_V21_BASE,       # cliff reference
+               vel_atr_mult=1.70, vel_dir_only=True, vel_dir_ema_period=120),
+]
+
+XRP_PM_V21_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V21_CONFIG["param_sets"] = _PM21_SETS
+
+XRP_PM_V21_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V21_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V21_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V21_2Y_CONFIG["param_sets"] = _PM21_SETS
+
+XRP_PM_V21_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V21_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V21_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V21_1Y_MID_CONFIG["param_sets"] = _PM21_SETS
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -4820,6 +4867,21 @@ if __name__ == "__main__":
         print("  v30 XRPPM20 mult fine-tune — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V20_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM21", "PM21"):
+        print("\n" + "=" * 60)
+        print("  v31 XRPPM21 fine-grain cliff — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V21_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v31 XRPPM21 fine-grain cliff — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V21_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v31 XRPPM21 fine-grain cliff — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V21_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
