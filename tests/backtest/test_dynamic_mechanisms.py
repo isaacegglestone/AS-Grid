@@ -1945,3 +1945,86 @@ class TestPM21FineGrainCliff:
         )
         bt = _run(df, cfg)
         assert bt.balance > 0
+
+
+# ── PM22: Combos at Mult 1.6 Tests ───────────────────────────────────────
+
+
+class TestPM22CombosAtM16:
+    """Tests for PM22 v32 — PM19 combos re-tested at optimal mult 1.6."""
+
+    def test_all_pm22_sweep_configs_valid(self):
+        """All 8 PM22 sweep configs should have required base keys."""
+        from asBack.backtest_grid_bitunix import _PM22_SETS
+        assert len(_PM22_SETS) == 8
+        for cfg in _PM22_SETS:
+            assert "name" in cfg
+            assert cfg["name"].startswith("pm22_")
+            assert cfg.get("trend_detection") is True
+            assert cfg.get("trend_capture") is True
+
+    def test_pm22_all_use_mult16_ema120(self):
+        """Every PM22 config should use mult=1.6 and EMA-120."""
+        from asBack.backtest_grid_bitunix import _PM22_SETS
+        for cfg in _PM22_SETS:
+            assert cfg["vel_atr_mult"] == pytest.approx(1.6), f"{cfg['name']} wrong mult"
+            assert cfg["vel_dir_ema_period"] == 120, f"{cfg['name']} wrong EMA"
+
+    def test_pm22_confirm_overrides(self):
+        """Confirm candle overrides should be correct."""
+        from asBack.backtest_grid_bitunix import _PM22_SETS
+        c2 = next(c for c in _PM22_SETS if c["name"] == "pm22_c2")
+        c4 = next(c for c in _PM22_SETS if c["name"] == "pm22_c4")
+        c5 = next(c for c in _PM22_SETS if c["name"] == "pm22_c5")
+        assert c2["trend_confirm_candles"] == 2
+        assert c4["trend_confirm_candles"] == 4
+        assert c5["trend_confirm_candles"] == 5
+
+    def test_pm22_dual_combos_have_accel(self):
+        """All dual-filter strategies should have vel_accel_only=True."""
+        from asBack.backtest_grid_bitunix import _PM22_SETS
+        for cfg in _PM22_SETS:
+            if "dual" in cfg["name"]:
+                assert cfg.get("vel_accel_only") is True, f"{cfg['name']} missing accel"
+
+    def test_pm22_baseline_matches_pm20_winner(self):
+        """PM22 baseline should match PM20 winner exactly."""
+        from asBack.backtest_grid_bitunix import _PM22_SETS
+        baseline = next(c for c in _PM22_SETS if c["name"] == "pm22_baseline")
+        assert baseline["vel_atr_mult"] == pytest.approx(1.6)
+        assert baseline["vel_dir_only"] is True
+        assert baseline["vel_dir_ema_period"] == 120
+        assert baseline.get("vel_accel_only") is not True
+        assert baseline["trend_confirm_candles"] == 3  # default
+
+    def test_pm22_no_duplicate_names(self):
+        """All PM22 strategy names should be unique."""
+        from asBack.backtest_grid_bitunix import _PM22_SETS
+        names = [c["name"] for c in _PM22_SETS]
+        assert len(names) == len(set(names))
+
+    def test_pm22_window_configs_exist(self):
+        """All three PM22 window configs should reference _PM22_SETS."""
+        from asBack.backtest_grid_bitunix import (
+            XRP_PM_V22_CONFIG,
+            XRP_PM_V22_2Y_CONFIG,
+            XRP_PM_V22_1Y_MID_CONFIG,
+            _PM22_SETS,
+        )
+        assert XRP_PM_V22_CONFIG["param_sets"] is _PM22_SETS
+        assert XRP_PM_V22_2Y_CONFIG["param_sets"] is _PM22_SETS
+        assert XRP_PM_V22_1Y_MID_CONFIG["param_sets"] is _PM22_SETS
+
+    def test_pm22_integration_dual_c5_runs(self):
+        """Dual + confirm 5 at mult 1.6 should run without error."""
+        closes = _flat_then_spike_up()
+        df = _make_df(closes, atr_mult=0.005)
+        cfg = _base_config(
+            vel_atr_mult=1.6,
+            vel_dir_only=True,
+            vel_dir_ema_period=120,
+            vel_accel_only=True,
+            trend_confirm_candles=5,
+        )
+        bt = _run(df, cfg)
+        assert bt.balance > 0

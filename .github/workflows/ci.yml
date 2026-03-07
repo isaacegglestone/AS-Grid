@@ -6,11 +6,11 @@ on:
   pull_request:
     branches: [main]
 
-# Cancel previous runs on the same branch — with parallel jobs there's no
-# sequential chain to protect, so a new push should supersede the old run.
+# Allow multiple CI runs on the same branch to run in parallel.
+# Each push gets its own independent run — no cancellation.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -76,6 +76,8 @@ jobs:
             dispatch: XRPPM20
           - name: "XRPPM21 — v31 fine-grain cliff"
             dispatch: XRPPM21
+          - name: "XRPPM22 — v32 combos at m1.6"
+            dispatch: XRPPM22
 
     steps:
       - uses: actions/checkout@v4

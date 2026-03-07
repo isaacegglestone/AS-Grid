@@ -3,7 +3,7 @@ asBack/backtest_grid_bitunix.py
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Bitunix-flavoured grid backtest, based on backtest_grid_auto.py.
 
-Sweep history: v16–v31 (PM6–PM21).  v31 = PM21 fine-grain mult cliff.
+Sweep history: v16–v32 (PM6–PM22).  v32 = PM22 combos at mult 1.6.
 
 Differences from the Binance version
 --------------------------------------
@@ -4368,6 +4368,66 @@ XRP_PM_V21_1Y_MID_CONFIG["param_sets"] = _PM21_SETS
 
 
 # ===========================================================================
+# v32 — XRPPM22: PM19 combination winners re-tested at mult 1.6.
+#
+# PM20 showed mult 1.6 (+258%) is far superior to 1.5 (+206%).  Now re-test
+# the PM19-style combinations (dual filter, confirm candles) at this new
+# optimal multiplier to see if they further improve or interfere.
+# ===========================================================================
+
+_V22_BASE = {
+    **_V21_BASE,
+}
+
+_PM22_SETS = [
+    # ── Baseline ────────────────────────────────────────────────
+    _pm_v2_set("pm22_baseline",   **_V22_BASE,       # control = PM20 winner
+               vel_atr_mult=1.6, vel_dir_only=True, vel_dir_ema_period=120),
+
+    # ── Single additions ────────────────────────────────────────
+    _pm_v2_set("pm22_dual",       **_V22_BASE,
+               vel_atr_mult=1.6, vel_dir_only=True, vel_dir_ema_period=120,
+               vel_accel_only=True),
+    {**_pm_v2_set("pm22_c2",     **_V22_BASE,
+               vel_atr_mult=1.6, vel_dir_only=True, vel_dir_ema_period=120),
+     "trend_confirm_candles": 2},
+    {**_pm_v2_set("pm22_c4",     **_V22_BASE,
+               vel_atr_mult=1.6, vel_dir_only=True, vel_dir_ema_period=120),
+     "trend_confirm_candles": 4},
+    {**_pm_v2_set("pm22_c5",     **_V22_BASE,
+               vel_atr_mult=1.6, vel_dir_only=True, vel_dir_ema_period=120),
+     "trend_confirm_candles": 5},
+
+    # ── Dual + confirm combinations ────────────────────────────
+    {**_pm_v2_set("pm22_dual_c2", **_V22_BASE,
+               vel_atr_mult=1.6, vel_dir_only=True, vel_dir_ema_period=120,
+               vel_accel_only=True),
+     "trend_confirm_candles": 2},
+    {**_pm_v2_set("pm22_dual_c4", **_V22_BASE,
+               vel_atr_mult=1.6, vel_dir_only=True, vel_dir_ema_period=120,
+               vel_accel_only=True),
+     "trend_confirm_candles": 4},
+    {**_pm_v2_set("pm22_dual_c5", **_V22_BASE,
+               vel_atr_mult=1.6, vel_dir_only=True, vel_dir_ema_period=120,
+               vel_accel_only=True),
+     "trend_confirm_candles": 5},
+]
+
+XRP_PM_V22_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)   # 6m OOS Aug 2025 → Feb 2026
+XRP_PM_V22_CONFIG["param_sets"] = _PM22_SETS
+
+XRP_PM_V22_2Y_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V22_2Y_CONFIG["start_date"] = datetime(2024, 2, 28)
+XRP_PM_V22_2Y_CONFIG["end_date"]   = datetime(2026, 2, 28)
+XRP_PM_V22_2Y_CONFIG["param_sets"] = _PM22_SETS
+
+XRP_PM_V22_1Y_MID_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V22_1Y_MID_CONFIG["start_date"] = datetime(2024, 8, 1)
+XRP_PM_V22_1Y_MID_CONFIG["end_date"]   = datetime(2025, 8, 1)
+XRP_PM_V22_1Y_MID_CONFIG["param_sets"] = _PM22_SETS
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -4882,6 +4942,21 @@ if __name__ == "__main__":
         print("  v31 XRPPM21 fine-grain cliff — mid-year  (Aug 2024 → Aug 2025)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V21_1Y_MID_CONFIG)
+    elif symbol in ("XRPPM22", "PM22"):
+        print("\n" + "=" * 60)
+        print("  v32 XRPPM22 combos at m1.6 — 6-month OOS  (Aug 2025 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V22_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v32 XRPPM22 combos at m1.6 — 2-year walk-forward  (Feb 2024 → Feb 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V22_2Y_CONFIG)
+
+        print("\n" + "=" * 60)
+        print("  v32 XRPPM22 combos at m1.6 — mid-year  (Aug 2024 → Aug 2025)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V22_1Y_MID_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
