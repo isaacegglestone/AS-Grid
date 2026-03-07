@@ -94,6 +94,10 @@ jobs:
       - name: "Run backtest: ${{ matrix.dispatch }}"
         run: python asBack/backtest_grid_bitunix.py ${{ matrix.dispatch }}
 
+      - name: Run gap analysis
+        if: always()
+        run: python scripts/analyze_gaps.py bitunix_best_grid_trades.csv bitunix_best_equity_curve.csv
+
       - name: Upload backtest results
         if: always()
         uses: actions/upload-artifact@v4
@@ -103,6 +107,8 @@ jobs:
             bitunix_grid_search_results.csv
             bitunix_best_grid_trades.csv
             bitunix_best_equity_curve.csv
+            gap_analysis_daily.csv
+            gap_analysis_report.html
           if-no-files-found: warn
           retention-days: 90
 
