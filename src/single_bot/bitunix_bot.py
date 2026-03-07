@@ -138,6 +138,8 @@ ATR_ACCEL_LOOKBACK:    int   = int(os.getenv("ATR_ACCEL_LOOKBACK",      "0"))   
 HTF_EMA_ALIGN:         bool  = os.getenv("HTF_EMA_ALIGN", "false").lower() == "true"  # L2: require HTF EMA agreement for trend entry
 REGIME_VOTE_MODE:      bool  = os.getenv("REGIME_VOTE_MODE", "false").lower() == "true"  # L3: 2-of-3 vote for bear halt
 GRID_SLEEP_ATR_THRESH: float = float(os.getenv("GRID_SLEEP_ATR_THRESH", "0.0"))   # L4: pause grid when ATR/price < threshold
+VEL_ATR_MULT:          float = float(os.getenv("VEL_ATR_MULT",          "0.0"))   # L5: dynamic velocity: threshold *= max(1, mult × ATR/SMA) (0=static)
+VEL_DIR_ONLY:          bool  = os.getenv("VEL_DIR_ONLY", "false").lower() == "true"  # L5b: only scale when price < EMA-36 (bearish context)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -228,6 +230,8 @@ class GridTradingBot(BitunixExchange):
         self.htf_ema_align: bool = HTF_EMA_ALIGN                   # L2: False=off
         self.regime_vote_mode: bool = REGIME_VOTE_MODE             # L3: False=off
         self.grid_sleep_atr_thresh: float = GRID_SLEEP_ATR_THRESH  # L4: 0=off
+        self.vel_atr_mult: float = VEL_ATR_MULT              # L5: dynamic velocity scaling (0=off)
+        self.vel_dir_only: bool = VEL_DIR_ONLY                # L5b: directional filter (bearish only)
         self.initial_quantity = initial_quantity
         self.leverage = leverage
 
@@ -548,8 +552,46 @@ class GridTradingBot(BitunixExchange):
         if past_price <= 0:
             return
         velocity = (price - past_price) / past_price
-        trending_up   = velocity >  TREND_VELOCITY_PCT
-        trending_down = velocity < -TREND_VELOCITY_PCT
+
+        # ── L5: Dynamic velocity threshold (mirrors backtester v26/v27) ──
+        # Scale the static velocity thresholds proportionally to the ATR
+        # spike ratio (ATR / ATR_SMA).  In normal vol the floor keeps the
+        # threshold unchanged; in high-vol (ratio 3-4×) the threshold
+        # rises so post-parabolic bounces are ignored.
+        #   threshold = static_vel × max(1.0, vel_atr_mult × ATR/SMA)
+        #
+        # L5b: vel_dir_only — only scale when price < EMA-36 (bearish
+        # context).  When price is above the fast EMA the market is
+        # bullish and we leave the static threshold untouched to catch
+        # legitimate uptrends.
+        effective_vel_pct = TREND_VELOCITY_PCT
+        effective_cap_pct = TREND_CAP_VEL_PCT
+        if self.vel_atr_mult > 0 and self.latest_signals is not None:
+            sig = self.latest_signals
+            if sig.atr_sma > 0:
+                _apply_vel_scaling = True
+
+                # L5b: Directional filter — only scale in bearish context
+                if self.vel_dir_only and sig.htf_ema_fast > 0:
+                    if price >= sig.htf_ema_fast:
+                        _apply_vel_scaling = False  # bullish — leave static
+
+                if _apply_vel_scaling:
+                    _atr_ratio = sig.atr / sig.atr_sma
+                    _vel_scale = max(1.0, self.vel_atr_mult * _atr_ratio)
+                    effective_vel_pct *= _vel_scale
+                    effective_cap_pct *= _vel_scale
+                    if _vel_scale > 1.05:
+                        logger.debug(
+                            "⚡ DirVel scaled: vel_thr=%.4f→%.4f  cap=%.4f→%.4f  "
+                            "ATR/SMA=%.2f  scale=%.2f  dir_only=%s",
+                            TREND_VELOCITY_PCT, effective_vel_pct,
+                            TREND_CAP_VEL_PCT, effective_cap_pct,
+                            _atr_ratio, _vel_scale, self.vel_dir_only,
+                        )
+
+        trending_up   = velocity >  effective_vel_pct
+        trending_down = velocity < -effective_vel_pct
 
         # ── 2. Manage existing position (trailing stop) ─────────────────
         if self.trend_position is not None:
@@ -615,7 +657,7 @@ class GridTradingBot(BitunixExchange):
             adx_now = self.latest_signals.adx if self.latest_signals else 0.0
             if (
                 self.trend_position is None
-                and velocity >= TREND_CAP_VEL_PCT
+                and velocity >= effective_cap_pct         # L5: dynamic cap
                 and adx_now >= ADX_MIN_TREND
                 and not self._parabolic_gate()     # Layer 1
                 and (not self.htf_ema_align or self._htf_bull())  # Layer 2
@@ -645,7 +687,7 @@ class GridTradingBot(BitunixExchange):
             adx_now = self.latest_signals.adx if self.latest_signals else 0.0
             if (
                 self.trend_position is None
-                and abs(velocity) >= TREND_CAP_VEL_PCT
+                and abs(velocity) >= effective_cap_pct    # L5: dynamic cap
                 and adx_now >= ADX_MIN_TREND
                 and not self._parabolic_gate()      # Layer 1
                 and (not self.htf_ema_align or self._htf_bear())  # Layer 2
@@ -654,7 +696,7 @@ class GridTradingBot(BitunixExchange):
 
         # ── 5. Cooldown when trend fades (no open position) ─────────────
         elif self.trend_mode is not None and self.trend_position is None:
-            if abs(velocity) < TREND_VELOCITY_PCT * 0.5:
+            if abs(velocity) < effective_vel_pct * 0.5:
                 self.trend_cooldown_counter += 1
                 if self.trend_cooldown_counter >= TREND_COOLDOWN_CANDLES:
                     logger.info(

@@ -566,3 +566,263 @@ class TestEvaluateTrendEndToEnd:
 
         assert bot.trend_position is None
         assert bot.trend_mode is None
+
+
+# ===========================================================================
+# TestDirVelScaling — L5/L5b dynamic velocity threshold
+# ===========================================================================
+
+
+class TestDirVelScaling:
+    """
+    Tests for the directional velocity scaling mechanism (L5/L5b) that
+    dynamically adjusts TREND_VELOCITY_PCT and TREND_CAP_VEL_PCT using
+    the ATR/SMA ratio, optionally gated by bearish context (vel_dir_only).
+    """
+
+    def _dirvel_bot(
+        self,
+        vel_atr_mult: float = 0.0,
+        vel_dir_only: bool = False,
+        atr: float = 0.01,
+        atr_sma: float = 0.01,
+        htf_ema_fast: float = 1.0,
+        base_close: float = 1.0,
+    ) -> GridTradingBot:
+        """Create a bot with dirvel params and appropriate signals."""
+        bot = _make_bot()
+        bot.vel_atr_mult = vel_atr_mult
+        bot.vel_dir_only = vel_dir_only
+        bot.candle_buffer = _seeded_buffer(n=15, base_close=base_close)
+        bot.trend_pending_dir = None
+        bot.trend_confirm_counter = 0
+        bot.latest_signals = Signals(
+            adx=30.0,
+            atr=atr,
+            atr_sma=atr_sma,
+            htf_ema_fast=htf_ema_fast,
+        )
+        return bot
+
+    # -- Defaults off (vel_atr_mult=0) → static thresholds -----------------
+
+    @pytest.mark.asyncio
+    async def test_mult_zero_uses_static_threshold(self):
+        """vel_atr_mult=0.0 → static TREND_VELOCITY_PCT, no scaling."""
+        bot = self._dirvel_bot(vel_atr_mult=0.0, atr=0.10, atr_sma=0.01)
+        # Velocity ≈ 4.5% which is > TREND_VELOCITY_PCT (4%)
+        # With static threshold, this should register as trending_up
+        price = 1.0 + TREND_LOOKBACK_CANDLES * 0.001 + TREND_VELOCITY_PCT + 0.005
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir == "up"
+
+    @pytest.mark.asyncio
+    async def test_mult_zero_no_scaling_even_with_high_atr(self):
+        """Even with ATR/SMA ratio of 10×, mult=0 means no scaling."""
+        bot = self._dirvel_bot(vel_atr_mult=0.0, atr=0.10, atr_sma=0.01)
+        # Price gives velocity ≈ 5% (just above 4% static threshold)
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir == "up"
+
+    # -- Scaling active (vel_atr_mult > 0, no directional filter) ----------
+
+    @pytest.mark.asyncio
+    async def test_scaling_raises_threshold(self):
+        """vel_atr_mult=1.0 with ATR/SMA=3.0 → threshold*3, blocking a 5% move."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=False,
+            atr=0.03,         # 3× the SMA
+            atr_sma=0.01,
+        )
+        # Velocity ≈ 5%: above static 4% but below scaled 12% (4% × 3.0)
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        # Should NOT be trending — threshold scaled up
+        assert bot.trend_pending_dir is None
+
+    @pytest.mark.asyncio
+    async def test_scaling_allows_huge_move(self):
+        """A 15% move exceeds even a 3× scaled threshold (12%)."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=False,
+            atr=0.03,
+            atr_sma=0.01,
+        )
+        price = 1.15 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir == "up"
+
+    @pytest.mark.asyncio
+    async def test_scaling_floor_at_one(self):
+        """ATR/SMA < 1 → scale clamped at 1.0, threshold unchanged."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=False,
+            atr=0.005,        # below SMA
+            atr_sma=0.01,
+        )
+        # 5% velocity, above static 4% threshold
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir == "up"
+
+    # -- Directional filter (L5b: vel_dir_only) ----------------------------
+
+    @pytest.mark.asyncio
+    async def test_dir_only_bullish_skips_scaling(self):
+        """price ≥ EMA-36 (bullish) → scaling NOT applied, static threshold."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            atr=0.03,
+            atr_sma=0.01,
+            htf_ema_fast=1.0,  # EMA at 1.0 — price will be above
+        )
+        # 5% velocity, above static 4%, below scaled 12%
+        # Since price ≥ EMA → no scaling → should trend
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir == "up"
+
+    @pytest.mark.asyncio
+    async def test_dir_only_bearish_applies_scaling(self):
+        """price < EMA-36 (bearish) → scaling applied, threshold raised."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            atr=0.03,
+            atr_sma=0.01,
+            htf_ema_fast=2.0,  # EMA at 2.0 — price (≈1.05) well below
+        )
+        # 5% velocity, above static 4% but below scaled 12%
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        # Bearish context → scaling applied → threshold raised → NOT trending
+        assert bot.trend_pending_dir is None
+
+    @pytest.mark.asyncio
+    async def test_dir_only_bearish_huge_move_still_trends(self):
+        """Even in bearish context, a sufficiently large move trends."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            atr=0.03,
+            atr_sma=0.01,
+            htf_ema_fast=2.0,  # bearish
+        )
+        # 15% velocity exceeds 12% scaled threshold
+        price = 1.15 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir == "up"
+
+    # -- Cap velocity also scaled ------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_cap_velocity_scaled_blocks_entry(self):
+        """Scaled cap threshold blocks trend capture entry."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=False,
+            atr=0.03,         # 3× SMA
+            atr_sma=0.01,
+        )
+        bot.balance = {"USDT": {"available": 1000.0, "margin": 0.0}}
+        bot.short_position = 0.0
+        bot.place_market_order = AsyncMock(return_value={"orderId": "x"})
+        bot.cancel_orders_for_side = AsyncMock()
+        bot.send_telegram_message = AsyncMock()
+
+        # Build up to confirmation threshold with very large velocity (15%)
+        # to exceed the scaled vel threshold (12%) and register trending
+        for i in range(TREND_CONFIRM_CANDLES):
+            price = 1.15 + i * 0.01 + TREND_LOOKBACK_CANDLES * 0.001
+            _append_candle(bot.candle_buffer, price, idx=15 + i)
+            await bot._evaluate_trend(price)
+
+        # trend_mode should flip — the velocity was 15% > scaled 12%
+        assert bot.trend_mode == "up"
+
+        # But capture position depends on velocity ≥ effective_cap_pct
+        # effective_cap = 0.06 × 3.0 = 0.18 (18%)
+        # velocity is only ≈ 15% → capture should NOT open
+        assert bot.trend_position is None
+
+    # -- Edge cases --------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_no_signals_uses_static(self):
+        """latest_signals=None → fallback to static thresholds."""
+        bot = self._dirvel_bot(vel_atr_mult=1.0, vel_dir_only=True)
+        bot.latest_signals = None
+        # 5% velocity above static 4% threshold
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir == "up"
+
+    @pytest.mark.asyncio
+    async def test_zero_atr_sma_uses_static(self):
+        """atr_sma=0 → division guard, static thresholds used."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0, atr=0.03, atr_sma=0.0,
+        )
+        # 5% velocity above static 4% threshold
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir == "up"
+
+    @pytest.mark.asyncio
+    async def test_zero_ema_fast_skips_dir_filter(self):
+        """htf_ema_fast=0 → directional filter skipped (EMA not warm)."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=True,
+            atr=0.03,
+            atr_sma=0.01,
+            htf_ema_fast=0.0,  # EMA not computed yet
+        )
+        # 5% velocity, above static 4% but below scaled 12%
+        # Without a valid EMA, directional filter can't activate →
+        # scaling still applies (conservative: scale when unsure)
+        price = 1.05 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_pending_dir is None  # scaled threshold blocks it
+
+    @pytest.mark.asyncio
+    async def test_cooldown_uses_effective_threshold(self):
+        """Cooldown velocity check uses effective (scaled) threshold."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=False,
+            atr=0.03,         # 3× SMA → effective_vel_pct ≈ 0.12
+            atr_sma=0.01,
+        )
+        bot.trend_mode = "up"
+        bot.trend_position = None
+        bot.trend_cooldown_counter = 0
+
+        # velocity ≈ 4% which is < 0.5 × static 4% = 2%?  No — 4% > 2%
+        # BUT with scaling: effective_vel_pct ≈ 12%, so 0.5 × 12% = 6%
+        # 4% velocity < 6% → cooldown should increment (scaled threshold)
+        price = 1.04 + TREND_LOOKBACK_CANDLES * 0.001
+        await bot._evaluate_trend(price)
+        assert bot.trend_cooldown_counter == 1
+
+    @pytest.mark.asyncio
+    async def test_trending_down_also_scaled(self):
+        """Downward velocity threshold is also scaled symmetrically."""
+        bot = self._dirvel_bot(
+            vel_atr_mult=1.0,
+            vel_dir_only=False,
+            atr=0.03,
+            atr_sma=0.01,
+            base_close=1.5,   # start higher so we can drop 5%
+        )
+        # 5% drop, above static -4% but below -12% scaled
+        past = bot.candle_buffer._closed[-TREND_LOOKBACK_CANDLES].close
+        price = past * 0.95   # -5% velocity
+        await bot._evaluate_trend(price)
+        # -5% is past static -4% threshold but not past scaled -12%
+        assert bot.trend_pending_dir is None
