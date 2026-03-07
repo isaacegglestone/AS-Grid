@@ -94,6 +94,18 @@ jobs:
       - name: "Run backtest: ${{ matrix.dispatch }}"
         run: python asBack/backtest_grid_bitunix.py ${{ matrix.dispatch }}
 
+      - name: Upload backtest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-${{ matrix.dispatch }}
+          path: |
+            bitunix_grid_search_results.csv
+            bitunix_best_grid_trades.csv
+            bitunix_best_equity_curve.csv
+          if-no-files-found: warn
+          retention-days: 90
+
   # ---------------------------------------------------------------------------
   # Stage 2: Tests on ephemeral EC2 — pauses for manual approval via the "ec2"
   #          GitHub Environment (Settings → Environments → ec2 → Required reviewers)
