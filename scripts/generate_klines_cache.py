@@ -1,5 +1,5 @@
 """
-scripts/generate_klines_cache.py
+scripts/generate_klines_cache.py  (v2 — stitched-cache rebuild 2026-03-08)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Pre-fetches klines and saves them as parquet files in ``asBack/klines_cache/``.
 Once generated, the backtest engine loads from disk instead of hitting the API.
