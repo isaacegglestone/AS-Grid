@@ -82,7 +82,8 @@ class GridOrderBacktester:
         self.trend_position: Optional[Dict] = None
 
         # Crash protection state
-        self.crash_halt_counter: int = 0   # candles remaining in velocity CB halt
+        self.crash_halt_counter: int = 0   # candles remaining in velocity CB halt (downside)
+        self.surge_halt_counter: int = 0   # candles remaining in surge CB halt (upside)
         self.dd_halt_counter: int = 0      # candles remaining in DD halt/resume pause
         self._gate_fire_counter: int = 0   # ATR gate consecutive fire count (Approach F cooldown)
 
@@ -493,10 +494,13 @@ class GridOrderBacktester:
             # ------------------------------------------------------------------
             if self.crash_halt_counter > 0:
                 self.crash_halt_counter -= 1
+            if self.surge_halt_counter > 0:
+                self.surge_halt_counter -= 1
             if self.dd_halt_counter > 0:
                 self.dd_halt_counter -= 1
-            halt_grid_longs = self.crash_halt_counter > 0   # velocity CB: blocks new long entries only
-            halt_all        = self.dd_halt_counter > 0      # DD halt: blocks all new entries
+            halt_grid_longs  = self.crash_halt_counter > 0   # velocity CB: blocks new long entries only
+            halt_grid_shorts = self.surge_halt_counter > 0   # surge CB: blocks new short entries only
+            halt_all         = self.dd_halt_counter > 0      # DD halt: blocks all new entries
 
             # ------------------------------------------------------------------
             # Velocity circuit breaker (crash_cb)
@@ -550,6 +554,60 @@ class GridOrderBacktester:
                             self.trend_pending_dir = None
                     self.crash_halt_counter = crash_cb_halt_len
                     halt_grid_longs = True
+
+            # ------------------------------------------------------------------
+            # Surge circuit breaker (surge_cb) — mirror of crash_cb for upside
+            # Fires when price rises >= surge_cb_rise_pct in surge_cb_lookback
+            # candles.  Immediately closes all open short grid positions + any
+            # active trend short.  Halts new short entries for
+            # surge_cb_halt_candles.  Long grid + long trend captures are
+            # intentionally unblocked (can profit from the rally).
+            # ------------------------------------------------------------------
+            surge_cb          = self.config.get("surge_cb", False)
+            surge_cb_rise_pct = self.config.get("surge_cb_rise_pct", 0.10)
+            surge_cb_lookback = self.config.get("surge_cb_lookback_candles", 8)
+            surge_cb_halt_len = self.config.get("surge_cb_halt_candles", 48)
+
+            if (surge_cb and self.surge_halt_counter == 0
+                    and len(self.equity_curve) >= surge_cb_lookback):
+                sc_past_price = self.equity_curve[-surge_cb_lookback][1]
+                sc_rise = (price - sc_past_price) / sc_past_price
+                if sc_rise >= surge_cb_rise_pct:
+                    print(
+                        f"\U0001f680 [{timestamp}] Surge CB: +{sc_rise*100:.1f}%"
+                        f" in {surge_cb_lookback} candles \u2014 closing"
+                        f" {len(self.short_positions)} shorts,"
+                        f" halting {surge_cb_halt_len} candles"
+                    )
+                    for ep, qty, margin_req, _tp, _sl in list(self.short_positions):
+                        fee_cost  = qty * price * (self.fee / 2)
+                        gross_pnl = (ep - price) * qty
+                        net_pnl   = gross_pnl - fee_cost
+                        self.balance += margin_req + net_pnl
+                        self.trade_history.append((
+                            timestamp, "SURGE_CB_CLOSE", price, qty, "SHORT",
+                            net_pnl, fee_cost, gross_pnl, 0.0, self._equity(price),
+                        ))
+                    self.short_positions.clear()
+                    self.last_short_price = price
+                    if self.trend_position and self.trend_position["side"] == "short":
+                        tp_p = self.trend_position
+                        fee_cost  = tp_p["qty"] * price * (self.fee / 2)
+                        gross_pnl = (tp_p["entry"] - price) * tp_p["qty"]
+                        net_pnl   = gross_pnl - fee_cost
+                        self.balance += tp_p["margin"] + net_pnl
+                        self.trade_history.append((
+                            timestamp, "SURGE_CB_TREND_CLOSE", price, tp_p["qty"],
+                            "TREND_SHORT", net_pnl, fee_cost, gross_pnl,
+                            0.0, self._equity(price),
+                        ))
+                        self.trend_position = None
+                        if self.config.get("trend_reentry_fast", False):
+                            self.trend_mode = None
+                            self.trend_confirm_counter = 0
+                            self.trend_pending_dir = None
+                    self.surge_halt_counter = surge_cb_halt_len
+                    halt_grid_shorts = True
 
             # ------------------------------------------------------------------
             # v15 Regime filter — suppress new long grid entries in bearish regime
@@ -1451,6 +1509,7 @@ class GridOrderBacktester:
                 else:
                     if (not short_at_cap and not short_loss_tripped
                             and not short_blocked_by_trend and not halt_all
+                            and not halt_grid_shorts
                             and not _grid_sleep):       # Layer 4
                         # v17 asymmetric short spacing: below regime EMA use tighter
                         # spacing → faster SL cycling, less unrealized-loss accumulation,
@@ -2156,6 +2215,18 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "consec_loss_max", "consec_loss_pause",
                     # v28 XRPPM18 — fine-tuning directional velocity
                     "vel_dir_ema_period",
+                    # v34 XRPPM24 — 5-regime rotation
+                    "regime_rotation", "regime_trending_grid_off",
+                    "regime_adx_trending_min", "regime_adx_choppy_max",
+                    "regime_bb_squeeze_thresh", "regime_bb_breakout_thresh",
+                    "regime_rsi_ob", "regime_rsi_os",
+                    # v35 XRPPM25 — regime detection quality
+                    "regime_min_dwell_candles", "regime_autocorr_choppy_max",
+                    # v36 — ATR-adaptive trailing stop
+                    "atr_trail", "atr_trail_multiplier", "atr_trail_min", "atr_trail_max",
+                    # v37 — circuit breakers & drawdown halt
+                    "surge_cb", "surge_cb_rise_pct", "surge_cb_lookback_candles",
+                    "surge_cb_halt_candles",
                 ) if k in params}),
             }
         )
@@ -3141,6 +3212,20 @@ def _pm_v2_set(
     atr_trail_multiplier: float = 2.0,              # ATR multiplier for dynamic trail
     atr_trail_min: float = 0.015,                   # Floor: 1.5% min trail width
     atr_trail_max: float = 0.12,                    # Cap: 12% max trail width
+    # v37 — surge circuit breaker (upside velocity CB)
+    surge_cb: bool = False,                         # Fire when price rises >= rise_pct in lookback
+    surge_cb_rise_pct: float = 0.10,                # Min rise to trigger (10%)
+    surge_cb_lookback_candles: int = 8,              # Lookback window (8 candles = 2hr on 15min)
+    surge_cb_halt_candles: int = 48,                # Halt new short entries for N candles
+    # v37 — crash circuit breaker (downside velocity CB)
+    crash_cb: bool = False,                         # Fire when price drops >= drop_pct in lookback
+    crash_cb_drop_pct: float = 0.10,                # Min drop to trigger (10%)
+    crash_cb_lookback_candles: int = 8,              # Lookback window
+    crash_cb_halt_candles: int = 48,                # Halt new long entries for N candles
+    # v37 — drawdown halt (enable existing mechanism)
+    dd_halt: bool = False,                          # Master switch for equity drawdown halt
+    dd_halt_max_drawdown: float = 0.15,             # Max allowed drawdown before halt (15%)
+    dd_halt_candles: int = 96,                      # Halt duration after DD trigger
 ) -> Dict[str, Any]:
     """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28/v29/v34 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA, combination sweep, regime rotation."""
     return {
@@ -3250,6 +3335,23 @@ def _pm_v2_set(
             "atr_trail_min": atr_trail_min,
             "atr_trail_max": atr_trail_max}
            if atr_trail else {}),
+        # v37 — surge circuit breaker
+        **({"surge_cb": True,
+            "surge_cb_rise_pct": surge_cb_rise_pct,
+            "surge_cb_lookback_candles": surge_cb_lookback_candles,
+            "surge_cb_halt_candles": surge_cb_halt_candles}
+           if surge_cb else {}),
+        # v37 — crash circuit breaker
+        **({"crash_cb": True,
+            "crash_cb_drop_pct": crash_cb_drop_pct,
+            "crash_cb_lookback_candles": crash_cb_lookback_candles,
+            "crash_cb_halt_candles": crash_cb_halt_candles}
+           if crash_cb else {}),
+        # v37 — drawdown halt
+        **({"dd_halt": True,
+            "max_drawdown": dd_halt_max_drawdown,
+            "dd_halt_candles": dd_halt_candles}
+           if dd_halt else {}),
     }
 
 
@@ -4835,6 +4937,9 @@ def _pm24(name: str, regime_rotation: bool = True, **kw):
         vel_atr_mult=1.66, vel_dir_only=True, vel_dir_ema_period=120,
         regime_rotation=regime_rotation,
         atr_trail=True,
+        surge_cb=True,
+        crash_cb=True,
+        dd_halt=True,
         **kw,
     )
 
@@ -4910,6 +5015,9 @@ def _pm25(name: str, **kw):
         vel_atr_mult=1.66, vel_dir_only=True, vel_dir_ema_period=120,
         regime_rotation=True,
         atr_trail=True,
+        surge_cb=True,
+        crash_cb=True,
+        dd_halt=True,
         **kw,
     )
 
