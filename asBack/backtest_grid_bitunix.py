@@ -3224,8 +3224,8 @@ def _pm_v2_set(
     crash_cb_halt_candles: int = 48,                # Halt new long entries for N candles
     # v37 — drawdown halt (enable existing mechanism)
     dd_halt: bool = False,                          # Master switch for equity drawdown halt
-    dd_halt_max_drawdown: float = 0.15,             # Max allowed drawdown before halt (15%)
-    dd_halt_candles: int = 96,                      # Halt duration after DD trigger
+    dd_halt_max_drawdown: float = 0.30,             # Max allowed drawdown before halt (30%)
+    dd_halt_candles: int = 384,                     # Halt duration after DD trigger (~4 days on 15min)
 ) -> Dict[str, Any]:
     """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28/v29/v34 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA, combination sweep, regime rotation."""
     return {
@@ -5088,8 +5088,8 @@ def _cb_set(
     cb_lookback: int = 8,
     cb_halt: int = 48,
     dd_halt: bool = False,
-    dd_halt_pct: float = 0.15,
-    dd_halt_candles: int = 96,
+    dd_halt_pct: float = 0.30,
+    dd_halt_candles: int = 384,
     grid_cap: Optional[float] = None,
 ) -> Dict[str, Any]:
     """v11 crash-protection param set — inherits v9 re_reentry baseline."""

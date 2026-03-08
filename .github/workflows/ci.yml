@@ -45,6 +45,7 @@ jobs:
   backtests:
     name: "Backtest ${{ matrix.name }}"
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     needs: tests
     strategy:
       fail-fast: false
