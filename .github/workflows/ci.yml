@@ -50,6 +50,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ── PM25: regime detection quality sweep across full 8.8yr stitched cache ──
+          - name: "PM25 FULL — regime detection quality sweep (8.8yr)"
+            dispatch: XRPPM25FULL
           # ── PM24: 5-regime rotation sweep across full 8.8yr stitched cache ──
           - name: "PM24 FULL — 5-regime rotation sweep (8.8yr)"
             dispatch: XRPPM24FULL

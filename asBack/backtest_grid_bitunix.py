@@ -206,14 +206,25 @@ class GridOrderBacktester:
             _adx_trending_min  = float(self.config.get("regime_adx_trending_min", 35.0))
             _atr_crash_mult    = float(self.config.get("regime_atr_crash_mult", 3.0))
             _atr_dormant_mult  = float(self.config.get("regime_atr_dormant_mult", 0.5))
+            _ac_choppy_max     = float(self.config.get("regime_autocorr_choppy_max", 0.1))
 
             regime = np.full(len(self.df), 1, dtype=np.int8)  # default: VOLATILE
             regime[_atr_ratio > _atr_crash_mult] = 3           # CRASH
             regime[(_adx_vals >= _adx_trending_min) & (regime != 3)] = 2  # TRENDING
-            regime[(_adx_vals < _adx_choppy_max) & (_ac_vals < 0.1)
+            # CHOPPY: low ADX + mean-reverting autocorrelation, but NOT dormant-low vol
+            regime[(_adx_vals < _adx_choppy_max) & (_ac_vals < _ac_choppy_max)
+                   & (_atr_ratio >= _atr_dormant_mult)         # exclude DORMANT overlap
                    & (regime != 3)] = 0                        # CHOPPY
+            # DORMANT: extremely low volatility — takes priority over CHOPPY
             regime[(_atr_ratio < _atr_dormant_mult)
                    & (_adx_vals < _adx_choppy_max) & (regime != 3)] = 4  # DORMANT
+
+            # Hysteresis: suppress regime transitions shorter than min_dwell candles.
+            # Prevents rapid flicker on threshold boundaries (Schmitt-trigger effect).
+            # CRASH (3) is exempt — always takes effect immediately for safety.
+            _min_dwell = int(self.config.get("regime_min_dwell_candles", 5))
+            if _min_dwell > 1:
+                regime = self._apply_regime_hysteresis(regime, _min_dwell)
             self.regime_series = pd.Series(regime, index=self.df.index)
         else:
             self.autocorr_series = None
@@ -224,6 +235,36 @@ class GridOrderBacktester:
     # ------------------------------------------------------------------
     # Order placement helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _apply_regime_hysteresis(regime: np.ndarray, min_dwell: int) -> np.ndarray:
+        """Suppress regime transitions shorter than *min_dwell* candles.
+
+        Short runs are reverted to the previous stable regime (one that lasted
+        >= min_dwell candles).  CRASH (3) is exempt — it always takes effect
+        immediately because delayed crash detection defeats its purpose.
+
+        Single O(n) pass over the array.
+        """
+        out = np.copy(regime)
+        n = len(out)
+        i = 0
+        prev_stable = out[0]
+        while i < n:
+            cur = out[i]
+            # Find length of this contiguous run
+            j = i + 1
+            while j < n and out[j] == cur:
+                j += 1
+            run_len = j - i
+            if cur == 3:                        # CRASH — always immediate
+                prev_stable = cur
+            elif run_len < min_dwell and i > 0:  # too short — revert
+                out[i:j] = prev_stable
+            else:
+                prev_stable = cur
+            i = j
+        return out
 
     def _init_anchors(self, price: float) -> None:
         """Set initial price anchors for entry-level calculation."""
@@ -1253,7 +1294,10 @@ class GridOrderBacktester:
                         _grid_sleep = True
 
                 elif _regime == 3:  # CRASH — bounce hunting, reduced qty
-                    halt_grid_longs = False
+                    # Only unblock longs if velocity CB is NOT active.
+                    # The crash CB is a safety halt that must not be overridden.
+                    if self.crash_halt_counter == 0:
+                        halt_grid_longs = False
                     long_blocked_by_trend  = (self.trend_mode == "down")
                     short_blocked_by_trend = (self.trend_mode == "up")
                     _grid_sleep = False
@@ -3089,6 +3133,9 @@ def _pm_v2_set(
     regime_crash_spacing_mult: float = 0.5,     # Tighter spacing in CRASH (catch bounces)
     regime_dormant_spacing_mult: float = 2.0,   # Wider spacing in DORMANT (slow accumulation)
     regime_trending_grid_off: bool = True,      # Disable grid entries in TRENDING regime
+    # v35 XRPPM25 — regime detection quality
+    regime_min_dwell_candles: int = 5,              # Hysteresis: min candles before regime switch
+    regime_autocorr_choppy_max: float = 0.1,        # Autocorrelation below this → CHOPPY eligible
 ) -> Dict[str, Any]:
     """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28/v29/v34 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA, combination sweep, regime rotation."""
     return {
@@ -3188,6 +3235,9 @@ def _pm_v2_set(
             "regime_crash_spacing_mult": regime_crash_spacing_mult,
             "regime_dormant_spacing_mult": regime_dormant_spacing_mult,
             "regime_trending_grid_off": regime_trending_grid_off,
+            # v35 regime detection quality
+            "regime_min_dwell_candles": regime_min_dwell_candles,
+            "regime_autocorr_choppy_max": regime_autocorr_choppy_max,
         } if regime_rotation else {}),
     }
 
@@ -4810,6 +4860,75 @@ XRP_PM_V24_FULL_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# v35 — XRPPM25: Regime detection quality sweep.
+#
+# PM24 identified the regime rotation framework.  PM25 improves the
+# classifier itself:
+#
+#   1) Hysteresis (min dwell) — suppress flicker on threshold boundaries.
+#      Short regime bursts (< N candles) are reverted to the previous
+#      stable regime.  CRASH is exempt (always immediate for safety).
+#
+#   2) Autocorrelation threshold — the CHOPPY classification requires
+#      autocorr < threshold.  Sweep to find optimal sensitivity.
+#
+#   3) CRASH/CB conflict fix — the CRASH regime no longer overrides
+#      the velocity circuit breaker halt (always-on safety improvement).
+#
+#   4) CHOPPY/DORMANT exclusivity — CHOPPY now explicitly excludes
+#      DORMANT-level volatility (always-on correctness fix).
+#
+# Sweep axes:
+#   A — regime_min_dwell_candles: 1 (off) / 3 / 5 (default) / 10 / 20
+#   B — regime_autocorr_choppy_max: 0.05 / 0.1 (default) / 0.15 / 0.2
+#   C — Key combos
+# ===========================================================================
+
+_V25_BASE = {
+    **_V21_BASE,
+}
+
+def _pm25(name: str, **kw):
+    """Build a PM25 regime-quality sweep param set."""
+    _base = {k: v for k, v in _V25_BASE.items()
+             if k not in ("regime_hysteresis_pct", "vol_adaptive_spacing",
+                          "vas_floor", "vas_ceil", "regime_rotation")}
+    return _pm_v2_set(
+        name, **_base,
+        vel_atr_mult=1.66, vel_dir_only=True, vel_dir_ema_period=120,
+        regime_rotation=True,
+        **kw,
+    )
+
+_PM25_SETS = [
+    # ── Control — PM24 default (dwell=5, autocorr=0.1) ─────────────────
+    _pm25("pm25_baseline"),
+
+    # ── Axis A: Hysteresis dwell time ──────────────────────────────────
+    _pm25("pm25_dwell1",          regime_min_dwell_candles=1),    # off
+    _pm25("pm25_dwell3",          regime_min_dwell_candles=3),
+    _pm25("pm25_dwell10",         regime_min_dwell_candles=10),
+    _pm25("pm25_dwell20",         regime_min_dwell_candles=20),
+
+    # ── Axis B: Autocorrelation CHOPPY threshold ───────────────────────
+    _pm25("pm25_ac05",            regime_autocorr_choppy_max=0.05),
+    _pm25("pm25_ac15",            regime_autocorr_choppy_max=0.15),
+    _pm25("pm25_ac20",            regime_autocorr_choppy_max=0.20),
+
+    # ── Axis C: Combos — best dwell + best autocorr ───────────────────
+    _pm25("pm25_dwell10_ac15",    regime_min_dwell_candles=10, regime_autocorr_choppy_max=0.15),
+    _pm25("pm25_dwell10_ac05",    regime_min_dwell_candles=10, regime_autocorr_choppy_max=0.05),
+    _pm25("pm25_dwell20_ac15",    regime_min_dwell_candles=20, regime_autocorr_choppy_max=0.15),
+]
+
+XRP_PM_V25_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V25_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)   # full 8.8yr (Bitfinex start)
+XRP_PM_V25_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM_V25_FULL_CONFIG["param_sets"]      = _PM25_SETS
+XRP_PM_V25_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -5351,9 +5470,14 @@ if __name__ == "__main__":
         grid_search_backtest(XRP_PM_V23_FULL_CONFIG)
     elif symbol in ("XRPPM24FULL", "PM24FULL"):
         print("\n" + "=" * 60)
-        print("  v34 PM24 FULL — 5-regime rotation sweep  (Oct 2019 → Mar 2026)")
+        print("  v34 PM24 FULL — 5-regime rotation sweep  (May 2017 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V24_FULL_CONFIG)
+    elif symbol in ("XRPPM25FULL", "PM25FULL"):
+        print("\n" + "=" * 60)
+        print("  v35 PM25 FULL — regime detection quality sweep  (May 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V25_FULL_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
