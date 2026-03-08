@@ -3136,6 +3136,11 @@ def _pm_v2_set(
     # v35 XRPPM25 — regime detection quality
     regime_min_dwell_candles: int = 5,              # Hysteresis: min candles before regime switch
     regime_autocorr_choppy_max: float = 0.1,        # Autocorrelation below this → CHOPPY eligible
+    # v36 — ATR-adaptive trailing stop
+    atr_trail: bool = False,                        # Replace fixed trail with ATR × mult / price
+    atr_trail_multiplier: float = 2.0,              # ATR multiplier for dynamic trail
+    atr_trail_min: float = 0.015,                   # Floor: 1.5% min trail width
+    atr_trail_max: float = 0.12,                    # Cap: 12% max trail width
 ) -> Dict[str, Any]:
     """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28/v29/v34 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA, combination sweep, regime rotation."""
     return {
@@ -3239,6 +3244,12 @@ def _pm_v2_set(
             "regime_min_dwell_candles": regime_min_dwell_candles,
             "regime_autocorr_choppy_max": regime_autocorr_choppy_max,
         } if regime_rotation else {}),
+        # v36 — ATR-adaptive trailing stop
+        **({"atr_trail": True,
+            "atr_trail_multiplier": atr_trail_multiplier,
+            "atr_trail_min": atr_trail_min,
+            "atr_trail_max": atr_trail_max}
+           if atr_trail else {}),
     }
 
 
@@ -4823,6 +4834,7 @@ def _pm24(name: str, regime_rotation: bool = True, **kw):
         name, **_base,
         vel_atr_mult=1.66, vel_dir_only=True, vel_dir_ema_period=120,
         regime_rotation=regime_rotation,
+        atr_trail=True,
         **kw,
     )
 
@@ -4897,6 +4909,7 @@ def _pm25(name: str, **kw):
         name, **_base,
         vel_atr_mult=1.66, vel_dir_only=True, vel_dir_ema_period=120,
         regime_rotation=True,
+        atr_trail=True,
         **kw,
     )
 
