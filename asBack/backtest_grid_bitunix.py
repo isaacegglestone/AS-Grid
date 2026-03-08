@@ -634,6 +634,23 @@ class GridOrderBacktester:
                     elif _regime_ema > 0 and price < _regime_ema * (1 - _hyst):
                         halt_grid_longs = True
 
+            # ------------------------------------------------------------------
+            # Regime short gate — suppress grid shorts in bull territory.
+            # Only allow new short grid entries when price is BELOW the regime
+            # EMA (bearish) or the regime is CRASH (3).  During bull-side
+            # regimes the grid shorts bleed faster than trend capture earns.
+            # ------------------------------------------------------------------
+            if (not halt_grid_shorts
+                    and self.config.get("regime_short_gate", False)
+                    and self.config.get("regime_filter", False)
+                    and "regime_ema" in self.df.columns):
+                _rsg_ema  = float(self.df["regime_ema"].iloc[idx])
+                _rsg_hyst = self.config.get("regime_hysteresis_pct", 0.02)
+                _rsg_regime = int(self.regime_series.iloc[idx]) if self.regime_series is not None else 1
+                # Allow shorts only in bear territory or CRASH
+                if _rsg_ema > 0 and price >= _rsg_ema * (1 - _rsg_hyst) and _rsg_regime != 3:
+                    halt_grid_shorts = True
+
             # Per-side caps: for a hedge strategy use max_positions_per_side=1
             max_per_side = self.config.get("max_positions_per_side", self.config["max_positions"])
             # Regime short boost: in a bearish regime (price < EMA*(1-hyst)),
@@ -2227,6 +2244,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     # v37 — circuit breakers & drawdown halt
                     "surge_cb", "surge_cb_rise_pct", "surge_cb_lookback_candles",
                     "surge_cb_halt_candles",
+                    # v38 — regime-gated shorts
+                    "regime_short_gate",
                 ) if k in params}),
             }
         )
@@ -3212,6 +3231,8 @@ def _pm_v2_set(
     atr_trail_multiplier: float = 2.0,              # ATR multiplier for dynamic trail
     atr_trail_min: float = 0.015,                   # Floor: 1.5% min trail width
     atr_trail_max: float = 0.12,                    # Cap: 12% max trail width
+    # v38 — regime-gated shorts (suppress grid shorts in bull territory)
+    regime_short_gate: bool = False,                # Only allow grid shorts below regime EMA or CRASH
     # v37 — surge circuit breaker (upside velocity CB)
     surge_cb: bool = False,                         # Fire when price rises >= rise_pct in lookback
     surge_cb_rise_pct: float = 0.10,                # Min rise to trigger (10%)
@@ -3329,6 +3350,10 @@ def _pm_v2_set(
             "regime_min_dwell_candles": regime_min_dwell_candles,
             "regime_autocorr_choppy_max": regime_autocorr_choppy_max,
         } if regime_rotation else {}),
+        # v38 — regime-gated shorts
+        **({
+            "regime_short_gate": True,
+        } if regime_short_gate else {}),
         # v36 — ATR-adaptive trailing stop
         **({"atr_trail": True,
             "atr_trail_multiplier": atr_trail_multiplier,
@@ -4940,6 +4965,7 @@ def _pm24(name: str, regime_rotation: bool = True, **kw):
         surge_cb=True,
         crash_cb=True,
         dd_halt=True,
+        regime_short_gate=True,
         **kw,
     )
 
@@ -5018,6 +5044,7 @@ def _pm25(name: str, **kw):
         surge_cb=True,
         crash_cb=True,
         dd_halt=True,
+        regime_short_gate=True,
         **kw,
     )
 
