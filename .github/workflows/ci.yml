@@ -50,8 +50,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ── PM24: 5-regime rotation sweep across full 6.5yr stitched cache ──
-          - name: "PM24 FULL — 5-regime rotation sweep (6.5yr)"
+          # ── PM24: 5-regime rotation sweep across full 8.8yr stitched cache ──
+          - name: "PM24 FULL — 5-regime rotation sweep (8.8yr)"
             dispatch: XRPPM24FULL
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),

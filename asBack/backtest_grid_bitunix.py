@@ -4596,7 +4596,7 @@ _PM21_FULL_SETS = [
 ]
 
 XRP_PM_V21_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
-XRP_PM_V21_FULL_CONFIG["start_date"]      = datetime(2019, 10, 1)   # Binance stitched start
+XRP_PM_V21_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)   # Bitfinex stitched start
 XRP_PM_V21_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)    # latest cache date
 XRP_PM_V21_FULL_CONFIG["param_sets"]      = _PM21_FULL_SETS
 XRP_PM_V21_FULL_CONFIG["daily_breakdown"] = True                    # emit day-by-day table
@@ -4728,7 +4728,7 @@ _PM23_SETS = [
 ]
 
 XRP_PM_V23_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
-XRP_PM_V23_FULL_CONFIG["start_date"]      = datetime(2019, 10, 1)   # full 6.5yr
+XRP_PM_V23_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)   # full 8.8yr (Bitfinex start)
 XRP_PM_V23_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
 XRP_PM_V23_FULL_CONFIG["param_sets"]      = _PM23_SETS
 XRP_PM_V23_FULL_CONFIG["daily_breakdown"] = True
@@ -4803,7 +4803,7 @@ _PM24_SETS = [
 ]
 
 XRP_PM_V24_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
-XRP_PM_V24_FULL_CONFIG["start_date"]      = datetime(2019, 10, 1)   # full 6.5yr
+XRP_PM_V24_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)   # full 8.8yr (Bitfinex start)
 XRP_PM_V24_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
 XRP_PM_V24_FULL_CONFIG["param_sets"]      = _PM24_SETS
 XRP_PM_V24_FULL_CONFIG["daily_breakdown"] = True
