@@ -50,14 +50,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ── Only the two PM21 survivors across the full 6.5yr stitched cache ──
-          - name: "PM21 FULL — baseline vs m166 (6.5yr)"
-            dispatch: XRPPM21FULL
+          # ── PM24: 5-regime rotation sweep across full 6.5yr stitched cache ──
+          - name: "PM24 FULL — 5-regime rotation sweep (6.5yr)"
+            dispatch: XRPPM24FULL
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
           #   XRPPM17 (v27), XRPPM18 (v28), XRPPM19 (v29), XRPPM20 (v30),
-          #   XRPPM21 (v31), XRPPM22 (v32)
+          #   XRPPM21 (v31), XRPPM22 (v32), XRPPM21FULL, XRPPM23FULL
           # These are fully superseded; run locally if needed.
 
     steps:

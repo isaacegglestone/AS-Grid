@@ -3,7 +3,7 @@ asBack/backtest_grid_bitunix.py
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Bitunix-flavoured grid backtest, based on backtest_grid_auto.py.
 
-Sweep history: v16–v32 (PM6–PM22).  v32 = PM22 combos at mult 1.6.
+Sweep history: v16–v34 (PM6–PM24).  v34 = PM24 5-regime rotation sweep.
 
 Differences from the Binance version
 --------------------------------------
@@ -184,6 +184,40 @@ class GridOrderBacktester:
         self.swing_low_series = self._compute_swing_low(
             self.df["low"].astype(float), lookback=ms_lookback
         )
+
+        # Pre-compute return autocorrelation + regime classification (v34 PM24)
+        # Lag-1 autocorrelation: negative = mean-reverting (grid paradise),
+        # positive = trending.  Used by regime rotation to classify candles.
+        if self.config.get("regime_rotation", False):
+            _autocorr_period = int(self.config.get("regime_autocorr_period", 100))
+            _returns = _close_s.pct_change().fillna(0)
+            _returns_shifted = _returns.shift(1)
+            self.autocorr_series = _returns.rolling(
+                _autocorr_period, min_periods=20
+            ).corr(_returns_shifted).fillna(0)
+
+            # Regime classification: 0=CHOPPY, 1=VOLATILE, 2=TRENDING, 3=CRASH, 4=DORMANT
+            _adx_vals = self.adx_series.values
+            _atr_ratio = (self.atr_series / self.atr_sma_series).replace(
+                [np.inf, -np.inf], 1.0).fillna(1.0).values
+            _ac_vals = self.autocorr_series.values
+
+            _adx_choppy_max    = float(self.config.get("regime_adx_choppy_max", 25.0))
+            _adx_trending_min  = float(self.config.get("regime_adx_trending_min", 35.0))
+            _atr_crash_mult    = float(self.config.get("regime_atr_crash_mult", 3.0))
+            _atr_dormant_mult  = float(self.config.get("regime_atr_dormant_mult", 0.5))
+
+            regime = np.full(len(self.df), 1, dtype=np.int8)  # default: VOLATILE
+            regime[_atr_ratio > _atr_crash_mult] = 3           # CRASH
+            regime[(_adx_vals >= _adx_trending_min) & (regime != 3)] = 2  # TRENDING
+            regime[(_adx_vals < _adx_choppy_max) & (_ac_vals < 0.1)
+                   & (regime != 3)] = 0                        # CHOPPY
+            regime[(_atr_ratio < _atr_dormant_mult)
+                   & (_adx_vals < _adx_choppy_max) & (regime != 3)] = 4  # DORMANT
+            self.regime_series = pd.Series(regime, index=self.df.index)
+        else:
+            self.autocorr_series = None
+            self.regime_series = None
 
         self._init_anchors(self.df["close"].iloc[0])
 
@@ -1195,6 +1229,54 @@ class GridOrderBacktester:
             # Gate new grid entries when a trend is active or ADX signals strong directional move
             long_blocked_by_trend  = (self.trend_mode == "down") or adx_pauses_grid
             short_blocked_by_trend = (self.trend_mode == "up")  or adx_pauses_grid
+
+            # ------------------------------------------------------------------
+            # v34 PM24: 5-regime rotation override
+            # Overrides binary gate variables based on current market regime.
+            # Regimes: 0=CHOPPY (aggressive grid), 1=VOLATILE (default),
+            #          2=TRENDING (grid off), 3=CRASH (bounce grid),
+            #          4=DORMANT (micro-DCA).
+            # ------------------------------------------------------------------
+            _regime_spacing_mult = 1.0
+            _regime_qty_mult     = 1.0
+            if self.regime_series is not None:
+                _regime = int(self.regime_series.iloc[idx])
+
+                if _regime == 0:    # CHOPPY — bypass gates, grid-only
+                    halt_grid_longs = False
+                    long_blocked_by_trend  = (self.trend_mode == "down")
+                    short_blocked_by_trend = (self.trend_mode == "up")
+                    _grid_sleep = False
+
+                elif _regime == 2:  # TRENDING — grid off, trend capture only
+                    if self.config.get("regime_trending_grid_off", True):
+                        _grid_sleep = True
+
+                elif _regime == 3:  # CRASH — bounce hunting, reduced qty
+                    halt_grid_longs = False
+                    long_blocked_by_trend  = (self.trend_mode == "down")
+                    short_blocked_by_trend = (self.trend_mode == "up")
+                    _grid_sleep = False
+                    _regime_qty_mult     = float(self.config.get(
+                        "regime_crash_qty_mult", 0.5))
+                    _regime_spacing_mult = float(self.config.get(
+                        "regime_crash_spacing_mult", 0.5))
+
+                elif _regime == 4:  # DORMANT — micro-DCA, long-only, tiny qty
+                    halt_grid_longs = False
+                    long_blocked_by_trend  = False
+                    short_blocked_by_trend = True   # no shorts in dormant
+                    _grid_sleep = False
+                    _regime_qty_mult     = float(self.config.get(
+                        "regime_dormant_qty_mult", 0.2))
+                    _regime_spacing_mult = float(self.config.get(
+                        "regime_dormant_spacing_mult", 2.0))
+
+                # _regime == 1 (VOLATILE): no overrides — default gate behavior
+
+            # Apply regime qty multiplier to effective order value
+            effective_order_value *= _regime_qty_mult
+
             used_margin = sum(pos[2] for pos in self.long_positions + self.short_positions)
             available_margin = self.balance - used_margin
 
@@ -1268,6 +1350,7 @@ class GridOrderBacktester:
                                 _eff_long_sp = (self.config["bull_spacing"]
                                     if price >= _ema_btbw * (1 - _hyst_btbw)
                                     else self.config["bear_spacing"])
+                        _eff_long_sp *= _regime_spacing_mult  # v34 regime rotation
                         buy_price = self.last_long_price * (1 - _eff_long_sp)
                         if price <= buy_price:
                             qty = effective_order_value / price
@@ -1339,6 +1422,7 @@ class GridOrderBacktester:
                         else:
                             _eff_short_sp = self.short_settings["up_spacing"]
 
+                        _eff_short_sp *= _regime_spacing_mult  # v34 regime rotation
                         sell_price = self.last_short_price * (1 + _eff_short_sp)
                         if price >= sell_price:
                             qty = effective_order_value / price
@@ -2993,8 +3077,20 @@ def _pm_v2_set(
     consec_loss_pause: int = 20,         # Candles to pause after consecutive loss threshold hit
     # v28 XRPPM18 — fine-tuning directional velocity
     vel_dir_ema_period: int = 36,        # EMA period for directional check (36=fast, 84=slow, 120/200=smoother)
+    # v34 XRPPM24 — 5-regime rotation
+    regime_rotation: bool = False,              # Master switch: enable regime-based gate overrides
+    regime_adx_choppy_max: float = 25.0,        # ADX below this → CHOPPY regime
+    regime_adx_trending_min: float = 35.0,      # ADX above this → TRENDING regime
+    regime_atr_crash_mult: float = 3.0,         # ATR/SMA ratio above this → CRASH regime
+    regime_atr_dormant_mult: float = 0.5,       # ATR/SMA ratio below this + low ADX → DORMANT regime
+    regime_autocorr_period: int = 100,          # Lookback for lag-1 return autocorrelation
+    regime_dormant_qty_mult: float = 0.2,       # Position size multiplier in DORMANT (micro-DCA)
+    regime_crash_qty_mult: float = 0.5,         # Position size multiplier in CRASH (bounce hunting)
+    regime_crash_spacing_mult: float = 0.5,     # Tighter spacing in CRASH (catch bounces)
+    regime_dormant_spacing_mult: float = 2.0,   # Wider spacing in DORMANT (slow accumulation)
+    regime_trending_grid_off: bool = True,      # Disable grid entries in TRENDING regime
 ) -> Dict[str, Any]:
-    """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28/v29 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA, combination sweep."""
+    """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28/v29/v34 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA, combination sweep, regime rotation."""
     return {
         "name": name,
         "use_sl": True,
@@ -3077,7 +3173,22 @@ def _pm_v2_set(
             "consec_loss_pause": consec_loss_pause}
            if consec_loss_max > 0 else {}),
         # v28 XRPPM18 — fine-tuning directional velocity
-        **({"vel_dir_ema_period": vel_dir_ema_period} if vel_dir_ema_period != 36 else {}),
+        **({
+            "vel_dir_ema_period": vel_dir_ema_period} if vel_dir_ema_period != 36 else {}),
+        # v34 XRPPM24 — 5-regime rotation
+        **({
+            "regime_rotation": True,
+            "regime_adx_choppy_max": regime_adx_choppy_max,
+            "regime_adx_trending_min": regime_adx_trending_min,
+            "regime_atr_crash_mult": regime_atr_crash_mult,
+            "regime_atr_dormant_mult": regime_atr_dormant_mult,
+            "regime_autocorr_period": regime_autocorr_period,
+            "regime_dormant_qty_mult": regime_dormant_qty_mult,
+            "regime_crash_qty_mult": regime_crash_qty_mult,
+            "regime_crash_spacing_mult": regime_crash_spacing_mult,
+            "regime_dormant_spacing_mult": regime_dormant_spacing_mult,
+            "regime_trending_grid_off": regime_trending_grid_off,
+        } if regime_rotation else {}),
     }
 
 
@@ -4552,6 +4663,153 @@ XRP_PM_V22_1Y_MID_CONFIG["param_sets"] = _PM22_SETS
 
 
 # ===========================================================================
+# v33 — XRPPM23: Gate-relaxation combined sweep.
+#
+# Deep idle-day analysis of the 6.5yr backtest revealed that 87.9% of the
+# 1,739 idle days (74% of all days) were caused by GATE OVER-SUPPRESSION,
+# not grid spacing.  Only 2.6% of idle days had volatility below the 1.5%
+# grid spacing.  The ADX grid-pause (threshold=35) and regime filter
+# (EMA-175, 0% hysteresis) shut the bot down even when plentiful grid-
+# crossing opportunities exist (median idle-day range = 4.14%).
+#
+# This sweep tests three relaxation axes together:
+#   Axis A — ADX grid-pause threshold:  35 (current) | 50 | off
+#   Axis B — Regime hysteresis buffer:  0.00 (current) | 0.02
+#   Axis C — Vol-adaptive spacing:       off (current) | on (floor=0.008, ceil=0.020)
+#
+# 10 combinations (smart subset of 3×2×2=12) covering all single, pairwise,
+# and full-open variants.  All use PM21 m166 winner as base (vel_atr_mult=1.66,
+# vel_dir_only=True, vel_dir_ema_period=120).
+# ===========================================================================
+
+_V23_BASE = {
+    **_V21_BASE,
+}
+
+# Helper: build a PM23 param set with optional gate overrides
+def _pm23(name: str, adx_gp=35, hyst: float = 0.00, vas: bool = False):
+    """Build a PM23 sweep param set with gate-relaxation overrides."""
+    # Remove keys that will be explicitly overridden to avoid duplicate kwargs
+    _base = {k: v for k, v in _V23_BASE.items()
+             if k not in ("regime_hysteresis_pct", "vol_adaptive_spacing",
+                          "vas_floor", "vas_ceil")}
+    base = _pm_v2_set(
+        name, **_base,
+        vel_atr_mult=1.66, vel_dir_only=True, vel_dir_ema_period=120,
+        regime_hysteresis_pct=hyst,
+        vol_adaptive_spacing=vas,
+        vas_floor=0.008,
+        vas_ceil=0.020,
+    )
+    if adx_gp is None:
+        base["adx_grid_pause"] = None
+    else:
+        base["adx_grid_pause"] = adx_gp
+    return base
+
+_PM23_SETS = [
+    # ── Control ─────────────────────────────────────────────────
+    _pm23("pm23_baseline",        adx_gp=35,   hyst=0.00, vas=False),
+
+    # ── Single-axis changes ─────────────────────────────────────
+    _pm23("pm23_adx50",           adx_gp=50,   hyst=0.00, vas=False),
+    _pm23("pm23_adx_off",         adx_gp=None, hyst=0.00, vas=False),
+    _pm23("pm23_h2",              adx_gp=35,   hyst=0.02, vas=False),
+    _pm23("pm23_vas",             adx_gp=35,   hyst=0.00, vas=True),
+
+    # ── Two-axis combinations ───────────────────────────────────
+    _pm23("pm23_adx50_h2",        adx_gp=50,   hyst=0.02, vas=False),
+    _pm23("pm23_adx50_vas",       adx_gp=50,   hyst=0.00, vas=True),
+    _pm23("pm23_h2_vas",          adx_gp=35,   hyst=0.02, vas=True),
+
+    # ── Three-axis full open ────────────────────────────────────
+    _pm23("pm23_adx50_h2_vas",    adx_gp=50,   hyst=0.02, vas=True),
+    _pm23("pm23_full_open",       adx_gp=None, hyst=0.02, vas=True),
+]
+
+XRP_PM_V23_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V23_FULL_CONFIG["start_date"]      = datetime(2019, 10, 1)   # full 6.5yr
+XRP_PM_V23_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM_V23_FULL_CONFIG["param_sets"]      = _PM23_SETS
+XRP_PM_V23_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
+# v34 — XRPPM24: 5-regime rotation sweep.
+#
+# Production algo systems don't use binary gates — they classify the
+# market into regimes and apply different strategy profiles per regime.
+# The idle-day analysis proved 87.9% of idle days are gate-blocked, not
+# volatility-constrained.  Regime rotation directly fixes this by:
+#
+#   CHOPPY   (ADX < choppy_max, autocorr < 0.1):
+#     Bypass ADX pause + regime filter → aggressive grid, no trend capture.
+#   VOLATILE (ADX between choppy_max..trending_min, normal ATR):
+#     Default gated behavior (current PM21 logic).
+#   TRENDING (ADX > trending_min):
+#     Grid off (avoid SL cascades), trend capture only.
+#   CRASH    (ATR/SMA > crash_mult):
+#     Bounce-hunting grid (tight spacing, reduced qty), no trend capture.
+#   DORMANT  (ATR/SMA < dormant_mult, ADX < choppy_max):
+#     Micro-DCA (wide spacing, 20% qty, long-only), no trend capture.
+#
+# Sweep axes:
+#   A — ADX choppy_max threshold:  20 / 25 (default) / 30
+#   B — ADX trending_min threshold:  30 / 35 (default) / 40
+#   C — Dormant qty multiplier:  0.1 / 0.2 / 0.3
+# ===========================================================================
+
+_V24_BASE = {
+    **_V21_BASE,
+}
+
+# Helper: build a PM24 regime-rotation param set
+def _pm24(name: str, regime_rotation: bool = True, **kw):
+    """Build a PM24 sweep param set with regime rotation overrides."""
+    _base = {k: v for k, v in _V24_BASE.items()
+             if k not in ("regime_hysteresis_pct", "vol_adaptive_spacing",
+                          "vas_floor", "vas_ceil", "regime_rotation")}
+    return _pm_v2_set(
+        name, **_base,
+        vel_atr_mult=1.66, vel_dir_only=True, vel_dir_ema_period=120,
+        regime_rotation=regime_rotation,
+        **kw,
+    )
+
+_PM24_SETS = [
+    # ── Control — no regime rotation (= PM21 m166 behavior) ────────────
+    _pm24("pm24_baseline",        regime_rotation=False),
+
+    # ── Default regime rotation ─────────────────────────────────────────
+    _pm24("pm24_default"),
+
+    # ── Axis A: ADX choppy threshold (below this = range-trade) ────────
+    _pm24("pm24_choppy20",        regime_adx_choppy_max=20.0),
+    _pm24("pm24_choppy30",        regime_adx_choppy_max=30.0),
+
+    # ── Axis B: ADX trending threshold (above this = trend-only) ───────
+    _pm24("pm24_trend30",         regime_adx_trending_min=30.0),
+    _pm24("pm24_trend40",         regime_adx_trending_min=40.0),
+
+    # ── Axis C: Dormant DCA aggressiveness ─────────────────────────────
+    _pm24("pm24_dorm10",          regime_dormant_qty_mult=0.1),
+    _pm24("pm24_dorm30",          regime_dormant_qty_mult=0.3),
+
+    # ── Aggressive: wide choppy zone, narrow trending zone ─────────────
+    _pm24("pm24_aggressive",      regime_adx_choppy_max=30.0, regime_adx_trending_min=40.0),
+
+    # ── Conservative: narrow choppy zone, wide trending zone ───────────
+    _pm24("pm24_conservative",    regime_adx_choppy_max=20.0, regime_adx_trending_min=30.0),
+]
+
+XRP_PM_V24_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V24_FULL_CONFIG["start_date"]      = datetime(2019, 10, 1)   # full 6.5yr
+XRP_PM_V24_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM_V24_FULL_CONFIG["param_sets"]      = _PM24_SETS
+XRP_PM_V24_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -5086,6 +5344,16 @@ if __name__ == "__main__":
         print("  PM21 FULL — baseline vs m166 across 6.5yr stitched cache  (Oct 2019 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V21_FULL_CONFIG)
+    elif symbol in ("XRPPM23FULL", "PM23FULL"):
+        print("\n" + "=" * 60)
+        print("  v33 PM23 FULL — gate-relaxation combined sweep  (Oct 2019 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V23_FULL_CONFIG)
+    elif symbol in ("XRPPM24FULL", "PM24FULL"):
+        print("\n" + "=" * 60)
+        print("  v34 PM24 FULL — 5-regime rotation sweep  (Oct 2019 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(XRP_PM_V24_FULL_CONFIG)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
