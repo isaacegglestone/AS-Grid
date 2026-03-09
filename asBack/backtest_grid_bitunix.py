@@ -231,6 +231,14 @@ class GridOrderBacktester:
             self.autocorr_series = None
             self.regime_series = None
 
+        # Pre-compute rolling min series for rally gate (v40).
+        # Used to detect sustained parabolic rallies that are lethal to shorts.
+        _rg_window = int(self.config.get("rally_gate_window", 192))
+        self.rally_rolling_min = _close_s.rolling(
+            _rg_window, min_periods=1
+        ).min().fillna(_close_s)
+        self._rally_halt_active = False  # sticky hysteresis flag
+
         self._init_anchors(self.df["close"].iloc[0])
 
     # ------------------------------------------------------------------
@@ -649,6 +657,26 @@ class GridOrderBacktester:
                 _rsg_regime = int(self.regime_series.iloc[idx]) if self.regime_series is not None else 1
                 # Allow shorts only in bear territory or CRASH
                 if _rsg_ema > 0 and price >= _rsg_ema * (1 - _rsg_hyst) and _rsg_regime != 3:
+                    halt_grid_shorts = True
+
+            # ------------------------------------------------------------------
+            # Rally gate (v40) — sustained parabolic move detector.
+            # Measures cumulative price appreciation over a rolling window.
+            # When price has risen >= entry_pct from window low, block ALL
+            # shorts (no CRASH exemption).  Flag stays ON until rally_pct
+            # drops below exit_pct (hysteresis prevents flip-flopping).
+            # ------------------------------------------------------------------
+            if self.config.get("rally_gate", False):
+                _rg_min = float(self.rally_rolling_min.iloc[idx])
+                if _rg_min > 0:
+                    _rally_pct = (price - _rg_min) / _rg_min
+                    _rg_entry = self.config.get("rally_gate_entry_pct", 0.30)
+                    _rg_exit  = self.config.get("rally_gate_exit_pct", 0.10)
+                    if not self._rally_halt_active and _rally_pct >= _rg_entry:
+                        self._rally_halt_active = True
+                    elif self._rally_halt_active and _rally_pct < _rg_exit:
+                        self._rally_halt_active = False
+                if self._rally_halt_active:
                     halt_grid_shorts = True
 
             # Per-side caps: for a hedge strategy use max_positions_per_side=1
@@ -2250,6 +2278,9 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "regime_short_gate",
                     # v39 — asymmetric short sizing
                     "short_size_ratio",
+                    # v40 — rolling rally gate
+                    "rally_gate", "rally_gate_window",
+                    "rally_gate_entry_pct", "rally_gate_exit_pct",
                 ) if k in params}),
             }
         )
@@ -3239,6 +3270,11 @@ def _pm_v2_set(
     regime_short_gate: bool = False,                # Only allow grid shorts below regime EMA or CRASH
     # v39 — asymmetric short sizing (reduce short qty to fraction of long qty)
     short_size_ratio: float = 1.0,                  # 1.0 = same as longs; 0.25 = shorts at 25%
+    # v40 — rolling rally gate (sustained parabolic move detector)
+    rally_gate: bool = False,                       # Block ALL shorts during detected parabolic rallies
+    rally_gate_window: int = 192,                   # Rolling min window (192 = 2 days on 15min)
+    rally_gate_entry_pct: float = 0.30,             # Trigger when price ≥ 30% above window low
+    rally_gate_exit_pct: float = 0.10,              # Clear when rally retraces below 10% above window low
     # v37 — surge circuit breaker (upside velocity CB)
     surge_cb: bool = False,                         # Fire when price rises >= rise_pct in lookback
     surge_cb_rise_pct: float = 0.10,                # Min rise to trigger (10%)
@@ -3364,6 +3400,13 @@ def _pm_v2_set(
         **({
             "short_size_ratio": short_size_ratio,
         } if short_size_ratio < 1.0 else {}),
+        # v40 — rolling rally gate
+        **({
+            "rally_gate": True,
+            "rally_gate_window": rally_gate_window,
+            "rally_gate_entry_pct": rally_gate_entry_pct,
+            "rally_gate_exit_pct": rally_gate_exit_pct,
+        } if rally_gate else {}),
         # v36 — ATR-adaptive trailing stop
         **({"atr_trail": True,
             "atr_trail_multiplier": atr_trail_multiplier,
@@ -4977,6 +5020,7 @@ def _pm24(name: str, regime_rotation: bool = True, **kw):
         dd_halt=True,
         regime_short_gate=True,
         short_size_ratio=0.25,
+        rally_gate=True,
         **kw,
     )
 
@@ -5057,6 +5101,7 @@ def _pm25(name: str, **kw):
         dd_halt=True,
         regime_short_gate=True,
         short_size_ratio=0.25,
+        rally_gate=True,
         **kw,
     )
 
