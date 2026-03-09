@@ -232,10 +232,19 @@ class GridOrderBacktester:
             self.regime_series = None
 
         # Pre-compute rolling min series for rally gate (v40).
-        # Used to detect sustained parabolic rallies that are lethal to shorts.
-        _rg_window = int(self.config.get("rally_gate_window", 192))
-        self.rally_rolling_min = _close_s.rolling(
-            _rg_window, min_periods=1
+        # Multi-timeframe: 3 tiers catch fast, moderate, and slow rallies.
+        # Any tier triggering blocks shorts — layered detection.
+        _rg_window_fast = int(self.config.get("rally_gate_window", 192))       # 2 days
+        _rg_window_med  = int(self.config.get("rally_gate_window_med", 672))   # 1 week
+        _rg_window_slow = int(self.config.get("rally_gate_window_slow", 2880)) # 1 month
+        self.rally_rolling_min_fast = _close_s.rolling(
+            _rg_window_fast, min_periods=1
+        ).min().fillna(_close_s)
+        self.rally_rolling_min_med = _close_s.rolling(
+            _rg_window_med, min_periods=1
+        ).min().fillna(_close_s)
+        self.rally_rolling_min_slow = _close_s.rolling(
+            _rg_window_slow, min_periods=1
         ).min().fillna(_close_s)
         self._rally_halt_active = False  # sticky hysteresis flag
 
@@ -661,20 +670,45 @@ class GridOrderBacktester:
 
             # ------------------------------------------------------------------
             # Rally gate (v40) — sustained parabolic move detector.
-            # Measures cumulative price appreciation over a rolling window.
-            # When price has risen >= entry_pct from window low, block ALL
-            # shorts (no CRASH exemption).  Flag stays ON until rally_pct
-            # drops below exit_pct (hysteresis prevents flip-flopping).
+            # Multi-timeframe: 3 tiers catch different rally speeds.
+            #   Fast:   30% rise in 2 days  — catches flash parabolic
+            #   Medium: 50% rise in 1 week  — catches moderate rallies
+            #   Slow:  100% rise in 1 month — catches slow grinds
+            # Any tier triggering sets the gate.  Gate clears when ALL tiers
+            # are below their exit thresholds (10% of entry threshold).
             # ------------------------------------------------------------------
             if self.config.get("rally_gate", False):
-                _rg_min = float(self.rally_rolling_min.iloc[idx])
-                if _rg_min > 0:
-                    _rally_pct = (price - _rg_min) / _rg_min
-                    _rg_entry = self.config.get("rally_gate_entry_pct", 0.30)
-                    _rg_exit  = self.config.get("rally_gate_exit_pct", 0.10)
-                    if not self._rally_halt_active and _rally_pct >= _rg_entry:
-                        self._rally_halt_active = True
-                    elif self._rally_halt_active and _rally_pct < _rg_exit:
+                _rg_min_fast = float(self.rally_rolling_min_fast.iloc[idx])
+                _rg_min_med  = float(self.rally_rolling_min_med.iloc[idx])
+                _rg_min_slow = float(self.rally_rolling_min_slow.iloc[idx])
+                _rg_entry_fast = self.config.get("rally_gate_entry_pct", 0.30)
+                _rg_entry_med  = self.config.get("rally_gate_entry_pct_med", 0.50)
+                _rg_entry_slow = self.config.get("rally_gate_entry_pct_slow", 1.00)
+                _rg_exit  = self.config.get("rally_gate_exit_pct", 0.10)
+                # Check if ANY tier triggers
+                _any_triggered = False
+                for _rg_min, _rg_thresh in [
+                    (_rg_min_fast, _rg_entry_fast),
+                    (_rg_min_med,  _rg_entry_med),
+                    (_rg_min_slow, _rg_entry_slow),
+                ]:
+                    if _rg_min > 0:
+                        _rally_pct = (price - _rg_min) / _rg_min
+                        if _rally_pct >= _rg_thresh:
+                            _any_triggered = True
+                            break
+                if not self._rally_halt_active and _any_triggered:
+                    self._rally_halt_active = True
+                elif self._rally_halt_active and not _any_triggered:
+                    # Clear only when ALL tiers are below exit threshold
+                    _all_below_exit = True
+                    for _rg_min in [_rg_min_fast, _rg_min_med, _rg_min_slow]:
+                        if _rg_min > 0:
+                            _rally_pct = (price - _rg_min) / _rg_min
+                            if _rally_pct >= _rg_exit:
+                                _all_below_exit = False
+                                break
+                    if _all_below_exit:
                         self._rally_halt_active = False
                 if self._rally_halt_active:
                     halt_grid_shorts = True
@@ -2281,6 +2315,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     # v40 — rolling rally gate
                     "rally_gate", "rally_gate_window",
                     "rally_gate_entry_pct", "rally_gate_exit_pct",
+                    "rally_gate_window_med", "rally_gate_entry_pct_med",
+                    "rally_gate_window_slow", "rally_gate_entry_pct_slow",
                 ) if k in params}),
             }
         )
@@ -3272,9 +3308,13 @@ def _pm_v2_set(
     short_size_ratio: float = 1.0,                  # 1.0 = same as longs; 0.25 = shorts at 25%
     # v40 — rolling rally gate (sustained parabolic move detector)
     rally_gate: bool = False,                       # Block ALL shorts during detected parabolic rallies
-    rally_gate_window: int = 192,                   # Rolling min window (192 = 2 days on 15min)
-    rally_gate_entry_pct: float = 0.30,             # Trigger when price ≥ 30% above window low
-    rally_gate_exit_pct: float = 0.10,              # Clear when rally retraces below 10% above window low
+    rally_gate_window: int = 192,                   # Fast tier: 2 days on 15min
+    rally_gate_entry_pct: float = 0.30,             # Fast tier: 30% gain triggers
+    rally_gate_exit_pct: float = 0.10,              # Clear when ALL tiers below 10%
+    rally_gate_window_med: int = 672,               # Medium tier: 1 week on 15min
+    rally_gate_entry_pct_med: float = 0.50,         # Medium tier: 50% gain triggers
+    rally_gate_window_slow: int = 2880,             # Slow tier: 1 month on 15min
+    rally_gate_entry_pct_slow: float = 1.00,        # Slow tier: 100% (2x) gain triggers
     # v37 — surge circuit breaker (upside velocity CB)
     surge_cb: bool = False,                         # Fire when price rises >= rise_pct in lookback
     surge_cb_rise_pct: float = 0.10,                # Min rise to trigger (10%)
@@ -3406,6 +3446,10 @@ def _pm_v2_set(
             "rally_gate_window": rally_gate_window,
             "rally_gate_entry_pct": rally_gate_entry_pct,
             "rally_gate_exit_pct": rally_gate_exit_pct,
+            "rally_gate_window_med": rally_gate_window_med,
+            "rally_gate_entry_pct_med": rally_gate_entry_pct_med,
+            "rally_gate_window_slow": rally_gate_window_slow,
+            "rally_gate_entry_pct_slow": rally_gate_entry_pct_slow,
         } if rally_gate else {}),
         # v36 — ATR-adaptive trailing stop
         **({"atr_trail": True,
