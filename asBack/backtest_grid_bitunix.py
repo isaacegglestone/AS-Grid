@@ -1545,7 +1545,9 @@ class GridOrderBacktester:
                         _eff_short_sp *= _regime_spacing_mult  # v34 regime rotation
                         sell_price = self.last_short_price * (1 + _eff_short_sp)
                         if price >= sell_price:
-                            qty = effective_order_value / price
+                            # v39 asymmetric short sizing — reduce short qty
+                            _ssr = self.config.get("short_size_ratio", 1.0)
+                            qty = (effective_order_value * _ssr) / price
                             margin_required = qty * price / self.leverage
                             fee_cost = qty * price * (self.fee / 2)
                             if (margin_required + fee_cost) <= available_margin:
@@ -2246,6 +2248,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "surge_cb_halt_candles",
                     # v38 — regime-gated shorts
                     "regime_short_gate",
+                    # v39 — asymmetric short sizing
+                    "short_size_ratio",
                 ) if k in params}),
             }
         )
@@ -3233,6 +3237,8 @@ def _pm_v2_set(
     atr_trail_max: float = 0.12,                    # Cap: 12% max trail width
     # v38 — regime-gated shorts (suppress grid shorts in bull territory)
     regime_short_gate: bool = False,                # Only allow grid shorts below regime EMA or CRASH
+    # v39 — asymmetric short sizing (reduce short qty to fraction of long qty)
+    short_size_ratio: float = 1.0,                  # 1.0 = same as longs; 0.25 = shorts at 25%
     # v37 — surge circuit breaker (upside velocity CB)
     surge_cb: bool = False,                         # Fire when price rises >= rise_pct in lookback
     surge_cb_rise_pct: float = 0.10,                # Min rise to trigger (10%)
@@ -3354,6 +3360,10 @@ def _pm_v2_set(
         **({
             "regime_short_gate": True,
         } if regime_short_gate else {}),
+        # v39 — asymmetric short sizing
+        **({
+            "short_size_ratio": short_size_ratio,
+        } if short_size_ratio < 1.0 else {}),
         # v36 — ATR-adaptive trailing stop
         **({"atr_trail": True,
             "atr_trail_multiplier": atr_trail_multiplier,
@@ -4966,6 +4976,7 @@ def _pm24(name: str, regime_rotation: bool = True, **kw):
         crash_cb=True,
         dd_halt=True,
         regime_short_gate=True,
+        short_size_ratio=0.25,
         **kw,
     )
 
@@ -5045,6 +5056,7 @@ def _pm25(name: str, **kw):
         crash_cb=True,
         dd_halt=True,
         regime_short_gate=True,
+        short_size_ratio=0.25,
         **kw,
     )
 
