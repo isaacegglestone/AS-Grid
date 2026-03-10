@@ -43,7 +43,7 @@ RESET  = "\033[0m"
 def load_trades(path: str) -> pd.DataFrame:
     """Load the trades CSV exported by the backtester."""
     df = pd.read_csv(path)
-    df["time"] = pd.to_datetime(df["time"])
+    df["time"] = pd.to_datetime(df["time"], format="ISO8601")
     df["date"] = df["time"].dt.date
     return df
 
@@ -51,7 +51,7 @@ def load_trades(path: str) -> pd.DataFrame:
 def load_equity_curve(path: str) -> pd.DataFrame:
     """Load the equity curve CSV exported by the backtester."""
     df = pd.read_csv(path)
-    df["time"] = pd.to_datetime(df["time"])
+    df["time"] = pd.to_datetime(df["time"], format="ISO8601")
     return df
 
 
