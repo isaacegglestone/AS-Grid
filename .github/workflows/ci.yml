@@ -230,29 +230,35 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      # Restore 1min parquets from Actions cache (populated by cache-klines.yml).
-      - name: Restore 1min klines from Actions cache
-        id: cache-1min
+      # Restore klines parquets from Actions cache (populated by cache-klines.yml).
+      # Includes both 1min (large, cache-only) and 15min (also committed to git
+      # but may not be in the checked-out commit yet for new symbols).
+      - name: Restore klines from Actions cache
+        id: cache-klines
         uses: actions/cache/restore@v4
         with:
           path: |
             asBack/klines_cache/XRPUSDT_1min.parquet
             asBack/klines_cache/BTCUSDT_1min.parquet
-          key: klines-1min-v2-${{ hashFiles('scripts/generate_klines_cache.py') }}
+            asBack/klines_cache/XRPUSDT_15min.parquet
+            asBack/klines_cache/BTCUSDT_15min.parquet
+          key: klines-v3-${{ hashFiles('scripts/generate_klines_cache.py') }}
 
-      # Cache miss fallback: generate 1min parquets inline (~15 min per symbol).
-      - name: Generate 1min parquets (cache miss fallback)
-        if: steps.cache-1min.outputs.cache-hit != 'true'
+      # Cache miss fallback: generate parquets inline (~15 min per symbol).
+      - name: Generate klines parquets (cache miss fallback)
+        if: steps.cache-klines.outputs.cache-hit != 'true'
         run: python scripts/generate_klines_cache.py
 
-      - name: Save 1min parquets to Actions cache (if freshly generated)
-        if: steps.cache-1min.outputs.cache-hit != 'true'
+      - name: Save klines parquets to Actions cache (if freshly generated)
+        if: steps.cache-klines.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
             asBack/klines_cache/XRPUSDT_1min.parquet
             asBack/klines_cache/BTCUSDT_1min.parquet
-          key: klines-1min-v2-${{ hashFiles('scripts/generate_klines_cache.py') }}
+            asBack/klines_cache/XRPUSDT_15min.parquet
+            asBack/klines_cache/BTCUSDT_15min.parquet
+          key: klines-v3-${{ hashFiles('scripts/generate_klines_cache.py') }}
 
       - name: "Run backtest: ${{ matrix.dispatch }}"
         run: python asBack/backtest_grid_bitunix.py ${{ matrix.dispatch }}
