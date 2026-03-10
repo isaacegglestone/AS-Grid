@@ -129,6 +129,38 @@ jobs:
             dispatch: "XRPPM27FULL:pm27_all_regime"
           - name: "PM27 combo"
             dispatch: "XRPPM27FULL:pm27_combo"
+          # ── PM26B: 2018+ grid vs trend comparison (2 variants) ──────
+          - name: "PM26B grid_only_2018"
+            dispatch: "XRPPM26BFULL:pm26b_grid_only_2018"
+          - name: "PM26B trend_2018"
+            dispatch: "XRPPM26BFULL:pm26b_trend_2018"
+          # ── PM26C: trend capture ≤10% equity cap (2 variants) ───────
+          - name: "PM26C trend_10pct"
+            dispatch: "XRPPM26CFULL:pm26c_trend_10pct"
+          - name: "PM26C trend_05pct"
+            dispatch: "XRPPM26CFULL:pm26c_trend_05pct"
+          # ── PM28: stack PM27 winners — full 8.8yr (5 variants) ──────
+          - name: "PM28 c15_lev3"
+            dispatch: "XRPPM28FULL:pm28_c15_lev3"
+          - name: "PM28 c15_lev5"
+            dispatch: "XRPPM28FULL:pm28_c15_lev5"
+          - name: "PM28 c15_wide020"
+            dispatch: "XRPPM28FULL:pm28_c15_wide020"
+          - name: "PM28 c15_w020_lev3"
+            dispatch: "XRPPM28FULL:pm28_c15_w020_lev3"
+          - name: "PM28 c15_w020_lev5"
+            dispatch: "XRPPM28FULL:pm28_c15_w020_lev5"
+          # ── PM28 2018: stack PM27 winners — skip 2017 (5 variants) ──
+          - name: "PM28_2018 c15_lev3"
+            dispatch: "XRPPM28_2018:pm28_c15_lev3"
+          - name: "PM28_2018 c15_lev5"
+            dispatch: "XRPPM28_2018:pm28_c15_lev5"
+          - name: "PM28_2018 c15_wide020"
+            dispatch: "XRPPM28_2018:pm28_c15_wide020"
+          - name: "PM28_2018 c15_w020_lev3"
+            dispatch: "XRPPM28_2018:pm28_c15_w020_lev3"
+          - name: "PM28_2018 c15_w020_lev5"
+            dispatch: "XRPPM28_2018:pm28_c15_w020_lev5"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),

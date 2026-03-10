@@ -5271,7 +5271,7 @@ def _pm26(name: str, **kw):
     """Build a PM26 trend-strategy sweep param set (based on pm25_dwell20)."""
     # Keys that override hardcoded values in _pm_v2_set return dict
     _overrides = {}
-    for _k in ("trend_capture", "trend_detection"):
+    for _k in ("trend_capture", "trend_detection", "trend_capture_size_pct"):
         if _k in kw:
             _overrides[_k] = kw.pop(_k)
     _base = {k: v for k, v in _V25_BASE.items()
@@ -5324,6 +5324,68 @@ XRP_PM_V26_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)   # full 8.8yr
 XRP_PM_V26_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
 XRP_PM_V26_FULL_CONFIG["param_sets"]      = _PM26_SETS
 XRP_PM_V26_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
+# v43 — XRPPM26B: 2018+ grid-only vs grid+trend comparison.
+#
+# The 2017 XRP parabolic rally ($0.25→$3.84) destroyed trend-capture equity,
+# starving all subsequent trend entries of capital.  By the 25% mark (mid-2019)
+# the trend variant had $171 equity vs $1,624 for grid-only.
+#
+# Hypothesis: if we skip the 2017 catastrophe entirely, does trend capture
+# become viable with full equity available?  Two variants test this:
+#   (1) grid_only baseline from Jan 2018
+#   (2) grid + trend (default sizing) from Jan 2018
+# ===========================================================================
+
+_PM26B_SETS = [
+    # ── Grid-only from 2018 (no 2017 catastrophe) ──────────────────────
+    _pm26("pm26b_grid_only_2018",
+          trend_capture=False, trend_detection=False),
+
+    # ── Grid + trend from 2018 (full equity, standard sizing) ─────────
+    _pm26("pm26b_trend_2018"),
+]
+
+XRP_PM_V26B_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V26B_FULL_CONFIG["start_date"]      = datetime(2018, 1, 1)    # skip 2017 catastrophe
+XRP_PM_V26B_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM_V26B_FULL_CONFIG["param_sets"]      = _PM26B_SETS
+XRP_PM_V26B_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
+# v43 — XRPPM26C: Trend capture with small equity cap.
+#
+# Even with grid+trend active, every single trend trade (122 total, 0% win
+# rate) lost money across 8.8 years.  Default trend_capture_size_pct=0.15
+# (15% of equity per trend position) is too aggressive — it drains equity
+# that the profitable grid needs.
+#
+# Hypothesis: if trend positions are tiny (≤10% equity), the grid engine
+# remains healthy and trend losses become negligible noise.
+#
+# Two variants on full 2017–2026 dataset:
+#   (1) 10% of equity per trend position
+#   (2) 5% of equity per trend position (ulta-conservative)
+# ===========================================================================
+
+_PM26C_SETS = [
+    # ── Trend at 10% of equity ────────────────────────────────────────
+    _pm26("pm26c_trend_10pct",
+          trend_capture_size_pct=0.10),
+
+    # ── Trend at 5% of equity (ultra-conservative) ───────────────────
+    _pm26("pm26c_trend_05pct",
+          trend_capture_size_pct=0.05),
+]
+
+XRP_PM_V26C_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V26C_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)   # full 8.8yr
+XRP_PM_V26C_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM_V26C_FULL_CONFIG["param_sets"]      = _PM26C_SETS
+XRP_PM_V26C_FULL_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
@@ -5452,6 +5514,68 @@ XRP_PM_V27_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)
 XRP_PM_V27_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
 XRP_PM_V27_FULL_CONFIG["param_sets"]      = _PM27_SETS
 XRP_PM_V27_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
+# v43 — XRPPM28: Stack PM27 winners.
+#
+# PM27 results (ranked):
+#   pm27_lev5          +141.41%  (19.93% DD)
+#   pm27_combo         +103.37%  (16.41% DD)  ← compound10+lev3+all_regime
+#   pm27_compound15    +101.58%  (12.36% DD)  ← best risk-adjusted
+#   pm27_lev3          + 84.85%  (16.32% DD)
+#   pm27_wide020       + 77.03%  ( 5.63% DD)  ← lowest DD
+#
+# Stack the top individual axis winners:
+#   compound15 (best compounding) × leverage × wide020 spacing.
+#
+# Two config sets:
+#   PM28FULL  — full 8.8yr dataset (2017-05-19 → 2026-03-08)
+#   PM28_2018 — skip 2017 catastrophe (2018-01-01 → 2026-03-08)
+# ===========================================================================
+
+_PM28_SETS = [
+    # ── compound15 + lev3 ─────────────────────────────────────────────
+    _pm27("pm28_c15_lev3",
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+
+    # ── compound15 + lev5 ─────────────────────────────────────────────
+    _pm27("pm28_c15_lev5",
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=5),
+
+    # ── compound15 + wide020 ──────────────────────────────────────────
+    _pm27("pm28_c15_wide020",
+          order_value_pct=0.15, order_value_min=10.0,
+          spacing=0.020),
+
+    # ── compound15 + wide020 + lev3 ──────────────────────────────────
+    _pm27("pm28_c15_w020_lev3",
+          order_value_pct=0.15, order_value_min=10.0,
+          spacing=0.020,
+          leverage=3),
+
+    # ── compound15 + wide020 + lev5 ──────────────────────────────────
+    _pm27("pm28_c15_w020_lev5",
+          order_value_pct=0.15, order_value_min=10.0,
+          spacing=0.020,
+          leverage=5),
+]
+
+# Full 8.8yr dataset
+XRP_PM_V28_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V28_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)
+XRP_PM_V28_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM_V28_FULL_CONFIG["param_sets"]      = _PM28_SETS
+XRP_PM_V28_FULL_CONFIG["daily_breakdown"] = True
+
+# Skip 2017 (from Jan 2018)
+XRP_PM_V28_2018_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V28_2018_CONFIG["start_date"]      = datetime(2018, 1, 1)
+XRP_PM_V28_2018_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM_V28_2018_CONFIG["param_sets"]      = _PM28_SETS
+XRP_PM_V28_2018_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
@@ -6059,6 +6183,62 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v42 PM27 FULL — grid-only optimization{variant_label}  (May 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("XRPPM26BFULL", "PM26BFULL")):
+        cfg = dict(XRP_PM_V26B_FULL_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM26B variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM_V26B_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v43 PM26B — grid vs trend (skip 2017){variant_label}  (Jan 2018 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("XRPPM26CFULL", "PM26CFULL")):
+        cfg = dict(XRP_PM_V26C_FULL_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM26C variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM_V26C_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v43 PM26C — trend capture ≤10% equity cap{variant_label}  (May 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("XRPPM28FULL", "PM28FULL")):
+        cfg = dict(XRP_PM_V28_FULL_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM28 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM_V28_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v43 PM28 FULL — stack PM27 winners{variant_label}  (May 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("XRPPM28_2018", "PM28_2018")):
+        cfg = dict(XRP_PM_V28_2018_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM28_2018 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM_V28_2018_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v43 PM28 2018 — stack PM27 winners (skip 2017){variant_label}  (Jan 2018 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):
