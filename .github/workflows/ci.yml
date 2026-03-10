@@ -233,6 +233,7 @@ jobs:
       # Restore klines parquets from Actions cache (populated by cache-klines.yml).
       # Includes both 1min (large, cache-only) and 15min (also committed to git
       # but may not be in the checked-out commit yet for new symbols).
+      # restore-keys falls back to prior cache versions for partial hits.
       - name: Restore klines from Actions cache
         id: cache-klines
         uses: actions/cache/restore@v4
@@ -243,6 +244,9 @@ jobs:
             asBack/klines_cache/XRPUSDT_15min.parquet
             asBack/klines_cache/BTCUSDT_15min.parquet
           key: klines-v3-${{ hashFiles('scripts/generate_klines_cache.py') }}
+          restore-keys: |
+            klines-v3-
+            klines-1min-v2-
 
       # Cache miss fallback: generate parquets inline (~15 min per symbol).
       - name: Generate klines parquets (cache miss fallback)
