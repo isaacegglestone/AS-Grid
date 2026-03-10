@@ -35,7 +35,11 @@ jobs:
         run: python -m pytest --tb=short -q
 
   # ---------------------------------------------------------------------------
-  # Stage 1b: Backtests — each config runs in its own parallel job (~40 min each)
+  # Stage 1b: Backtests — each variant runs in its own parallel job (~40 min each)
+  #
+  # Each PM24/PM25 variant is a separate matrix entry so results appear
+  # individually in the GitHub Actions UI within ~40 min, instead of waiting
+  # ~5.5 hrs for all variants to finish sequentially in a single job.
   #
   # Superseded backtests removed from CI (code kept in backtest_grid_bitunix.py):
   #   XRPPM2 (v12), XRPPM3 (v13), XRPPM4 (v14), XRPPM5 (v15)
@@ -45,18 +49,56 @@ jobs:
   backtests:
     name: "Backtest ${{ matrix.name }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 90
     needs: tests
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ── PM25: regime detection quality sweep across full 8.8yr stitched cache ──
-          - name: "PM25 FULL — regime detection quality sweep (8.8yr)"
-            dispatch: XRPPM25FULL
-          # ── PM24: 5-regime rotation sweep across full 8.8yr stitched cache ──
-          - name: "PM24 FULL — 5-regime rotation sweep (8.8yr)"
-            dispatch: XRPPM24FULL
+          # ── PM24: 5-regime rotation sweep (10 variants) ──────────────
+          - name: "PM24 baseline"
+            dispatch: "XRPPM24FULL:pm24_baseline"
+          - name: "PM24 default"
+            dispatch: "XRPPM24FULL:pm24_default"
+          - name: "PM24 choppy20"
+            dispatch: "XRPPM24FULL:pm24_choppy20"
+          - name: "PM24 choppy30"
+            dispatch: "XRPPM24FULL:pm24_choppy30"
+          - name: "PM24 trend30"
+            dispatch: "XRPPM24FULL:pm24_trend30"
+          - name: "PM24 trend40"
+            dispatch: "XRPPM24FULL:pm24_trend40"
+          - name: "PM24 dorm10"
+            dispatch: "XRPPM24FULL:pm24_dorm10"
+          - name: "PM24 dorm30"
+            dispatch: "XRPPM24FULL:pm24_dorm30"
+          - name: "PM24 aggressive"
+            dispatch: "XRPPM24FULL:pm24_aggressive"
+          - name: "PM24 conservative"
+            dispatch: "XRPPM24FULL:pm24_conservative"
+          # ── PM25: regime detection quality sweep (11 variants) ───────
+          - name: "PM25 baseline"
+            dispatch: "XRPPM25FULL:pm25_baseline"
+          - name: "PM25 dwell1"
+            dispatch: "XRPPM25FULL:pm25_dwell1"
+          - name: "PM25 dwell3"
+            dispatch: "XRPPM25FULL:pm25_dwell3"
+          - name: "PM25 dwell10"
+            dispatch: "XRPPM25FULL:pm25_dwell10"
+          - name: "PM25 dwell20"
+            dispatch: "XRPPM25FULL:pm25_dwell20"
+          - name: "PM25 ac05"
+            dispatch: "XRPPM25FULL:pm25_ac05"
+          - name: "PM25 ac15"
+            dispatch: "XRPPM25FULL:pm25_ac15"
+          - name: "PM25 ac20"
+            dispatch: "XRPPM25FULL:pm25_ac20"
+          - name: "PM25 dwell10_ac15"
+            dispatch: "XRPPM25FULL:pm25_dwell10_ac15"
+          - name: "PM25 dwell10_ac05"
+            dispatch: "XRPPM25FULL:pm25_dwell10_ac05"
+          - name: "PM25 dwell20_ac15"
+            dispatch: "XRPPM25FULL:pm25_dwell20_ac15"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
@@ -106,7 +148,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backtest-${{ matrix.dispatch }}
+          name: backtest-${{ matrix.name }}
           path: |
             bitunix_grid_search_results.csv
             bitunix_best_grid_trades.csv

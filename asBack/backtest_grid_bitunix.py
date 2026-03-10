@@ -5717,16 +5717,36 @@ if __name__ == "__main__":
         print("  v33 PM23 FULL — gate-relaxation combined sweep  (Oct 2019 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(XRP_PM_V23_FULL_CONFIG)
-    elif symbol in ("XRPPM24FULL", "PM24FULL"):
+    elif symbol.startswith(("XRPPM24FULL", "PM24FULL")):
+        cfg = dict(XRP_PM_V24_FULL_CONFIG)
+        # Support "XRPPM24FULL:variant_name" to run a single variant
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM24 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM_V24_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
-        print("  v34 PM24 FULL — 5-regime rotation sweep  (May 2017 → Mar 2026)")
+        print(f"  v34 PM24 FULL — 5-regime rotation sweep{variant_label}  (May 2017 → Mar 2026)")
         print("=" * 60)
-        grid_search_backtest(XRP_PM_V24_FULL_CONFIG)
-    elif symbol in ("XRPPM25FULL", "PM25FULL"):
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("XRPPM25FULL", "PM25FULL")):
+        cfg = dict(XRP_PM_V25_FULL_CONFIG)
+        # Support "XRPPM25FULL:variant_name" to run a single variant
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM25 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM_V25_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
-        print("  v35 PM25 FULL — regime detection quality sweep  (May 2017 → Mar 2026)")
+        print(f"  v35 PM25 FULL — regime detection quality sweep{variant_label}  (May 2017 → Mar 2026)")
         print("=" * 60)
-        grid_search_backtest(XRP_PM_V25_FULL_CONFIG)
+        grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
