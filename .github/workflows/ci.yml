@@ -99,6 +99,15 @@ jobs:
             dispatch: "XRPPM25FULL:pm25_dwell10_ac05"
           - name: "PM25 dwell20_ac15"
             dispatch: "XRPPM25FULL:pm25_dwell20_ac15"
+          # ── PM26: trend capture strategy sweep (4 variants) ──────────
+          - name: "PM26 grid_only"
+            dispatch: "XRPPM26FULL:pm26_grid_only"
+          - name: "PM26 vol_scaled"
+            dispatch: "XRPPM26FULL:pm26_vol_scaled"
+          - name: "PM26 trend_dwell10"
+            dispatch: "XRPPM26FULL:pm26_trend_dwell10"
+          - name: "PM26 slow_fast"
+            dispatch: "XRPPM26FULL:pm26_slow_fast"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),

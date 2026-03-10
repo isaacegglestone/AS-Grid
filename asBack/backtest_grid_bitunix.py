@@ -87,6 +87,10 @@ class GridOrderBacktester:
         self.dd_halt_counter: int = 0      # candles remaining in DD halt/resume pause
         self._gate_fire_counter: int = 0   # ATR gate consecutive fire count (Approach F cooldown)
 
+        # v41 — trend entry dwell (slow-in)
+        self._trend_entry_dwell_counter: int = 0  # candles since trend_mode set (for dwell)
+        self._trend_entry_dwell_dir: Optional[str] = None  # direction being dwelled
+
         # v27 PM17 — consecutive loss guard state
         self._consec_trend_losses: int = 0    # running count of consecutive trend losses
         self._consec_loss_pause_counter: int = 0  # candles remaining in loss pause
@@ -569,6 +573,8 @@ class GridOrderBacktester:
                             self.trend_mode = None
                             self.trend_confirm_counter = 0
                             self.trend_pending_dir = None
+                            self._trend_entry_dwell_counter = 0  # v41
+                            self._trend_entry_dwell_dir = None   # v41
                     self.crash_halt_counter = crash_cb_halt_len
                     halt_grid_longs = True
 
@@ -623,6 +629,8 @@ class GridOrderBacktester:
                             self.trend_mode = None
                             self.trend_confirm_counter = 0
                             self.trend_pending_dir = None
+                            self._trend_entry_dwell_counter = 0  # v41
+                            self._trend_entry_dwell_dir = None   # v41
                     self.surge_halt_counter = surge_cb_halt_len
                     halt_grid_shorts = True
 
@@ -781,6 +789,16 @@ class GridOrderBacktester:
             atr_trail_mult    = self.config.get("atr_trail_multiplier", 2.0)
             atr_trail_min     = self.config.get("atr_trail_min", 0.015)  # floor 1.5%
             atr_trail_max     = self.config.get("atr_trail_max", 0.12)   # cap 12%
+            # ── v41 — trend entry dwell (slow-in gate) ───────────────
+            # After trend confirmation, wait N extra candles with velocity
+            # still in the same direction before opening a position.
+            # Filters false breakouts by requiring persistence.
+            trend_entry_dwell     = int(self.config.get("trend_entry_dwell", 0))
+            # ── v41 — fast counter-velocity exit ─────────────────────
+            # Close trend position immediately when velocity reverses
+            # (any negative velocity for longs, any positive for shorts).
+            # Skips the trailing stop — fastest possible exit.
+            trend_exit_countervel = self.config.get("trend_exit_countervel", False)
             if atr_trail and price > 0:
                 atr_now = float(self.atr_series.iloc[idx])
                 dyn_trail = atr_now * atr_trail_mult / price
@@ -1125,7 +1143,10 @@ class GridOrderBacktester:
                             tp["peak"] = price
                         trail_stop = tp["peak"] * (1 - trail_stop_pct)
                         # Close if trail hit OR trend fully reversed OR max loss
-                        close_trend = price <= trail_stop or trending_down or _max_loss_hit
+                        # v41: countervel = close on ANY negative velocity (fast exit)
+                        _countervel_exit = trend_exit_countervel and velocity < 0
+                        close_trend = (price <= trail_stop or trending_down
+                                       or _max_loss_hit or _countervel_exit)
                         if close_trend:
                             fee_cost = tp["qty"] * price * (self.fee / 2)
                             gross_pnl = (price - tp["entry"]) * tp["qty"]
@@ -1153,11 +1174,16 @@ class GridOrderBacktester:
                                 self.trend_mode = None
                                 self.trend_confirm_counter = 0
                                 self.trend_pending_dir = None
+                                self._trend_entry_dwell_counter = 0  # v41
+                                self._trend_entry_dwell_dir = None   # v41
                     else:  # short
                         if price < tp["peak"]:
                             tp["peak"] = price
                         trail_stop = tp["peak"] * (1 + trail_stop_pct)
-                        close_trend = price >= trail_stop or trending_up or _max_loss_hit
+                        # v41: countervel = close on ANY positive velocity (fast exit)
+                        _countervel_exit = trend_exit_countervel and velocity > 0
+                        close_trend = (price >= trail_stop or trending_up
+                                       or _max_loss_hit or _countervel_exit)
                         if close_trend:
                             fee_cost = tp["qty"] * price * (self.fee / 2)
                             gross_pnl = (tp["entry"] - price) * tp["qty"]
@@ -1184,6 +1210,8 @@ class GridOrderBacktester:
                                 self.trend_mode = None
                                 self.trend_confirm_counter = 0
                                 self.trend_pending_dir = None
+                                self._trend_entry_dwell_counter = 0  # v41
+                                self._trend_entry_dwell_dir = None   # v41
 
                 # ── Confirmation counter ────────────────────────────────────
                 # Require velocity to remain above threshold for confirm_candles
@@ -1235,6 +1263,10 @@ class GridOrderBacktester:
                     self.trend_mode = "up"
                     self.trend_cooldown_counter = 0
                     self.last_short_price = price
+                    # v41: start dwell countdown if enabled
+                    if trend_entry_dwell > 0:
+                        self._trend_entry_dwell_counter = trend_entry_dwell
+                        self._trend_entry_dwell_dir = "up"
                     if force_close_grid and self.short_positions:
                         n = len(self.short_positions)
                         for ep, qty, margin_req, _tp, _sl in self.short_positions:
@@ -1251,6 +1283,7 @@ class GridOrderBacktester:
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} short(s)")
                     if (trend_capture and self.trend_position is None and not halt_all
+                            and trend_entry_dwell == 0                    # v41 dwell gate
                             and adx_allows_trend and ema_bias_long and bb_allows_trend
                             and rsi_allows_long and vol_confirms and ms_allows_long
                             and not _parabolic                            # Layer 1
@@ -1283,6 +1316,10 @@ class GridOrderBacktester:
                     self.trend_mode = "down"
                     self.trend_cooldown_counter = 0
                     self.last_long_price = price
+                    # v41: start dwell countdown if enabled
+                    if trend_entry_dwell > 0:
+                        self._trend_entry_dwell_counter = trend_entry_dwell
+                        self._trend_entry_dwell_dir = "down"
                     if force_close_grid and self.long_positions:
                         n = len(self.long_positions)
                         for ep, qty, margin_req, _tp, _sl in self.long_positions:
@@ -1299,6 +1336,7 @@ class GridOrderBacktester:
                               f"(vel={velocity*100:.2f}% x{self.trend_confirm_counter}) "
                               f"— force-closed {n} long(s)")
                     if (trend_capture and self.trend_position is None and not halt_all
+                            and trend_entry_dwell == 0                    # v41 dwell gate
                             and adx_allows_trend and ema_bias_short and bb_allows_trend
                             and rsi_allows_short and vol_confirms and ms_allows_short
                             and not _parabolic                            # Layer 1
@@ -1327,12 +1365,21 @@ class GridOrderBacktester:
                                       f"at {price:.4f} size=${cap_margin:.0f}{adx_info}")
 
                 elif self.trend_mode is not None and self.trend_position is None:
+                    # ── v41: Dwell countdown (slow-in gate) ─────────────────
+                    # Decrement each candle; only allow position opening when
+                    # counter reaches 0.  If direction changed during dwell
+                    # the mode change already reset things.
+                    if self._trend_entry_dwell_counter > 0:
+                        self._trend_entry_dwell_counter -= 1
+
                     # ── v26: Retry capture when mode is set but position not yet opened.
                     # With dynamic velocity the detection threshold (vel_threshold)
                     # can be lower than the capture threshold (cap_vel_threshold),
                     # so the mode fires before velocity is strong enough for a position.
                     # Retry until velocity either meets cap threshold or fades.
+                    _dwell_ok   = self._trend_entry_dwell_counter <= 0
                     _retry_up   = (self.trend_mode == "up"   and trend_capture
+                                   and _dwell_ok                           # v41
                                    and velocity >= cap_vel_threshold
                                    and not halt_all and adx_allows_trend
                                    and ema_bias_long and bb_allows_trend
@@ -1343,6 +1390,7 @@ class GridOrderBacktester:
                                    and not _eq_curve_blocked
                                    and not _consec_blocked)
                     _retry_down = (self.trend_mode == "down" and trend_capture
+                                   and _dwell_ok                           # v41
                                    and abs(velocity) >= cap_vel_threshold
                                    and not halt_all and adx_allows_trend
                                    and ema_bias_short and bb_allows_trend
@@ -1399,6 +1447,8 @@ class GridOrderBacktester:
                                   f"— resuming hedge mode")
                             self.trend_mode = None
                             self.trend_cooldown_counter = 0
+                            self._trend_entry_dwell_counter = 0  # v41
+                            self._trend_entry_dwell_dir = None   # v41
                             self.last_long_price  = price
                             self.last_short_price = price
                     else:
@@ -3315,6 +3365,10 @@ def _pm_v2_set(
     rally_gate_entry_pct_med: float = 0.50,         # Medium tier: 50% gain triggers
     rally_gate_window_slow: int = 2880,             # Slow tier: 1 month on 15min
     rally_gate_entry_pct_slow: float = 1.00,        # Slow tier: 100% (2x) gain triggers
+    # v41 — trend entry dwell (slow-in gate for trend captures)
+    trend_entry_dwell: int = 0,                      # Extra candles after confirm before opening (0=off)
+    # v41 — fast counter-velocity exit (close immediately on counter-trend)
+    trend_exit_countervel: bool = False,              # Close trend pos on first counter-velocity, skip trail
     # v37 — surge circuit breaker (upside velocity CB)
     surge_cb: bool = False,                         # Fire when price rises >= rise_pct in lookback
     surge_cb_rise_pct: float = 0.10,                # Min rise to trigger (10%)
@@ -3451,6 +3505,10 @@ def _pm_v2_set(
             "rally_gate_window_slow": rally_gate_window_slow,
             "rally_gate_entry_pct_slow": rally_gate_entry_pct_slow,
         } if rally_gate else {}),
+        # v41 — trend entry dwell (slow-in)
+        **({"trend_entry_dwell": trend_entry_dwell} if trend_entry_dwell > 0 else {}),
+        # v41 — fast counter-velocity exit
+        **({"trend_exit_countervel": True} if trend_exit_countervel else {}),
         # v36 — ATR-adaptive trailing stop
         **({"atr_trail": True,
             "atr_trail_multiplier": atr_trail_multiplier,
@@ -5178,6 +5236,95 @@ XRP_PM_V25_FULL_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# v41 — XRPPM26: Trend capture strategy sweep.
+#
+# pm25_dwell20 (-78.82%) analysis reveals trend captures are the #1 loss
+# driver (-$1,345.88), while grid is NET POSITIVE (+$557.68).  2017 alone
+# accounts for 96% of all trend losses (-$1,292.78).
+#
+# Research-backed interventions (Oxford CPD, CTA best practices, Kelly):
+#
+#   Test 1 — Grid-only: disable trend captures entirely.  If grid is
+#            profitable on its own (+$557.68 implied), this should be
+#            positive overall — proves the grid edge in isolation.
+#
+#   Test 2 — Vol-scaled sizing: use cap_size_atr_scale to size trend
+#            captures inversely with volatility.  During 2017 parabolic
+#            moves (ATR 5-10× normal), positions would be 10-20% of
+#            normal size — limiting damage while keeping optionality.
+#
+#   Test 3 — Trend entry dwell: after confirmation, wait 10 more candles
+#            before opening.  Filters false breakouts (fast whipsaws that
+#            confirm then reverse within minutes).
+#
+#   Test 4 — Slow-in / fast-out: dwell=10 on entry (filters fakeouts)
+#            + counter-velocity exit (instant close on any reversal).
+#            The "fast reversion" from the Oxford CPD paper: use momentum
+#            for detection but mean-reversion for exit timing.
+#
+# All variants use pm25_dwell20 as base (best so far).
+# ===========================================================================
+
+def _pm26(name: str, **kw):
+    """Build a PM26 trend-strategy sweep param set (based on pm25_dwell20)."""
+    # Keys that override hardcoded values in _pm_v2_set return dict
+    _overrides = {}
+    for _k in ("trend_capture", "trend_detection"):
+        if _k in kw:
+            _overrides[_k] = kw.pop(_k)
+    _base = {k: v for k, v in _V25_BASE.items()
+             if k not in ("regime_hysteresis_pct", "vol_adaptive_spacing",
+                          "vas_floor", "vas_ceil", "regime_rotation")}
+    result = _pm_v2_set(
+        name, **_base,
+        vel_atr_mult=1.66, vel_dir_only=True, vel_dir_ema_period=120,
+        regime_rotation=True,
+        regime_min_dwell_candles=20,    # locked to best from PM25
+        atr_trail=True,
+        surge_cb=True,
+        crash_cb=True,
+        dd_halt=True,
+        regime_short_gate=True,
+        short_size_ratio=0.25,
+        rally_gate=True,
+        **kw,
+    )
+    result.update(_overrides)
+    return result
+
+_PM26_SETS = [
+    # ── Test 1: Grid-only (disable trend captures) ─────────────────────
+    _pm26("pm26_grid_only",
+          trend_capture=False, trend_detection=False),
+
+    # ── Test 2: Vol-scaled trend sizing ────────────────────────────────
+    # Floor 10% size (vs default 30%) during extreme vol; ceiling 50%
+    # (vs 90%) even in normal vol — much more conservative overall.
+    _pm26("pm26_vol_scaled",
+          cap_size_atr_scale=True,
+          cap_size_atr_floor=0.10,
+          cap_size_atr_ceiling=0.50),
+
+    # ── Test 3: Trend entry dwell (slow-in gate) ──────────────────────
+    _pm26("pm26_trend_dwell10",
+          trend_entry_dwell=10),
+
+    # ── Test 4: Slow-in / fast-out ─────────────────────────────────────
+    # Oxford CPD "slow momentum, fast reversion": dwell entry + immediate
+    # counter-velocity exit (close on ANY counter-trend, skip trail).
+    _pm26("pm26_slow_fast",
+          trend_entry_dwell=10,
+          trend_exit_countervel=True),
+]
+
+XRP_PM_V26_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V26_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)   # full 8.8yr (Bitfinex start)
+XRP_PM_V26_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM_V26_FULL_CONFIG["param_sets"]      = _PM26_SETS
+XRP_PM_V26_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -5752,6 +5899,21 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v35 PM25 FULL — regime detection quality sweep{variant_label}  (May 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("XRPPM26FULL", "PM26FULL")):
+        cfg = dict(XRP_PM_V26_FULL_CONFIG)
+        # Support "XRPPM26FULL:variant_name" to run a single variant
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM26 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM_V26_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v41 PM26 FULL — trend capture strategy sweep{variant_label}  (May 2017 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):
