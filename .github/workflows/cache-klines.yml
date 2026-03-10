@@ -8,9 +8,10 @@ name: Generate klines cache
 #   2. workflow_dispatch — manual re-run to refresh data.
 #
 # Storage strategy:
-#   15min parquet (3.6 MB) — committed to git (stable Binance+Bitunix history).
-#   1min parquet  (~54 MB) — stored in GitHub Actions cache only (not committed).
+#   15min parquets (~3-5 MB each)  — committed to git (stable historical data).
+#   1min parquets  (~50-100 MB each) — stored in GitHub Actions cache only.
 #
+# Supported symbols: XRPUSDT, BTCUSDT.
 # No secrets required — the Bitunix klines endpoint is public.
 on:
   push:
@@ -32,21 +33,25 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Try to restore the 1min parquet from Actions cache before deciding to skip.
-      - name: Restore 1min parquet from Actions cache
+      # Try to restore the 1min parquets from Actions cache before deciding to skip.
+      - name: Restore 1min parquets from Actions cache
         id: cache-1min
         uses: actions/cache/restore@v4
         with:
-          path: asBack/klines_cache/XRPUSDT_1min.parquet
-          key: klines-1min-v1-${{ hashFiles('scripts/generate_klines_cache.py') }}
+          path: |
+            asBack/klines_cache/XRPUSDT_1min.parquet
+            asBack/klines_cache/BTCUSDT_1min.parquet
+          key: klines-1min-v2-${{ hashFiles('scripts/generate_klines_cache.py') }}
 
-      # Skip if the 15min parquet is committed AND 1min is already cached.
-      - name: Check if both parquets are available
+      # Skip if both 15min parquets are committed AND 1min are already cached.
+      - name: Check if all parquets are available
         id: check
         run: |
-          if [ -f "asBack/klines_cache/XRPUSDT_15min.parquet" ] && [ "${{ steps.cache-1min.outputs.cache-hit }}" = "true" ]; then
+          if [ -f "asBack/klines_cache/XRPUSDT_15min.parquet" ] && \
+             [ -f "asBack/klines_cache/BTCUSDT_15min.parquet" ] && \
+             [ "${{ steps.cache-1min.outputs.cache-hit }}" = "true" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "15min committed and 1min in cache — skipping fetch."
+            echo "All parquets present — skipping fetch."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "One or more parquets missing — will fetch."
@@ -66,19 +71,21 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         run: python scripts/generate_klines_cache.py
 
-      # Commit the small 15min parquet back to the branch (stable historical data).
-      - name: Commit 15min parquet to branch
+      # Commit the small 15min parquets back to the branch (stable historical data).
+      - name: Commit 15min parquets to branch
         if: steps.check.outputs.skip == 'false'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add asBack/klines_cache/XRPUSDT_15min.parquet
+          git add asBack/klines_cache/XRPUSDT_15min.parquet asBack/klines_cache/BTCUSDT_15min.parquet
           git diff --cached --quiet || (git commit -m "data: regenerate 15min klines cache [skip ci]" && git push)
 
-      # Store the large 1min parquet in Actions cache (not committed to git).
-      - name: Save 1min parquet to Actions cache
+      # Store the large 1min parquets in Actions cache (not committed to git).
+      - name: Save 1min parquets to Actions cache
         if: steps.check.outputs.skip == 'false'
         uses: actions/cache/save@v4
         with:
-          path: asBack/klines_cache/XRPUSDT_1min.parquet
-          key: klines-1min-v1-${{ hashFiles('scripts/generate_klines_cache.py') }}
+          path: |
+            asBack/klines_cache/XRPUSDT_1min.parquet
+            asBack/klines_cache/BTCUSDT_1min.parquet
+          key: klines-1min-v2-${{ hashFiles('scripts/generate_klines_cache.py') }}

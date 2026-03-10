@@ -195,6 +195,23 @@ jobs:
             dispatch: "XRPPM29_2018:pm29_lo_vas"
           - name: "PM29_2018 combo"
             dispatch: "XRPPM29_2018:pm29_combo"
+          # ── PM30: BTC grid — best adaptive settings (8 variants) ─────
+          - name: "PM30 BTC baseline"
+            dispatch: "BTCPM30FULL:pm30_baseline"
+          - name: "PM30 BTC lo"
+            dispatch: "BTCPM30FULL:pm30_lo"
+          - name: "PM30 BTC vas"
+            dispatch: "BTCPM30FULL:pm30_vas"
+          - name: "PM30 BTC lo_vas"
+            dispatch: "BTCPM30FULL:pm30_lo_vas"
+          - name: "PM30 BTC lo_c15_lev3"
+            dispatch: "BTCPM30FULL:pm30_lo_c15_lev3"
+          - name: "PM30 BTC lo_vas_c15"
+            dispatch: "BTCPM30FULL:pm30_lo_vas_c15"
+          - name: "PM30 BTC lo_vas_c15_lev3"
+            dispatch: "BTCPM30FULL:pm30_lo_vas_c15_lev3"
+          - name: "PM30 BTC c15_lev5"
+            dispatch: "BTCPM30FULL:pm30_c15_lev5"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
@@ -213,25 +230,29 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      # Restore the ~54 MB 1min parquet from Actions cache (populated by cache-klines.yml).
+      # Restore 1min parquets from Actions cache (populated by cache-klines.yml).
       - name: Restore 1min klines from Actions cache
         id: cache-1min
         uses: actions/cache/restore@v4
         with:
-          path: asBack/klines_cache/XRPUSDT_1min.parquet
-          key: klines-1min-v1-${{ hashFiles('scripts/generate_klines_cache.py') }}
+          path: |
+            asBack/klines_cache/XRPUSDT_1min.parquet
+            asBack/klines_cache/BTCUSDT_1min.parquet
+          key: klines-1min-v2-${{ hashFiles('scripts/generate_klines_cache.py') }}
 
-      # Cache miss fallback: generate the 1min parquet inline (~15 min).
-      - name: Generate 1min parquet (cache miss fallback)
+      # Cache miss fallback: generate 1min parquets inline (~15 min per symbol).
+      - name: Generate 1min parquets (cache miss fallback)
         if: steps.cache-1min.outputs.cache-hit != 'true'
         run: python scripts/generate_klines_cache.py
 
-      - name: Save 1min parquet to Actions cache (if freshly generated)
+      - name: Save 1min parquets to Actions cache (if freshly generated)
         if: steps.cache-1min.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: asBack/klines_cache/XRPUSDT_1min.parquet
-          key: klines-1min-v1-${{ hashFiles('scripts/generate_klines_cache.py') }}
+          path: |
+            asBack/klines_cache/XRPUSDT_1min.parquet
+            asBack/klines_cache/BTCUSDT_1min.parquet
+          key: klines-1min-v2-${{ hashFiles('scripts/generate_klines_cache.py') }}
 
       - name: "Run backtest: ${{ matrix.dispatch }}"
         run: python asBack/backtest_grid_bitunix.py ${{ matrix.dispatch }}

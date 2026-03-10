@@ -1,31 +1,29 @@
 """
-scripts/generate_klines_cache.py  (v3 — 3-source stitched cache 2026-03-08)
+scripts/generate_klines_cache.py  (v4 — multi-symbol 3-source stitched cache)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Pre-fetches klines and saves them as parquet files in ``asBack/klines_cache/``.
 Once generated, the backtest engine loads from disk instead of hitting the API.
 
+Supported symbols: XRPUSDT, BTCUSDT (easily extensible to others).
+
 Data sources (3-way stitch)
 ---------------------------
-- **Bitfinex public API** — tXRPUSD available from ~2017-05-19 onward.
-  Covers the 2017 mega-bubble ($0.006 → $3.84) and 2018 crash.
+- **Bitfinex public API** — tXRPUSD / tBTCUSD available from 2017 onward.
   Up to 10,000 candles per request, no API key required.
-- **Binance Data Vision** (data.binance.vision) — XRPUSDT spot data from
-  ~2018-05-01 onward.  Downloads monthly ZIP/CSV files with no API key and
-  no geographic restrictions.
-- **Bitunix public API** — XRPUSDT available from ~2022-04-20 onward.
+- **Binance Data Vision** (data.binance.vision) — spot data downloads.
+  Monthly ZIP/CSV files with no API key and no geographic restrictions.
+- **Bitunix public API** — futures klines from ~2022 onward.
 
-Stitched timeline (~8.8 years):
-  Bitfinex  2017-05-19 → 2018-05-01  (XRP/USD → converted to align with USDT)
-  Binance   2018-05-01 → 2022-04-20  (XRPUSDT spot via Data Vision)
-  Bitunix   2022-04-20 → now          (live-exchange data used by the bot)
+Stitched timelines:
+  XRPUSDT:  Bitfinex 2017-05-19 → Binance 2018-05-01 → Bitunix 2022-04-20 → now
+  BTCUSDT:  Bitfinex 2017-01-01 → Binance 2017-08-17 → Bitunix 2022-04-20 → now
 
-The 1min stitched dataset is ~350–450 MB uncompressed (~100–120 MB as parquet).
-It is stored in GitHub Actions cache (not committed to git).
+The 1min stitched datasets are stored in GitHub Actions cache (not committed).
 
 Usage
 -----
-    python scripts/generate_klines_cache.py
-
+    python scripts/generate_klines_cache.py          # all symbols
+    python scripts/generate_klines_cache.py BTCUSDT  # single symbol
 The script is also run automatically by the "Generate klines cache" GitHub
 Actions workflow (.github/workflows/cache-klines.yml).
 """
@@ -53,11 +51,28 @@ if _REPO_ROOT not in sys.path:
 from asBack.backtest_grid_bitunix import fetch_klines_as_df  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Source boundary dates.  Data before each date comes from the previous source.
+# Per-symbol source boundary dates.
+# Each symbol has different data-availability windows on each exchange.
 # ---------------------------------------------------------------------------
-_BITFINEX_START = datetime(2017, 5, 19, tzinfo=timezone.utc)   # earliest tXRPUSD 1m candle
-_BINANCE_START  = datetime(2018, 5, 1,  tzinfo=timezone.utc)   # earliest XRPUSDT on Data Vision
-_BITUNIX_START  = datetime(2022, 4, 20, tzinfo=timezone.utc)   # earliest XRPUSDT on Bitunix
+_SYMBOL_BOUNDARIES = {
+    "XRPUSDT": {
+        "bitfinex_start": datetime(2017, 5, 19, tzinfo=timezone.utc),  # earliest tXRPUSD 1m
+        "binance_start":  datetime(2018, 5, 1,  tzinfo=timezone.utc),  # earliest on Data Vision
+        "bitunix_start":  datetime(2022, 4, 20, tzinfo=timezone.utc),  # earliest on Bitunix
+        "bitfinex_pair":  "tXRPUSD",
+    },
+    "BTCUSDT": {
+        "bitfinex_start": datetime(2017, 1, 1,  tzinfo=timezone.utc),  # tBTCUSD available from 2013
+        "binance_start":  datetime(2017, 8, 17, tzinfo=timezone.utc),  # earliest BTCUSDT on Data Vision
+        "bitunix_start":  datetime(2022, 4, 20, tzinfo=timezone.utc),  # earliest on Bitunix
+        "bitfinex_pair":  "tBTCUSD",
+    },
+}
+
+# Legacy aliases for backward compat (used in stitch logic below)
+_BITFINEX_START = _SYMBOL_BOUNDARIES["XRPUSDT"]["bitfinex_start"]
+_BINANCE_START  = _SYMBOL_BOUNDARIES["XRPUSDT"]["binance_start"]
+_BITUNIX_START  = _SYMBOL_BOUNDARIES["XRPUSDT"]["bitunix_start"]
 
 # Bitfinex interval names
 _BITFINEX_INTERVAL_MAP = {
@@ -86,15 +101,20 @@ _BINANCE_INTERVAL_MAP = {
 # source="stitched"  — 3-way stitch: Bitfinex → Binance → Bitunix.
 # end_dt is evaluated at runtime so each generation always fetches up to today.
 # ---------------------------------------------------------------------------
-def _datasets():
+def _datasets(symbols: List[str] | None = None):
+    """Return list of (symbol, interval, start, end, source) tuples.
+
+    If *symbols* is provided, only datasets for those symbols are returned.
+    """
     now = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    return [
-        # Full ~8.8-year 15min history: Bitfinex → Binance → Bitunix.
-        ("XRPUSDT", "15min", _BITFINEX_START, now, "stitched"),
-        # Full ~8.8-year 1min history: Bitfinex → Binance → Bitunix.
-        # Stored in Actions cache only (~100-120 MB parquet). Not committed to git.
-        ("XRPUSDT", "1min",  _BITFINEX_START, now, "stitched"),
-    ]
+    all_datasets = []
+    for sym, bounds in _SYMBOL_BOUNDARIES.items():
+        if symbols and sym not in symbols:
+            continue
+        start = bounds["bitfinex_start"]
+        all_datasets.append((sym, "15min", start, now, "stitched"))
+        all_datasets.append((sym, "1min",  start, now, "stitched"))
+    return all_datasets
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +179,9 @@ async def fetch_bitfinex_klines_as_df(
     start_ms = int(start_dt.timestamp() * 1000)
     end_ms = int(end_dt.timestamp() * 1000)
 
-    # Bitfinex symbol mapping: XRPUSDT → tXRPUSD
-    bfx_symbol = "tXRPUSD"  # Bitfinex has XRP/USD, not XRP/USDT
+    # Bitfinex symbol mapping — look up from _SYMBOL_BOUNDARIES, fall back to tXRPUSD
+    _sym_bounds = _SYMBOL_BOUNDARIES.get(symbol, {})
+    bfx_symbol = _sym_bounds.get("bitfinex_pair", "tXRPUSD")
 
     print(
         f"  [Bitfinex] Fetching {bfx_symbol} {interval_bitunix}  "
@@ -418,7 +439,17 @@ async def main() -> None:
     # The backtest engine checks this path as a fallback when the repo-local cache is absent.
     _local_dev_dir = os.path.expanduser(os.path.join("~", "git", "data", "asgrid-klines"))
 
-    for symbol, interval, start_dt, end_dt, source in _datasets():
+    # Parse optional symbol filter from CLI args
+    _cli_symbols = None
+    if len(sys.argv) > 1:
+        _cli_symbols = [s.upper() for s in sys.argv[1:] if not s.startswith("-")]
+        if _cli_symbols:
+            unknown = [s for s in _cli_symbols if s not in _SYMBOL_BOUNDARIES]
+            if unknown:
+                print(f"ERROR: unknown symbol(s): {unknown}.  Known: {list(_SYMBOL_BOUNDARIES)}")
+                sys.exit(1)
+
+    for symbol, interval, start_dt, end_dt, source in _datasets(symbols=_cli_symbols):
         out_path = os.path.join(cache_dir, f"{symbol}_{interval}.parquet")
         _local_dev_path = os.path.join(_local_dev_dir, f"{symbol}_{interval}.parquet")
 
@@ -438,21 +469,27 @@ async def main() -> None:
             # ------------------------------------------------------------------
             # 3-way stitch: Bitfinex → Binance → Bitunix.
             # Each source covers a non-overlapping date window.
+            # Per-symbol boundary dates from _SYMBOL_BOUNDARIES.
             # ------------------------------------------------------------------
+            _bounds = _SYMBOL_BOUNDARIES[symbol]
+            _bfx_start = _bounds["bitfinex_start"]
+            _bin_start = _bounds["binance_start"]
+            _btx_start = _bounds["bitunix_start"]
+
             start_utc = start_dt if start_dt.tzinfo else start_dt.replace(tzinfo=timezone.utc)
             end_utc   = end_dt   if end_dt.tzinfo   else end_dt.replace(tzinfo=timezone.utc)
             parts = []
             part_num = 0
             total_parts = (
-                (1 if start_utc < _BINANCE_START else 0)
-                + (1 if start_utc < _BITUNIX_START else 0)
+                (1 if start_utc < _bin_start else 0)
+                + (1 if start_utc < _btx_start else 0)
                 + 1  # Bitunix (always)
             )
 
             # Part A: Bitfinex (pre-Binance era)
-            if start_utc < _BINANCE_START:
+            if start_utc < _bin_start:
                 part_num += 1
-                bfx_end = min(_BINANCE_START, end_utc)
+                bfx_end = min(_bin_start, end_utc)
                 print(f"\n--- Part {part_num}/{total_parts}: Bitfinex  {start_utc.date()} → {bfx_end.date()} ---")
                 df_bitfinex = await fetch_bitfinex_klines_as_df(
                     symbol=symbol,
@@ -463,10 +500,10 @@ async def main() -> None:
                 parts.append(df_bitfinex)
 
             # Part B: Binance (pre-Bitunix era)
-            binance_start = max(start_utc, _BINANCE_START)
-            if binance_start < _BITUNIX_START and binance_start < end_utc:
+            binance_start = max(start_utc, _bin_start)
+            if binance_start < _btx_start and binance_start < end_utc:
                 part_num += 1
-                binance_end = min(_BITUNIX_START, end_utc)
+                binance_end = min(_btx_start, end_utc)
                 print(f"\n--- Part {part_num}/{total_parts}: Binance  {binance_start.date()} → {binance_end.date()} ---")
                 df_binance = await fetch_binance_klines_as_df(
                     symbol=symbol,
@@ -477,7 +514,7 @@ async def main() -> None:
                 parts.append(df_binance)
 
             # Part C: Bitunix (current exchange)
-            bitunix_start = max(start_utc, _BITUNIX_START)
+            bitunix_start = max(start_utc, _btx_start)
             if bitunix_start < end_utc:
                 part_num += 1
                 print(f"\n--- Part {part_num}/{total_parts}: Bitunix  {bitunix_start.date()} → {end_utc.date()} ---")

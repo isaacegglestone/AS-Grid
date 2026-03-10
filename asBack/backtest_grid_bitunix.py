@@ -5704,6 +5704,127 @@ XRP_PM_V29_2018_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# v45 — BTCPM30: BTC grid backtest with best adaptive settings.
+#
+# BTC–XRP correlation analysis showed BTC is the best grid candidate:
+#   - Monthly vol:      9.3% (vs XRP 49.7%) — more predictable
+#   - Gridable months:  92.2% (vs XRP 45.1%) — grid works most of the time
+#   - Max monthly rally: +60.7% (vs XRP +283%) — shorts less dangerous
+#   - BTC–XRP corr:    0.397 — diversification potential
+#
+# Uses _pm29() builder (grid-only + VAS + grid_long_only) with BTC-tuned
+# parameters:
+#   - Default spacing 0.008 (0.8%) — tighter than XRP's 1.5% due to lower vol
+#   - VAS floor=0.003, ceil=0.012 (vs XRP 0.008/0.020) — scaled for BTC vol
+#   - All protections enabled (atr_trail, surge_cb, crash_cb, dd_halt, etc.)
+#
+# 8 variants testing key hypotheses adapted for BTC:
+#   (A) Baseline grid w/ BTC spacing (both sides)
+#   (B) Long-only grid (remove short exposure)
+#   (C) Vol-adaptive spacing (dynamic for BTC's calmer vol profile)
+#   (D) Long-only + VAS (most dynamically adaptive)
+#   (E) Long-only + compound15 + lev3
+#   (F) Long-only + VAS + compound15
+#   (G) Long-only + VAS + compound15 + lev3 (full adaptive stack)
+#   (H) Both sides + compound15 + lev5 (PM28 best adapted for BTC)
+# ===========================================================================
+
+# BTC base config template — mirrors XRP_CONFIG structure for BTC/USDT.
+BTC_BASE_CONFIG: Dict[str, Any] = {
+    # ── Market
+    "symbol": "BTCUSDT",
+    "interval": "1min",
+
+    # ── Date range (default window — overridden by PM configs)
+    "start_date": datetime(2025, 8, 1),
+    "end_date":   datetime(2026, 2, 1),
+
+    # ── Account / risk (same as XRP — $1,000 USDT starting equity)
+    "initial_balance": 1000,
+    "order_value": 100,          # USD per grid order
+    "max_drawdown": 0.9,
+    "max_positions": 6,          # 3 long + 3 short
+    "max_positions_per_side": 3,
+    "max_unrealized_loss_per_side": 30,
+    "sl_multiplier": 2.0,
+    "min_sl_pct": 0.01,
+    "fee_pct": 0.0006,           # Bitunix taker fee 0.06 %
+    "leverage": 1,
+    "direction": "both",
+    "grid_refresh_interval": 10,
+    # ── Trend detection defaults (overridden per param_set)
+    "trend_detection": True,
+    "trend_capture": True,
+    "trend_lookback_candles": 15,
+    "trend_velocity_pct": 0.04,
+    "trend_cooldown_candles": 30,
+    "trend_capture_size_pct": 0.15,
+    "trend_trailing_stop_pct": 0.04,
+    "trend_confirm_candles": 3,
+    "trend_capture_velocity_pct": 0.06,
+    "trend_force_close_grid": False,
+    "param_sets": [],
+}
+
+_PM30_SETS = [
+    # ── (A) Baseline: BTC spacing 0.8%, both sides ───────────────────
+    _pm29("pm30_baseline",
+          spacing=0.008),
+
+    # ── (B) Long-only: remove shorts ─────────────────────────────────
+    _pm29("pm30_lo",
+          grid_long_only=True,
+          spacing=0.008),
+
+    # ── (C) VAS: dynamic spacing tuned for BTC vol ───────────────────
+    _pm29("pm30_vas",
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.012),
+
+    # ── (D) Long-only + VAS: most dynamically adaptive ──────────────
+    _pm29("pm30_lo_vas",
+          grid_long_only=True,
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.012),
+
+    # ── (E) Long-only + compound15 + lev3 ────────────────────────────
+    _pm29("pm30_lo_c15_lev3",
+          grid_long_only=True,
+          spacing=0.008,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+
+    # ── (F) Long-only + VAS + compound15 ─────────────────────────────
+    _pm29("pm30_lo_vas_c15",
+          grid_long_only=True,
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.012,
+          order_value_pct=0.15, order_value_min=10.0),
+
+    # ── (G) Full adaptive stack: LO + VAS + compound15 + lev3 ────────
+    _pm29("pm30_lo_vas_c15_lev3",
+          grid_long_only=True,
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.012,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+
+    # ── (H) Both sides + compound15 + lev5 (PM28 best for BTC) ──────
+    _pm29("pm30_c15_lev5",
+          spacing=0.008,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=5),
+]
+
+# Full 9yr dataset (Jan 2017 → Mar 2026)
+BTC_PM30_FULL_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM30_FULL_CONFIG["start_date"]      = datetime(2017, 1, 1)
+BTC_PM30_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+BTC_PM30_FULL_CONFIG["param_sets"]      = _PM30_SETS
+BTC_PM30_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -6392,6 +6513,20 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v44 PM29 2018 — long-only + spacing (skip 2017){variant_label}  (Jan 2018 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM30FULL", "PM30FULL")):
+        cfg = dict(BTC_PM30_FULL_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM30 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM30_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v45 PM30 BTC FULL — best adaptive grid on BTCUSDT{variant_label}  (Jan 2017 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):
