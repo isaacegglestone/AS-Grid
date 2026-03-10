@@ -5315,7 +5315,14 @@ XRP_CB_2Y_CONFIG["param_sets"] = [
 
 if __name__ == "__main__":
     import sys
-    symbol = sys.argv[1].upper() if len(sys.argv) > 1 else "ALL"
+    _raw_arg = sys.argv[1] if len(sys.argv) > 1 else "ALL"
+    # Upper-case the dispatch prefix but preserve variant suffix case
+    # e.g. "XRPPM24FULL:pm24_choppy20" → prefix="XRPPM24FULL", suffix="pm24_choppy20"
+    if ":" in _raw_arg:
+        _prefix, _suffix = _raw_arg.split(":", 1)
+        symbol = _prefix.upper() + ":" + _suffix
+    else:
+        symbol = _raw_arg.upper()
 
     if symbol in ("BTCUSDT", "BTC"):
         print("\n" + "=" * 60)
