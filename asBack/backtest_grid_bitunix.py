@@ -523,6 +523,10 @@ class GridOrderBacktester:
             halt_grid_shorts = self.surge_halt_counter > 0   # surge CB: blocks new short entries only
             halt_all         = self.dd_halt_counter > 0      # DD halt: blocks all new entries
 
+            # v44 — grid_long_only: permanently suppress all short grid entries.
+            if self.config.get("grid_long_only", False):
+                halt_grid_shorts = True
+
             # ------------------------------------------------------------------
             # Velocity circuit breaker (crash_cb)
             # Fires when price drops >= crash_cb_drop_pct in crash_cb_lookback_candles.
@@ -2369,6 +2373,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "rally_gate_window_slow", "rally_gate_entry_pct_slow",
                     # v41 — trend entry dwell & fast exit
                     "trend_entry_dwell", "trend_exit_countervel",
+                    # v44 — grid long-only mode
+                    "grid_long_only",
                 ) if k in params}),
             }
         )
@@ -3385,8 +3391,10 @@ def _pm_v2_set(
     dd_halt: bool = False,                          # Master switch for equity drawdown halt
     dd_halt_max_drawdown: float = 0.30,             # Max allowed drawdown before halt (30%)
     dd_halt_candles: int = 384,                     # Halt duration after DD trigger (~4 days on 15min)
+    # v44 — grid long-only mode
+    grid_long_only: bool = False,                   # Permanently suppress all short grid entries
 ) -> Dict[str, Any]:
-    """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28/v29/v34 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA, combination sweep, regime rotation."""
+    """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28/v29/v34/v44 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA, combination sweep, regime rotation, grid long-only."""
     return {
         "name": name,
         "use_sl": True,
@@ -3534,6 +3542,8 @@ def _pm_v2_set(
             "max_drawdown": dd_halt_max_drawdown,
             "dd_halt_candles": dd_halt_candles}
            if dd_halt else {}),
+        # v44 — grid long-only mode
+        **({"grid_long_only": True} if grid_long_only else {}),
     }
 
 
@@ -5579,6 +5589,121 @@ XRP_PM_V28_2018_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# v44 — XRPPM29: Long-only grid + spacing optimisation.
+#
+# Deep-dive analysis (PM28) revealed the #1 post-2017 loss driver is
+# SHORT positions crushed during XRP rallies:
+#   - 2018 Q1: shorts during Jan parabolic (+1,500% XRP rally)
+#   - 2021 Q1: alt-season shorts (Feb-Apr +300%)
+#   - 2024 Q4: Nov rally (+300%) = biggest single post-2017 loss event
+#
+# Grid POST-2017 win rate is only 29–40%.  Shorts account for the majority
+# of the bleed — every single worst week corresponds to an XRP rally.
+#
+# Three independent hypotheses to cure post-2017 losses:
+#
+#   (A) Long-only grid (grid_long_only=True):
+#       Eliminate shorts entirely.  Removes the single biggest loss driver.
+#       Longs are inherently more aligned with crypto's structural uptrend.
+#
+#   (B) Tighter spacing (0.008 / 0.010):
+#       Post-2017 XRP has lower average volatility than the 2017 bubble.
+#       1.5% spacing may be too wide for normal conditions — fewer fills,
+#       lower round-trip throughput.  Tighter spacing = more fills per day.
+#
+#   (C) Vol-adaptive spacing (VAS):
+#       Dynamically scale spacing with ATR.  Tight in low-vol (more fills),
+#       wide in high-vol (fewer SL hits).  Was tested in PM9 but excluded
+#       from PM26/27/28.  May be the best of both worlds.
+#
+# PM29 sweep: 8 variants testing these hypotheses individually and combined.
+# All are grid-only (no trend capture) built on the PM27 base.
+# Run on BOTH full 8.8yr AND 2018+ datasets.
+# ===========================================================================
+
+def _pm29(name: str, **kw):
+    """Build a PM29 long-only / spacing optimisation param set.
+
+    Inherits from _pm27() (grid-only) but allows vol_adaptive_spacing
+    and grid_long_only as first-class parameters.
+    """
+    # Pass through to _pm27 — _pm27 strips VAS from _V25_BASE by default,
+    # so we inject it after _pm27 returns.
+    _vas = kw.pop("vol_adaptive_spacing", False)
+    _vas_floor = kw.pop("vas_floor", 0.008)
+    _vas_ceil = kw.pop("vas_ceil", 0.020)
+    _vas_period = kw.pop("vas_period", 40)
+    result = _pm27(name, **kw)
+    # Re-inject VAS if requested
+    if _vas:
+        result["vol_adaptive_spacing"] = True
+        result["vas_floor"] = _vas_floor
+        result["vas_ceil"] = _vas_ceil
+        result["vas_period"] = _vas_period
+    return result
+
+_PM29_SETS = [
+    # ── Axis A: Long-only grid ────────────────────────────────────────────
+    # Baseline long-only at default 1.5% spacing.
+    _pm29("pm29_long_only",
+          grid_long_only=True),
+
+    # ── Axis B: Tighter spacing (both sides) ──────────────────────────────
+    # 1.0% spacing — already tested in PM27 (pm27_tight010) but not on 2018+.
+    _pm29("pm29_tight010",
+          spacing=0.010),
+
+    # 0.8% spacing — tightest: maximise round-trips per day.
+    _pm29("pm29_tight008",
+          spacing=0.008),
+
+    # ── Axis A+B: Long-only + tighter spacing ─────────────────────────────
+    _pm29("pm29_lo_tight010",
+          grid_long_only=True,
+          spacing=0.010),
+
+    _pm29("pm29_lo_tight008",
+          grid_long_only=True,
+          spacing=0.008),
+
+    # ── Axis C: Vol-adaptive spacing ──────────────────────────────────────
+    # Re-enable VAS (floor=0.008, ceil=0.020) — dynamic spacing throughout.
+    _pm29("pm29_vas",
+          vol_adaptive_spacing=True,
+          vas_floor=0.008, vas_ceil=0.020),
+
+    # ── Axis A+C: Long-only + VAS ────────────────────────────────────────
+    _pm29("pm29_lo_vas",
+          grid_long_only=True,
+          vol_adaptive_spacing=True,
+          vas_floor=0.008, vas_ceil=0.020),
+
+    # ── Combination: Long-only + VAS + compound15 + lev3 ─────────────────
+    # Stack the PM28 winners with long-only + adaptive spacing.
+    _pm29("pm29_combo",
+          grid_long_only=True,
+          vol_adaptive_spacing=True,
+          vas_floor=0.008, vas_ceil=0.020,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+]
+
+# Full 8.8yr dataset
+XRP_PM_V29_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V29_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)
+XRP_PM_V29_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM_V29_FULL_CONFIG["param_sets"]      = _PM29_SETS
+XRP_PM_V29_FULL_CONFIG["daily_breakdown"] = True
+
+# Skip 2017 (from Jan 2018)
+XRP_PM_V29_2018_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V29_2018_CONFIG["start_date"]      = datetime(2018, 1, 1)
+XRP_PM_V29_2018_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM_V29_2018_CONFIG["param_sets"]      = _PM29_SETS
+XRP_PM_V29_2018_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -6239,6 +6364,34 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v43 PM28 2018 — stack PM27 winners (skip 2017){variant_label}  (Jan 2018 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("XRPPM29FULL", "PM29FULL")):
+        cfg = dict(XRP_PM_V29_FULL_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM29 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM_V29_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v44 PM29 FULL — long-only + spacing optimisation{variant_label}  (May 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("XRPPM29_2018", "PM29_2018")):
+        cfg = dict(XRP_PM_V29_2018_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM29_2018 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM_V29_2018_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v44 PM29 2018 — long-only + spacing (skip 2017){variant_label}  (Jan 2018 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):
