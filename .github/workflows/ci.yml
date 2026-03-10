@@ -108,6 +108,27 @@ jobs:
             dispatch: "XRPPM26FULL:pm26_trend_dwell10"
           - name: "PM26 slow_fast"
             dispatch: "XRPPM26FULL:pm26_slow_fast"
+          # ── PM27: grid-only optimization (10 variants) ──────────────
+          - name: "PM27 compound10"
+            dispatch: "XRPPM27FULL:pm27_compound10"
+          - name: "PM27 compound15"
+            dispatch: "XRPPM27FULL:pm27_compound15"
+          - name: "PM27 lev3"
+            dispatch: "XRPPM27FULL:pm27_lev3"
+          - name: "PM27 lev5"
+            dispatch: "XRPPM27FULL:pm27_lev5"
+          - name: "PM27 tight010"
+            dispatch: "XRPPM27FULL:pm27_tight010"
+          - name: "PM27 wide020"
+            dispatch: "XRPPM27FULL:pm27_wide020"
+          - name: "PM27 max5"
+            dispatch: "XRPPM27FULL:pm27_max5"
+          - name: "PM27 short_equal"
+            dispatch: "XRPPM27FULL:pm27_short_equal"
+          - name: "PM27 all_regime"
+            dispatch: "XRPPM27FULL:pm27_all_regime"
+          - name: "PM27 combo"
+            dispatch: "XRPPM27FULL:pm27_combo"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),

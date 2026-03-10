@@ -5327,6 +5327,134 @@ XRP_PM_V26_FULL_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# v42 — XRPPM27: Grid-only parameter optimization.
+#
+# pm26_grid_only (+56.56%) proved grid trading is the real edge.  Trend
+# capture is provably destructive ($-1,345 over 8.8yr).  Now we optimize
+# the grid itself — all variants disable trend_capture & trend_detection.
+#
+# Current pm26_grid_only settings:
+#   spacing=0.015, leverage=2.0, max_positions_per_side=3 (implied),
+#   order_value=$100 (fixed), short_size_ratio=0.25,
+#   regime_trending_grid_off=True, grid_vol_scale=True.
+#
+# Optimization axes (highest-impact first):
+#
+#   (A) Compounding (order_value_pct) — fixed $100/level ignores
+#       equity growth; at peak $1,774 only 5.6% of equity is deployed
+#       per level.  Equity-% sizing lets gains compound.
+#
+#   (B) Leverage — with no trend capture, risk per trade is bounded
+#       by spacing × leverage.  2× → 3× directly boosts grid P&L.
+#
+#   (C) Spacing — tighter = more fills but more SL hits;
+#       wider = fewer fills but bigger per-fill profit.
+#
+#   (D) Max positions per side — 3 may under-utilize capital.
+#       More levels = more deployed equity = higher throughput.
+#
+#   (E) Short sizing — 0.25 was tuned for crash protection.  In
+#       grid-only mode, shorts were profitable; 0.50 or 1.0 may help.
+#
+#   (F) Grid-in-trending — currently OFF in TRENDING regime.  Since
+#       there's no trend capture, grid in all regimes may help.
+#
+# 10 variants: sweep key axes, then combine winners.
+# ===========================================================================
+
+def _pm27(name: str, **kw):
+    """Build a PM27 grid-only optimization param set."""
+    _overrides = {}
+    for _k in ("trend_capture", "trend_detection"):
+        if _k in kw:
+            _overrides[_k] = kw.pop(_k)
+    _base = {k: v for k, v in _V25_BASE.items()
+             if k not in ("regime_hysteresis_pct", "vol_adaptive_spacing",
+                          "vas_floor", "vas_ceil", "regime_rotation")}
+    # Hardcoded defaults for PM27 — kw can override any of these
+    _defaults = dict(
+        vel_atr_mult=1.66, vel_dir_only=True, vel_dir_ema_period=120,
+        regime_rotation=True,
+        regime_min_dwell_candles=20,
+        atr_trail=True,
+        surge_cb=True,
+        crash_cb=True,
+        dd_halt=True,
+        regime_short_gate=True,
+        short_size_ratio=0.25,
+        rally_gate=True,
+    )
+    # kw overrides both _base and _defaults
+    _defaults.update(kw)
+    for _k in list(_defaults):
+        _base.pop(_k, None)
+    result = _pm_v2_set(
+        name, **_base,
+        **_defaults,
+    )
+    # All PM27 variants are grid-only
+    result["trend_capture"]   = _overrides.get("trend_capture", False)
+    result["trend_detection"] = _overrides.get("trend_detection", False)
+    return result
+
+_PM27_SETS = [
+    # ── Axis A: Compounding ────────────────────────────────────────────
+    # Equity-proportional sizing: scale order value with account equity.
+    # At start: 10% of $1000 = $100 (same as fixed).  At peak $1,774:
+    # 10% = $177 per level — ~77% more grid throughput.
+    _pm27("pm27_compound10",
+          order_value_pct=0.10, order_value_min=10.0),
+
+    # 15% equity-proportional: more aggressive compound ($150 at start).
+    _pm27("pm27_compound15",
+          order_value_pct=0.15, order_value_min=10.0),
+
+    # ── Axis B: Leverage ──────────────────────────────────────────────
+    _pm27("pm27_lev3",
+          leverage=3),
+
+    _pm27("pm27_lev5",
+          leverage=5),
+
+    # ── Axis C: Spacing ───────────────────────────────────────────────
+    # Tighter spacing = more fills per unit time, smaller profit per fill.
+    _pm27("pm27_tight010",
+          spacing=0.010),
+
+    # Wider spacing = fewer fills, bigger profit per fill, fewer SL hits.
+    _pm27("pm27_wide020",
+          spacing=0.020),
+
+    # ── Axis D: Max positions per side ────────────────────────────────
+    _pm27("pm27_max5",
+          max_per_side=5),
+
+    # ── Axis E: Short sizing ─────────────────────────────────────────
+    # Grid shorts were profitable; give them equal sizing.
+    _pm27("pm27_short_equal",
+          short_size_ratio=1.0),
+
+    # ── Axis F: Grid in all regimes ──────────────────────────────────
+    # Allow grid entries even in TRENDING regime.
+    _pm27("pm27_all_regime",
+          regime_trending_grid_off=False),
+
+    # ── Combination: compound + leverage + all-regime ────────────────
+    # Hypothesis: the top 3 improvements combined.
+    _pm27("pm27_combo",
+          order_value_pct=0.10, order_value_min=10.0,
+          leverage=3,
+          regime_trending_grid_off=False),
+]
+
+XRP_PM_V27_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM_V27_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)
+XRP_PM_V27_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM_V27_FULL_CONFIG["param_sets"]      = _PM27_SETS
+XRP_PM_V27_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -5916,6 +6044,21 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v41 PM26 FULL — trend capture strategy sweep{variant_label}  (May 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("XRPPM27FULL", "PM27FULL")):
+        cfg = dict(XRP_PM_V27_FULL_CONFIG)
+        # Support "XRPPM27FULL:variant_name" to run a single variant
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM27 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM_V27_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v42 PM27 FULL — grid-only optimization{variant_label}  (May 2017 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):
