@@ -2367,6 +2367,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "rally_gate_entry_pct", "rally_gate_exit_pct",
                     "rally_gate_window_med", "rally_gate_entry_pct_med",
                     "rally_gate_window_slow", "rally_gate_entry_pct_slow",
+                    # v41 — trend entry dwell & fast exit
+                    "trend_entry_dwell", "trend_exit_countervel",
                 ) if k in params}),
             }
         )
