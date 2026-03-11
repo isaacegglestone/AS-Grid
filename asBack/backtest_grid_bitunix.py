@@ -5823,6 +5823,13 @@ BTC_PM30_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
 BTC_PM30_FULL_CONFIG["param_sets"]      = _PM30_SETS
 BTC_PM30_FULL_CONFIG["daily_breakdown"] = True
 
+# Skip 2017 bubble (Jan 2018 → Mar 2026) — isolate post-bubble performance
+BTC_PM30_2018_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM30_2018_CONFIG["start_date"]      = datetime(2018, 1, 1)
+BTC_PM30_2018_CONFIG["end_date"]        = datetime(2026, 3, 8)
+BTC_PM30_2018_CONFIG["param_sets"]      = _PM30_SETS
+BTC_PM30_2018_CONFIG["daily_breakdown"] = True
+
 
 # ===========================================================================
 # v11 — Crash protection sweep
@@ -6527,6 +6534,20 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v45 PM30 BTC FULL — best adaptive grid on BTCUSDT{variant_label}  (Jan 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM30_2018", "PM30_2018")):
+        cfg = dict(BTC_PM30_2018_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM30_2018 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM30_2018_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v45 PM30 BTC 2018 — post-bubble grid on BTCUSDT{variant_label}  (Jan 2018 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):

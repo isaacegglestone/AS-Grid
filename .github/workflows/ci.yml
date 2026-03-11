@@ -212,6 +212,23 @@ jobs:
             dispatch: "BTCPM30FULL:pm30_lo_vas_c15_lev3"
           - name: "PM30 BTC c15_lev5"
             dispatch: "BTCPM30FULL:pm30_c15_lev5"
+          # ── PM30_2018: BTC grid post-bubble (skip 2017, 8 variants) ──
+          - name: "PM30_2018 BTC baseline"
+            dispatch: "BTCPM30_2018:pm30_baseline"
+          - name: "PM30_2018 BTC lo"
+            dispatch: "BTCPM30_2018:pm30_lo"
+          - name: "PM30_2018 BTC vas"
+            dispatch: "BTCPM30_2018:pm30_vas"
+          - name: "PM30_2018 BTC lo_vas"
+            dispatch: "BTCPM30_2018:pm30_lo_vas"
+          - name: "PM30_2018 BTC lo_c15_lev3"
+            dispatch: "BTCPM30_2018:pm30_lo_c15_lev3"
+          - name: "PM30_2018 BTC lo_vas_c15"
+            dispatch: "BTCPM30_2018:pm30_lo_vas_c15"
+          - name: "PM30_2018 BTC lo_vas_c15_lev3"
+            dispatch: "BTCPM30_2018:pm30_lo_vas_c15_lev3"
+          - name: "PM30_2018 BTC c15_lev5"
+            dispatch: "BTCPM30_2018:pm30_c15_lev5"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
