@@ -115,6 +115,68 @@ BULL_SPACING:          float = float(os.getenv("BULL_SPACING",          str(GRID
 BEAR_SPACING:          float = float(os.getenv("BEAR_SPACING",          str(GRID_SPACING)))
 
 # ---------------------------------------------------------------------------
+# Grid behaviour switches (ported from backtester v38/v44)
+# ---------------------------------------------------------------------------
+GRID_LONG_ONLY: bool = os.getenv("GRID_LONG_ONLY", "false").lower() == "true"  # suppress ALL short grid entries
+REGIME_SHORT_GATE: bool = os.getenv("REGIME_SHORT_GATE", "false").lower() == "true"  # shorts only in bear regime
+
+# ---------------------------------------------------------------------------
+# Equity-proportional sizing (ported from backtester v17)
+# ---------------------------------------------------------------------------
+# 0 = use fixed INITIAL_QUANTITY contracts per leg (original behaviour).
+# >0 = each grid leg = (equity × ORDER_VALUE_PCT × leverage) / price → contracts.
+ORDER_VALUE_PCT: float = float(os.getenv("ORDER_VALUE_PCT", "0.0"))
+ORDER_VALUE_MIN: float = float(os.getenv("ORDER_VALUE_MIN", "10.0"))  # USDT floor
+
+# ---------------------------------------------------------------------------
+# Volume-adaptive spacing — VAS (ported from backtester v18)
+# ---------------------------------------------------------------------------
+# When enabled, grid spacing = clamp(base × (ATR_frac / EMA(ATR_frac)), floor, ceil)
+# Calm market → tighter; volatile/trending → wider.
+VAS_ENABLED: bool  = os.getenv("VAS_ENABLED", "false").lower() == "true"
+VAS_FLOOR:   float = float(os.getenv("VAS_FLOOR",   "0.008"))  # min spacing
+VAS_CEIL:    float = float(os.getenv("VAS_CEIL",    "0.020"))  # max spacing
+VAS_PERIOD:  int   = int(os.getenv("VAS_PERIOD",    "40"))     # EMA window for baseline
+
+# ---------------------------------------------------------------------------
+# Circuit breakers — crash + surge (ported from backtester v37)
+# ---------------------------------------------------------------------------
+CRASH_CB:                bool  = os.getenv("CRASH_CB", "false").lower() == "true"
+CRASH_CB_DROP_PCT:       float = float(os.getenv("CRASH_CB_DROP_PCT",       "0.10"))  # 10% drop
+CRASH_CB_LOOKBACK_MINS:  int   = int(os.getenv("CRASH_CB_LOOKBACK_MINS",    "120"))   # 2h lookback on 1min candles
+CRASH_CB_HALT_MINS:      int   = int(os.getenv("CRASH_CB_HALT_MINS",        "720"))   # 12h halt
+
+SURGE_CB:                bool  = os.getenv("SURGE_CB", "false").lower() == "true"
+SURGE_CB_RISE_PCT:       float = float(os.getenv("SURGE_CB_RISE_PCT",       "0.10"))  # 10% rise
+SURGE_CB_LOOKBACK_MINS:  int   = int(os.getenv("SURGE_CB_LOOKBACK_MINS",    "120"))   # 2h lookback
+SURGE_CB_HALT_MINS:      int   = int(os.getenv("SURGE_CB_HALT_MINS",        "720"))   # 12h halt
+
+# ---------------------------------------------------------------------------
+# Drawdown halt (ported from backtester v37)
+# ---------------------------------------------------------------------------
+DD_HALT:              bool  = os.getenv("DD_HALT", "false").lower() == "true"  # enable drawdown halt
+DD_HALT_MAX_DRAWDOWN: float = float(os.getenv("DD_HALT_MAX_DRAWDOWN", "0.30"))  # 30%
+DD_HALT_MINS:         int   = int(os.getenv("DD_HALT_MINS",           "5760"))  # 4 days (minutes)
+
+# ---------------------------------------------------------------------------
+# Rally gate (ported from backtester v40)
+# ---------------------------------------------------------------------------
+RALLY_GATE:              bool  = os.getenv("RALLY_GATE", "false").lower() == "true"
+RALLY_GATE_WINDOW:       int   = int(os.getenv("RALLY_GATE_WINDOW",       "2880"))   # 2 days (1min candles)
+RALLY_GATE_ENTRY_PCT:    float = float(os.getenv("RALLY_GATE_ENTRY_PCT",   "0.30"))  # 30% fast trigger
+RALLY_GATE_EXIT_PCT:     float = float(os.getenv("RALLY_GATE_EXIT_PCT",    "0.10"))  # clear at <10%
+RALLY_GATE_WINDOW_MED:   int   = int(os.getenv("RALLY_GATE_WINDOW_MED",   "10080"))  # 1 week
+RALLY_GATE_ENTRY_PCT_MED: float = float(os.getenv("RALLY_GATE_ENTRY_PCT_MED", "0.50"))
+RALLY_GATE_WINDOW_SLOW:  int   = int(os.getenv("RALLY_GATE_WINDOW_SLOW",  "43200"))  # 1 month
+RALLY_GATE_ENTRY_PCT_SLOW: float = float(os.getenv("RALLY_GATE_ENTRY_PCT_SLOW", "1.00"))
+
+# ---------------------------------------------------------------------------
+# Grid vol scale (ported from backtester v12)
+# ---------------------------------------------------------------------------
+GRID_VOL_SCALE: bool  = os.getenv("GRID_VOL_SCALE", "false").lower() == "true"
+GRID_VOL_FLOOR: float = float(os.getenv("GRID_VOL_FLOOR", "0.35"))  # min multiplier
+
+# ---------------------------------------------------------------------------
 # Derived / fixed constants (mirrors gate_bot.py)
 # ---------------------------------------------------------------------------
 POSITION_THRESHOLD: float = 10 * INITIAL_QUANTITY / GRID_SPACING * 2 / 100
@@ -379,6 +441,59 @@ class GridTradingBot(BitunixExchange):
 
         # ── Gate state (cooldown counter for L1c) ────────────────────────
         self._gate_fire_counter: int = 0
+
+        # ── Grid behaviour switches ──────────────────────────────────────
+        self.grid_long_only: bool = GRID_LONG_ONLY
+        self.regime_short_gate: bool = REGIME_SHORT_GATE
+
+        # ── Equity-proportional sizing (v17) ─────────────────────────────
+        self.order_value_pct: float = ORDER_VALUE_PCT
+        self.order_value_min: float = ORDER_VALUE_MIN
+
+        # ── VAS state (v18) ──────────────────────────────────────────────
+        self.vas_enabled: bool = VAS_ENABLED
+        self.vas_floor: float = VAS_FLOOR
+        self.vas_ceil: float = VAS_CEIL
+        self.vas_period: int = VAS_PERIOD
+        # Runtime: EMA of (ATR/price) ratio — updated each 1-min candle
+        self._atr_frac_ema: float = 0.0
+        self._vas_alpha: float = 2.0 / (VAS_PERIOD + 1) if VAS_PERIOD > 0 else 0.0
+
+        # ── Circuit breaker state (v37) ──────────────────────────────────
+        self.crash_cb: bool = CRASH_CB
+        self.crash_halt_counter: int = 0             # remaining 1-min candles in halt
+        self._crash_lookback: int = CRASH_CB_LOOKBACK_MINS
+        self._crash_halt_len: int = CRASH_CB_HALT_MINS
+        self._crash_drop_pct: float = CRASH_CB_DROP_PCT
+
+        self.surge_cb: bool = SURGE_CB
+        self.surge_halt_counter: int = 0
+        self._surge_lookback: int = SURGE_CB_LOOKBACK_MINS
+        self._surge_halt_len: int = SURGE_CB_HALT_MINS
+        self._surge_rise_pct: float = SURGE_CB_RISE_PCT
+
+        # Price ring buffer for circuit breaker lookback (1-min close prices)
+        self._price_ring: List[float] = []
+        self._price_ring_maxlen: int = max(CRASH_CB_LOOKBACK_MINS, SURGE_CB_LOOKBACK_MINS, 1)
+
+        # ── Drawdown halt state (v37) ────────────────────────────────────
+        self.dd_halt: bool = DD_HALT
+        self.dd_halt_max_drawdown: float = DD_HALT_MAX_DRAWDOWN
+        self.dd_halt_mins: int = DD_HALT_MINS
+        self.dd_halt_counter: int = 0
+        self._max_equity: float = 0.0               # peak equity tracker
+
+        # ── Rally gate state (v40) ───────────────────────────────────────
+        self.rally_gate: bool = RALLY_GATE
+        self._rally_halt_active: bool = False
+        # Rolling min trackers — updated each 1-min candle
+        self._rally_prices_fast: List[float] = []    # window = RALLY_GATE_WINDOW
+        self._rally_prices_med: List[float] = []     # window = RALLY_GATE_WINDOW_MED
+        self._rally_prices_slow: List[float] = []    # window = RALLY_GATE_WINDOW_SLOW
+
+        # ── Grid vol scale state (v12) ───────────────────────────────────
+        self.grid_vol_scale: bool = GRID_VOL_SCALE
+        self.grid_vol_floor: float = GRID_VOL_FLOOR
 
         # ── State persistence backend ────────────────────────────────────
         self.state_backend = create_state_backend(
@@ -914,6 +1029,18 @@ class GridTradingBot(BitunixExchange):
         else:
             effective_spacing = self.grid_spacing   # fallback: EMA not yet warmed up
 
+        # ── VAS: vol-adaptive spacing overlay (v18) ───────────────────────
+        # Scale spacing by (current ATR/price) / EMA(ATR/price).
+        # Calm market → tighter; volatile → wider, clamped to [floor, ceil].
+        if self.vas_enabled and sig is not None and sig.atr > 0 and latest_price > 0:
+            atr_frac_now = sig.atr / latest_price
+            if self._atr_frac_ema > 0:
+                effective_spacing = max(
+                    self.vas_floor,
+                    min(self.vas_ceil,
+                        effective_spacing * (atr_frac_now / self._atr_frac_ema)),
+                )
+
         if side == "long":
             self.mid_price_long = _round(latest_price)
             self.lower_price_long = _round(latest_price * (1 - effective_spacing))
@@ -925,13 +1052,30 @@ class GridTradingBot(BitunixExchange):
 
     def get_take_profit_quantity(self, position: float, side: str) -> int:
         """
-        Determine the number of contracts for the take-profit order.
+        Determine the number of contracts for the next grid leg.
 
-        Returns ``self.initial_quantity`` when position ≤ POSITION_LIMIT,
-        otherwise scales up proportionally (mirrors gate_bot logic).
+        **Equity-proportional sizing (v17)** — when ``ORDER_VALUE_PCT > 0``:
+          qty = max(floor, equity × pct) × leverage / price  → rounded to int contracts.
+        Falls back to fixed ``INITIAL_QUANTITY`` when ORDER_VALUE_PCT is 0.
+
+        When position exceeds POSITION_LIMIT, scales up proportionally
+        (lockdown mode, mirrors gate_bot logic).
         Updates ``self.long_initial_quantity`` / ``self.short_initial_quantity``.
         """
-        if position <= POSITION_LIMIT:
+        if self.order_value_pct > 0 and self.latest_price > 0:
+            # v17 — equity-proportional sizing
+            equity = self._equity()
+            notional = max(self.order_value_min, equity * self.order_value_pct) * self.leverage
+            qty = max(1, int(notional / self.latest_price))
+
+            # v12 — grid_vol_scale: shrink qty when current volume >> average
+            if self.grid_vol_scale and self.latest_signals is not None:
+                vol_now = self.latest_signals.volume if hasattr(self.latest_signals, 'volume') else 0.0
+                vol_avg = self.latest_signals.vol_avg if hasattr(self.latest_signals, 'vol_avg') else 0.0
+                if vol_now > 0 and vol_avg > 0:
+                    scale = max(self.grid_vol_floor, min(1.0, vol_avg / vol_now))
+                    qty = max(1, int(qty * scale))
+        elif position <= POSITION_LIMIT:
             qty = self.initial_quantity
         else:
             qty = max(self.initial_quantity, int(position / POSITION_LIMIT) * self.initial_quantity)
@@ -1042,6 +1186,22 @@ class GridTradingBot(BitunixExchange):
     async def place_long_orders(self, latest_price: float) -> None:
         """Manage the long-side grid: cancel stale orders then place fresh TP + entry."""
         try:
+            # v37 — crash CB halt: suppress longs after crash circuit breaker fires
+            if self.crash_halt_counter > 0:
+                logger.info(
+                    "💥 Crash CB halt: longs paused (%d min remaining)",
+                    self.crash_halt_counter,
+                )
+                return
+
+            # v37 — dd_halt: suppress ALL new entries during drawdown halt
+            if self.dd_halt_counter > 0:
+                logger.info(
+                    "📉 DD halt: longs paused (%d min remaining)",
+                    self.dd_halt_counter,
+                )
+                return
+
             # ADX grid pause — don't add new legs during strong trending conditions
             if (
                 self.latest_signals is not None
@@ -1113,6 +1273,43 @@ class GridTradingBot(BitunixExchange):
     async def place_short_orders(self, latest_price: float) -> None:
         """Manage the short-side grid: cancel stale orders then place fresh TP + entry."""
         try:
+            # v44 — grid_long_only: permanently suppress all short grid entries
+            if self.grid_long_only:
+                return
+
+            # v38 — regime_short_gate: suppress shorts when price is in bull territory
+            if self.regime_short_gate and self.latest_signals is not None:
+                sig = self.latest_signals
+                if sig.regime_ema > 0:
+                    _rsg_threshold = sig.regime_ema * (1.0 - self.regime_hysteresis_pct)
+                    if self.latest_price >= _rsg_threshold:
+                        logger.info(
+                            "🐂 Regime short gate: halting shorts (price=%.4f ≥ ema=%.4f)",
+                            self.latest_price, sig.regime_ema,
+                        )
+                        return
+
+            # v40 — rally_gate: suppress shorts during parabolic rallies
+            if self._rally_halt_active:
+                logger.info("🚀 Rally gate: halting shorts (parabolic rally detected)")
+                return
+
+            # v37 — surge CB halt: suppress shorts after surge circuit breaker fires
+            if self.surge_halt_counter > 0:
+                logger.info(
+                    "⚡ Surge CB halt: shorts paused (%d min remaining)",
+                    self.surge_halt_counter,
+                )
+                return
+
+            # v37 — dd_halt: suppress ALL new entries during drawdown halt
+            if self.dd_halt_counter > 0:
+                logger.info(
+                    "📉 DD halt: shorts paused (%d min remaining)",
+                    self.dd_halt_counter,
+                )
+                return
+
             # ADX grid pause — don't add new legs during strong trending conditions
             if (
                 self.latest_signals is not None
@@ -1478,6 +1675,154 @@ class GridTradingBot(BitunixExchange):
                 sig_1m = self.candle_buffer_1m.signals()
                 if sig_1m is not None:
                     self.latest_signals = self._merge_signals(sig_1m)
+                    price = self.latest_signals.close
+
+                    # ── VAS: update ATR-fraction EMA ─────────────────────
+                    if self.vas_enabled and sig_1m.atr > 0 and price > 0:
+                        atr_frac = sig_1m.atr / price
+                        if self._atr_frac_ema <= 0:
+                            self._atr_frac_ema = atr_frac  # seed
+                        else:
+                            self._atr_frac_ema += self._vas_alpha * (atr_frac - self._atr_frac_ema)
+
+                    # ── Price ring buffer for circuit breakers ───────────
+                    self._price_ring.append(price)
+                    if len(self._price_ring) > self._price_ring_maxlen:
+                        self._price_ring = self._price_ring[-self._price_ring_maxlen:]
+
+                    # ── Crash circuit breaker (v37) ──────────────────────
+                    if self.crash_halt_counter > 0:
+                        self.crash_halt_counter -= 1
+                    elif (self.crash_cb
+                          and len(self._price_ring) >= self._crash_lookback):
+                        past_price = self._price_ring[-self._crash_lookback]
+                        if past_price > 0:
+                            drop = (price - past_price) / past_price
+                            if drop <= -self._crash_drop_pct:
+                                logger.warning(
+                                    "💥 CRASH CB fired: %.2f%% drop in %d min — halting longs for %d min",
+                                    drop * 100, self._crash_lookback, self._crash_halt_len,
+                                )
+                                self.crash_halt_counter = self._crash_halt_len
+                                # Force-close long grid positions
+                                if self.long_position > 0:
+                                    await self.cancel_orders_for_side(self.symbol, "long")
+                                    await self.place_market_order(
+                                        symbol=self.symbol, side="sell",
+                                        quantity=int(self.long_position),
+                                        reduce_only=True, position_side="long",
+                                    )
+                                # Close trend long if any
+                                if (self.trend_position is not None
+                                        and self.trend_position.get("side") == "long"):
+                                    await self._close_trend_trade(price)
+
+                    # ── Surge circuit breaker (v37) ──────────────────────
+                    if self.surge_halt_counter > 0:
+                        self.surge_halt_counter -= 1
+                    elif (self.surge_cb
+                          and len(self._price_ring) >= self._surge_lookback):
+                        past_price = self._price_ring[-self._surge_lookback]
+                        if past_price > 0:
+                            rise = (price - past_price) / past_price
+                            if rise >= self._surge_rise_pct:
+                                logger.warning(
+                                    "⚡ SURGE CB fired: +%.2f%% rise in %d min — halting shorts for %d min",
+                                    rise * 100, self._surge_lookback, self._surge_halt_len,
+                                )
+                                self.surge_halt_counter = self._surge_halt_len
+                                # Force-close short grid positions
+                                if self.short_position > 0:
+                                    await self.cancel_orders_for_side(self.symbol, "short")
+                                    await self.place_market_order(
+                                        symbol=self.symbol, side="buy",
+                                        quantity=int(self.short_position),
+                                        reduce_only=True, position_side="short",
+                                    )
+                                # Close trend short if any
+                                if (self.trend_position is not None
+                                        and self.trend_position.get("side") == "short"):
+                                    await self._close_trend_trade(price)
+
+                    # ── Drawdown halt (v37) ──────────────────────────────
+                    if self.dd_halt:
+                        equity = self._equity()
+                        self._max_equity = max(self._max_equity, equity)
+                        if self._max_equity > 0:
+                            drawdown = 1.0 - (equity / self._max_equity)
+                            if drawdown >= self.dd_halt_max_drawdown and self.dd_halt_counter == 0:
+                                logger.warning(
+                                    "📉 DD HALT fired: %.2f%% drawdown (max eq=%.2f, now=%.2f) — halting %d min",
+                                    drawdown * 100, self._max_equity, equity, self.dd_halt_mins,
+                                )
+                                self.dd_halt_counter = self.dd_halt_mins
+                                # Flatten all positions
+                                if self.long_position > 0:
+                                    await self.cancel_orders_for_side(self.symbol, "long")
+                                    await self.place_market_order(
+                                        symbol=self.symbol, side="sell",
+                                        quantity=int(self.long_position),
+                                        reduce_only=True, position_side="long",
+                                    )
+                                if self.short_position > 0:
+                                    await self.cancel_orders_for_side(self.symbol, "short")
+                                    await self.place_market_order(
+                                        symbol=self.symbol, side="buy",
+                                        quantity=int(self.short_position),
+                                        reduce_only=True, position_side="short",
+                                    )
+                                if self.trend_position is not None:
+                                    await self._close_trend_trade(price)
+                                # Reset peak to prevent immediate re-trigger
+                                self._max_equity = equity
+                    if self.dd_halt_counter > 0:
+                        self.dd_halt_counter -= 1
+
+                    # ── Rally gate (v40) ─────────────────────────────────
+                    if self.rally_gate:
+                        self._rally_prices_fast.append(price)
+                        self._rally_prices_med.append(price)
+                        self._rally_prices_slow.append(price)
+                        # Trim to window sizes
+                        if len(self._rally_prices_fast) > RALLY_GATE_WINDOW:
+                            self._rally_prices_fast = self._rally_prices_fast[-RALLY_GATE_WINDOW:]
+                        if len(self._rally_prices_med) > RALLY_GATE_WINDOW_MED:
+                            self._rally_prices_med = self._rally_prices_med[-RALLY_GATE_WINDOW_MED:]
+                        if len(self._rally_prices_slow) > RALLY_GATE_WINDOW_SLOW:
+                            self._rally_prices_slow = self._rally_prices_slow[-RALLY_GATE_WINDOW_SLOW:]
+
+                        min_fast = min(self._rally_prices_fast)
+                        min_med = min(self._rally_prices_med)
+                        min_slow = min(self._rally_prices_slow)
+
+                        any_triggered = False
+                        for rg_min, rg_thresh in [
+                            (min_fast, RALLY_GATE_ENTRY_PCT),
+                            (min_med, RALLY_GATE_ENTRY_PCT_MED),
+                            (min_slow, RALLY_GATE_ENTRY_PCT_SLOW),
+                        ]:
+                            if rg_min > 0:
+                                rally_pct = (price - rg_min) / rg_min
+                                if rally_pct >= rg_thresh:
+                                    any_triggered = True
+                                    break
+
+                        if not self._rally_halt_active and any_triggered:
+                            self._rally_halt_active = True
+                            logger.info("🚀 Rally gate ACTIVATED (shorts halted)")
+                        elif self._rally_halt_active and not any_triggered:
+                            # Clear only when ALL tiers below exit pct
+                            all_below = True
+                            for rg_min in [min_fast, min_med, min_slow]:
+                                if rg_min > 0:
+                                    rally_pct = (price - rg_min) / rg_min
+                                    if rally_pct >= RALLY_GATE_EXIT_PCT:
+                                        all_below = False
+                                        break
+                            if all_below:
+                                self._rally_halt_active = False
+                                logger.info("🚀 Rally gate CLEARED (shorts resumed)")
+
                     regime_status = "–"
                     if self.latest_signals.regime_ema > 0:
                         regime_status = (
