@@ -6058,8 +6058,37 @@ _PM31_GROUP_H = [
           dca_amount=470.0, dca_interval_candles=20160),
 ]
 
+# ── Group I: DCA counterparts for Group B (ovas_a/b/c + DCA) ────────────
+_PM31_GROUP_I = [
+    _pm29("pm31_dca_ovas_a",
+          grid_long_only=True,
+          spacing=0.008,
+          vol_adaptive_spacing=True,
+          vas_floor=0.002, vas_ceil=0.008, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+    _pm29("pm31_dca_ovas_b",
+          grid_long_only=True,
+          spacing=0.008,
+          vol_adaptive_spacing=True,
+          vas_floor=0.002, vas_ceil=0.010, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+    _pm29("pm31_dca_ovas_c",
+          grid_long_only=True,
+          spacing=0.008,
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.008, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+]
+
 _PM31_ALL_SETS = (_PM31_GROUP_A + _PM31_GROUP_B + _PM31_GROUP_C + _PM31_GROUP_D
-                  + _PM31_GROUP_E + _PM31_GROUP_F + _PM31_GROUP_G + _PM31_GROUP_H)
+                  + _PM31_GROUP_E + _PM31_GROUP_F + _PM31_GROUP_G + _PM31_GROUP_H
+                  + _PM31_GROUP_I)
 
 # BTC PM31: post-bubble only (Jan 2018 → Mar 2026)
 BTC_PM31_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)

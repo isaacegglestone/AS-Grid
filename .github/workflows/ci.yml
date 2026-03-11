@@ -55,227 +55,142 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ── PM24: 5-regime rotation sweep (10 variants) ──────────────
-          - name: "PM24 baseline"
-            dispatch: "XRPPM24FULL:pm24_baseline"
-          - name: "PM24 default"
-            dispatch: "XRPPM24FULL:pm24_default"
-          - name: "PM24 choppy20"
-            dispatch: "XRPPM24FULL:pm24_choppy20"
-          - name: "PM24 choppy30"
-            dispatch: "XRPPM24FULL:pm24_choppy30"
-          - name: "PM24 trend30"
-            dispatch: "XRPPM24FULL:pm24_trend30"
-          - name: "PM24 trend40"
-            dispatch: "XRPPM24FULL:pm24_trend40"
-          - name: "PM24 dorm10"
-            dispatch: "XRPPM24FULL:pm24_dorm10"
-          - name: "PM24 dorm30"
-            dispatch: "XRPPM24FULL:pm24_dorm30"
-          - name: "PM24 aggressive"
-            dispatch: "XRPPM24FULL:pm24_aggressive"
-          - name: "PM24 conservative"
-            dispatch: "XRPPM24FULL:pm24_conservative"
-          # ── PM25: regime detection quality sweep (11 variants) ───────
-          - name: "PM25 baseline"
-            dispatch: "XRPPM25FULL:pm25_baseline"
-          - name: "PM25 dwell1"
-            dispatch: "XRPPM25FULL:pm25_dwell1"
-          - name: "PM25 dwell3"
-            dispatch: "XRPPM25FULL:pm25_dwell3"
-          - name: "PM25 dwell10"
-            dispatch: "XRPPM25FULL:pm25_dwell10"
-          - name: "PM25 dwell20"
-            dispatch: "XRPPM25FULL:pm25_dwell20"
-          - name: "PM25 ac05"
-            dispatch: "XRPPM25FULL:pm25_ac05"
-          - name: "PM25 ac15"
-            dispatch: "XRPPM25FULL:pm25_ac15"
-          - name: "PM25 ac20"
-            dispatch: "XRPPM25FULL:pm25_ac20"
-          - name: "PM25 dwell10_ac15"
-            dispatch: "XRPPM25FULL:pm25_dwell10_ac15"
-          - name: "PM25 dwell10_ac05"
-            dispatch: "XRPPM25FULL:pm25_dwell10_ac05"
-          - name: "PM25 dwell20_ac15"
-            dispatch: "XRPPM25FULL:pm25_dwell20_ac15"
-          # ── PM26: trend capture strategy sweep (4 variants) ──────────
-          - name: "PM26 grid_only"
-            dispatch: "XRPPM26FULL:pm26_grid_only"
-          - name: "PM26 vol_scaled"
-            dispatch: "XRPPM26FULL:pm26_vol_scaled"
-          - name: "PM26 trend_dwell10"
-            dispatch: "XRPPM26FULL:pm26_trend_dwell10"
-          - name: "PM26 slow_fast"
-            dispatch: "XRPPM26FULL:pm26_slow_fast"
-          # ── PM27: grid-only optimization (10 variants) ──────────────
-          - name: "PM27 compound10"
-            dispatch: "XRPPM27FULL:pm27_compound10"
-          - name: "PM27 compound15"
-            dispatch: "XRPPM27FULL:pm27_compound15"
-          - name: "PM27 lev3"
-            dispatch: "XRPPM27FULL:pm27_lev3"
-          - name: "PM27 lev5"
-            dispatch: "XRPPM27FULL:pm27_lev5"
-          - name: "PM27 tight010"
-            dispatch: "XRPPM27FULL:pm27_tight010"
-          - name: "PM27 wide020"
-            dispatch: "XRPPM27FULL:pm27_wide020"
-          - name: "PM27 max5"
-            dispatch: "XRPPM27FULL:pm27_max5"
-          - name: "PM27 short_equal"
-            dispatch: "XRPPM27FULL:pm27_short_equal"
-          - name: "PM27 all_regime"
-            dispatch: "XRPPM27FULL:pm27_all_regime"
-          - name: "PM27 combo"
-            dispatch: "XRPPM27FULL:pm27_combo"
-          # ── PM26B: 2018+ grid vs trend comparison (2 variants) ──────
-          - name: "PM26B grid_only_2018"
-            dispatch: "XRPPM26BFULL:pm26b_grid_only_2018"
-          - name: "PM26B trend_2018"
-            dispatch: "XRPPM26BFULL:pm26b_trend_2018"
-          # ── PM26C: trend capture ≤10% equity cap (2 variants) ───────
-          - name: "PM26C trend_10pct"
-            dispatch: "XRPPM26CFULL:pm26c_trend_10pct"
-          - name: "PM26C trend_05pct"
-            dispatch: "XRPPM26CFULL:pm26c_trend_05pct"
-          # ── PM28: stack PM27 winners — full 8.8yr (5 variants) ──────
-          - name: "PM28 c15_lev3"
-            dispatch: "XRPPM28FULL:pm28_c15_lev3"
-          - name: "PM28 c15_lev5"
-            dispatch: "XRPPM28FULL:pm28_c15_lev5"
-          - name: "PM28 c15_wide020"
-            dispatch: "XRPPM28FULL:pm28_c15_wide020"
-          - name: "PM28 c15_w020_lev3"
-            dispatch: "XRPPM28FULL:pm28_c15_w020_lev3"
-          - name: "PM28 c15_w020_lev5"
-            dispatch: "XRPPM28FULL:pm28_c15_w020_lev5"
-          # ── PM28 2018: stack PM27 winners — skip 2017 (5 variants) ──
-          - name: "PM28_2018 c15_lev3"
-            dispatch: "XRPPM28_2018:pm28_c15_lev3"
-          - name: "PM28_2018 c15_lev5"
-            dispatch: "XRPPM28_2018:pm28_c15_lev5"
-          - name: "PM28_2018 c15_wide020"
-            dispatch: "XRPPM28_2018:pm28_c15_wide020"
-          - name: "PM28_2018 c15_w020_lev3"
-            dispatch: "XRPPM28_2018:pm28_c15_w020_lev3"
-          - name: "PM28_2018 c15_w020_lev5"
-            dispatch: "XRPPM28_2018:pm28_c15_w020_lev5"
-          # ── PM29: long-only + spacing optimisation — full 8.8yr (8 variants) ──
-          - name: "PM29 long_only"
-            dispatch: "XRPPM29FULL:pm29_long_only"
-          - name: "PM29 tight010"
-            dispatch: "XRPPM29FULL:pm29_tight010"
-          - name: "PM29 tight008"
-            dispatch: "XRPPM29FULL:pm29_tight008"
-          - name: "PM29 lo_tight010"
-            dispatch: "XRPPM29FULL:pm29_lo_tight010"
-          - name: "PM29 lo_tight008"
-            dispatch: "XRPPM29FULL:pm29_lo_tight008"
-          - name: "PM29 vas"
-            dispatch: "XRPPM29FULL:pm29_vas"
-          - name: "PM29 lo_vas"
-            dispatch: "XRPPM29FULL:pm29_lo_vas"
-          - name: "PM29 combo"
-            dispatch: "XRPPM29FULL:pm29_combo"
-          # ── PM29 2018: long-only + spacing — skip 2017 (8 variants) ──
-          - name: "PM29_2018 long_only"
-            dispatch: "XRPPM29_2018:pm29_long_only"
-          - name: "PM29_2018 tight010"
-            dispatch: "XRPPM29_2018:pm29_tight010"
-          - name: "PM29_2018 tight008"
-            dispatch: "XRPPM29_2018:pm29_tight008"
-          - name: "PM29_2018 lo_tight010"
-            dispatch: "XRPPM29_2018:pm29_lo_tight010"
-          - name: "PM29_2018 lo_tight008"
-            dispatch: "XRPPM29_2018:pm29_lo_tight008"
-          - name: "PM29_2018 vas"
-            dispatch: "XRPPM29_2018:pm29_vas"
-          - name: "PM29_2018 lo_vas"
-            dispatch: "XRPPM29_2018:pm29_lo_vas"
-          - name: "PM29_2018 combo"
-            dispatch: "XRPPM29_2018:pm29_combo"
-          # ── PM30: BTC grid — best adaptive settings (8 variants) ─────
-          - name: "PM30 BTC baseline"
-            dispatch: "BTCPM30FULL:pm30_baseline"
-          - name: "PM30 BTC lo"
-            dispatch: "BTCPM30FULL:pm30_lo"
-          - name: "PM30 BTC vas"
-            dispatch: "BTCPM30FULL:pm30_vas"
-          - name: "PM30 BTC lo_vas"
-            dispatch: "BTCPM30FULL:pm30_lo_vas"
-          - name: "PM30 BTC lo_c15_lev3"
-            dispatch: "BTCPM30FULL:pm30_lo_c15_lev3"
-          - name: "PM30 BTC lo_vas_c15"
-            dispatch: "BTCPM30FULL:pm30_lo_vas_c15"
-          - name: "PM30 BTC lo_vas_c15_lev3"
-            dispatch: "BTCPM30FULL:pm30_lo_vas_c15_lev3"
-          - name: "PM30 BTC c15_lev5"
-            dispatch: "BTCPM30FULL:pm30_c15_lev5"
-          # ── PM30_2018: BTC grid post-bubble (skip 2017, 8 variants) ──
-          - name: "PM30_2018 BTC baseline"
-            dispatch: "BTCPM30_2018:pm30_baseline"
-          - name: "PM30_2018 BTC lo"
-            dispatch: "BTCPM30_2018:pm30_lo"
-          - name: "PM30_2018 BTC vas"
-            dispatch: "BTCPM30_2018:pm30_vas"
-          - name: "PM30_2018 BTC lo_vas"
-            dispatch: "BTCPM30_2018:pm30_lo_vas"
-          - name: "PM30_2018 BTC lo_c15_lev3"
-            dispatch: "BTCPM30_2018:pm30_lo_c15_lev3"
-          - name: "PM30_2018 BTC lo_vas_c15"
-            dispatch: "BTCPM30_2018:pm30_lo_vas_c15"
-          - name: "PM30_2018 BTC lo_vas_c15_lev3"
-            dispatch: "BTCPM30_2018:pm30_lo_vas_c15_lev3"
-          - name: "PM30_2018 BTC c15_lev5"
-            dispatch: "BTCPM30_2018:pm30_c15_lev5"
-          # ── PM31: BTC grid optimisation — tighter spacing + VAS + DCA (11 variants) ──
-          # Group A: Tighter fixed spacing
-          - name: "PM31 BTC ts004"
-            dispatch: "BTCPM31:pm31_ts004"
-          - name: "PM31 BTC ts006"
-            dispatch: "BTCPM31:pm31_ts006"
-          # Group B: Optimised VAS
-          - name: "PM31 BTC ovas_a"
-            dispatch: "BTCPM31:pm31_ovas_a"
-          - name: "PM31 BTC ovas_b"
-            dispatch: "BTCPM31:pm31_ovas_b"
-          - name: "PM31 BTC ovas_c"
-            dispatch: "BTCPM31:pm31_ovas_c"
-          # Group C: Combined tighter spacing + VAS
-          - name: "PM31 BTC combo_a"
-            dispatch: "BTCPM31:pm31_combo_a"
-          - name: "PM31 BTC combo_b"
-            dispatch: "BTCPM31:pm31_combo_b"
-          - name: "PM31 BTC combo_c"
-            dispatch: "BTCPM31:pm31_combo_c"
-          # Group D: Combined + DCA ($470 USDT fortnightly)
-          - name: "PM31 BTC dca_a"
-            dispatch: "BTCPM31:pm31_dca_a"
-          - name: "PM31 BTC dca_b"
-            dispatch: "BTCPM31:pm31_dca_b"
-          - name: "PM31 BTC dca_c"
-            dispatch: "BTCPM31:pm31_dca_c"
-          # Group E: DCA leverage sweep
-          - name: "PM31 BTC dca_lev1"
-            dispatch: "BTCPM31:pm31_dca_lev1"
-          - name: "PM31 BTC dca_lev5"
-            dispatch: "BTCPM31:pm31_dca_lev5"
-          # Group F: DCA without VAS
-          - name: "PM31 BTC dca_novas_004"
-            dispatch: "BTCPM31:pm31_dca_novas_004"
-          - name: "PM31 BTC dca_novas_006"
-            dispatch: "BTCPM31:pm31_dca_novas_006"
-          # Group G: Non-long-only DCA
+          # ══════════════════════════════════════════════════════════════
+          # XRP sweeps (PM24–PM29) — DISABLED
+          # All XRP edge proven to be from 2017 parabolic rally only.
+          # All post-2017 variants negative. Kept for reference.
+          # Run locally with: python asBack/backtest_grid_bitunix.py XRPPM2xFULL:variant
+          # ══════════════════════════════════════════════════════════════
+          # ## PM24: 5-regime rotation sweep (10 variants)
+          # - { name: "PM24 baseline",     dispatch: "XRPPM24FULL:pm24_baseline" }
+          # - { name: "PM24 default",      dispatch: "XRPPM24FULL:pm24_default" }
+          # - { name: "PM24 choppy20",     dispatch: "XRPPM24FULL:pm24_choppy20" }
+          # - { name: "PM24 choppy30",     dispatch: "XRPPM24FULL:pm24_choppy30" }
+          # - { name: "PM24 trend30",      dispatch: "XRPPM24FULL:pm24_trend30" }
+          # - { name: "PM24 trend40",      dispatch: "XRPPM24FULL:pm24_trend40" }
+          # - { name: "PM24 dorm10",       dispatch: "XRPPM24FULL:pm24_dorm10" }
+          # - { name: "PM24 dorm30",       dispatch: "XRPPM24FULL:pm24_dorm30" }
+          # - { name: "PM24 aggressive",   dispatch: "XRPPM24FULL:pm24_aggressive" }
+          # - { name: "PM24 conservative", dispatch: "XRPPM24FULL:pm24_conservative" }
+          # ## PM25: regime detection quality sweep (11 variants)
+          # - { name: "PM25 baseline",       dispatch: "XRPPM25FULL:pm25_baseline" }
+          # - { name: "PM25 dwell1",         dispatch: "XRPPM25FULL:pm25_dwell1" }
+          # - { name: "PM25 dwell3",         dispatch: "XRPPM25FULL:pm25_dwell3" }
+          # - { name: "PM25 dwell10",        dispatch: "XRPPM25FULL:pm25_dwell10" }
+          # - { name: "PM25 dwell20",        dispatch: "XRPPM25FULL:pm25_dwell20" }
+          # - { name: "PM25 ac05",           dispatch: "XRPPM25FULL:pm25_ac05" }
+          # - { name: "PM25 ac15",           dispatch: "XRPPM25FULL:pm25_ac15" }
+          # - { name: "PM25 ac20",           dispatch: "XRPPM25FULL:pm25_ac20" }
+          # - { name: "PM25 dwell10_ac15",   dispatch: "XRPPM25FULL:pm25_dwell10_ac15" }
+          # - { name: "PM25 dwell10_ac05",   dispatch: "XRPPM25FULL:pm25_dwell10_ac05" }
+          # - { name: "PM25 dwell20_ac15",   dispatch: "XRPPM25FULL:pm25_dwell20_ac15" }
+          # ## PM26: trend capture strategy sweep (4 variants)
+          # - { name: "PM26 grid_only",      dispatch: "XRPPM26FULL:pm26_grid_only" }
+          # - { name: "PM26 vol_scaled",     dispatch: "XRPPM26FULL:pm26_vol_scaled" }
+          # - { name: "PM26 trend_dwell10",  dispatch: "XRPPM26FULL:pm26_trend_dwell10" }
+          # - { name: "PM26 slow_fast",      dispatch: "XRPPM26FULL:pm26_slow_fast" }
+          # ## PM27: grid-only optimization (10 variants)
+          # - { name: "PM27 compound10",  dispatch: "XRPPM27FULL:pm27_compound10" }
+          # - { name: "PM27 compound15",  dispatch: "XRPPM27FULL:pm27_compound15" }
+          # - { name: "PM27 lev3",        dispatch: "XRPPM27FULL:pm27_lev3" }
+          # - { name: "PM27 lev5",        dispatch: "XRPPM27FULL:pm27_lev5" }
+          # - { name: "PM27 tight010",    dispatch: "XRPPM27FULL:pm27_tight010" }
+          # - { name: "PM27 wide020",     dispatch: "XRPPM27FULL:pm27_wide020" }
+          # - { name: "PM27 max5",        dispatch: "XRPPM27FULL:pm27_max5" }
+          # - { name: "PM27 short_equal", dispatch: "XRPPM27FULL:pm27_short_equal" }
+          # - { name: "PM27 all_regime",  dispatch: "XRPPM27FULL:pm27_all_regime" }
+          # - { name: "PM27 combo",       dispatch: "XRPPM27FULL:pm27_combo" }
+          # ## PM26B: 2018+ grid vs trend comparison (2 variants)
+          # - { name: "PM26B grid_only_2018", dispatch: "XRPPM26BFULL:pm26b_grid_only_2018" }
+          # - { name: "PM26B trend_2018",     dispatch: "XRPPM26BFULL:pm26b_trend_2018" }
+          # ## PM26C: trend capture ≤10% equity cap (2 variants)
+          # - { name: "PM26C trend_10pct", dispatch: "XRPPM26CFULL:pm26c_trend_10pct" }
+          # - { name: "PM26C trend_05pct", dispatch: "XRPPM26CFULL:pm26c_trend_05pct" }
+          # ## PM28: stack PM27 winners — full 8.8yr (5 variants)
+          # - { name: "PM28 c15_lev3",      dispatch: "XRPPM28FULL:pm28_c15_lev3" }
+          # - { name: "PM28 c15_lev5",      dispatch: "XRPPM28FULL:pm28_c15_lev5" }
+          # - { name: "PM28 c15_wide020",   dispatch: "XRPPM28FULL:pm28_c15_wide020" }
+          # - { name: "PM28 c15_w020_lev3", dispatch: "XRPPM28FULL:pm28_c15_w020_lev3" }
+          # - { name: "PM28 c15_w020_lev5", dispatch: "XRPPM28FULL:pm28_c15_w020_lev5" }
+          # ## PM28 2018: stack PM27 winners — skip 2017 (5 variants)
+          # - { name: "PM28_2018 c15_lev3",      dispatch: "XRPPM28_2018:pm28_c15_lev3" }
+          # - { name: "PM28_2018 c15_lev5",      dispatch: "XRPPM28_2018:pm28_c15_lev5" }
+          # - { name: "PM28_2018 c15_wide020",   dispatch: "XRPPM28_2018:pm28_c15_wide020" }
+          # - { name: "PM28_2018 c15_w020_lev3", dispatch: "XRPPM28_2018:pm28_c15_w020_lev3" }
+          # - { name: "PM28_2018 c15_w020_lev5", dispatch: "XRPPM28_2018:pm28_c15_w020_lev5" }
+          # ## PM29: long-only + spacing — full 8.8yr (8 variants)
+          # - { name: "PM29 long_only",    dispatch: "XRPPM29FULL:pm29_long_only" }
+          # - { name: "PM29 tight010",     dispatch: "XRPPM29FULL:pm29_tight010" }
+          # - { name: "PM29 tight008",     dispatch: "XRPPM29FULL:pm29_tight008" }
+          # - { name: "PM29 lo_tight010",  dispatch: "XRPPM29FULL:pm29_lo_tight010" }
+          # - { name: "PM29 lo_tight008",  dispatch: "XRPPM29FULL:pm29_lo_tight008" }
+          # - { name: "PM29 vas",          dispatch: "XRPPM29FULL:pm29_vas" }
+          # - { name: "PM29 lo_vas",       dispatch: "XRPPM29FULL:pm29_lo_vas" }
+          # - { name: "PM29 combo",        dispatch: "XRPPM29FULL:pm29_combo" }
+          # ## PM29 2018: long-only + spacing — skip 2017 (8 variants)
+          # - { name: "PM29_2018 long_only",    dispatch: "XRPPM29_2018:pm29_long_only" }
+          # - { name: "PM29_2018 tight010",     dispatch: "XRPPM29_2018:pm29_tight010" }
+          # - { name: "PM29_2018 tight008",     dispatch: "XRPPM29_2018:pm29_tight008" }
+          # - { name: "PM29_2018 lo_tight010",  dispatch: "XRPPM29_2018:pm29_lo_tight010" }
+          # - { name: "PM29_2018 lo_tight008",  dispatch: "XRPPM29_2018:pm29_lo_tight008" }
+          # - { name: "PM29_2018 vas",          dispatch: "XRPPM29_2018:pm29_vas" }
+          # - { name: "PM29_2018 lo_vas",       dispatch: "XRPPM29_2018:pm29_lo_vas" }
+          # - { name: "PM29_2018 combo",        dispatch: "XRPPM29_2018:pm29_combo" }
+          # ══════════════════════════════════════════════════════════════
+          # BTC sweeps (PM30–PM31) — COMPLETED, commented out
+          # Results collected from run 22948155234 (dc84cb4).
+          # Un-comment to re-run any of these.
+          # ══════════════════════════════════════════════════════════════
+          # ── PM30 FULL (8 variants) ──
+          # - { name: "PM30 BTC baseline",        dispatch: "BTCPM30FULL:pm30_baseline" }
+          # - { name: "PM30 BTC lo",              dispatch: "BTCPM30FULL:pm30_lo" }
+          # - { name: "PM30 BTC vas",             dispatch: "BTCPM30FULL:pm30_vas" }
+          # - { name: "PM30 BTC lo_vas",          dispatch: "BTCPM30FULL:pm30_lo_vas" }
+          # - { name: "PM30 BTC lo_c15_lev3",     dispatch: "BTCPM30FULL:pm30_lo_c15_lev3" }
+          # - { name: "PM30 BTC lo_vas_c15",      dispatch: "BTCPM30FULL:pm30_lo_vas_c15" }
+          # - { name: "PM30 BTC lo_vas_c15_lev3", dispatch: "BTCPM30FULL:pm30_lo_vas_c15_lev3" }
+          # - { name: "PM30 BTC c15_lev5",        dispatch: "BTCPM30FULL:pm30_c15_lev5" }
+          # ── PM30_2018 (8 variants) ──
+          # - { name: "PM30_2018 BTC baseline",        dispatch: "BTCPM30_2018:pm30_baseline" }
+          # - { name: "PM30_2018 BTC lo",              dispatch: "BTCPM30_2018:pm30_lo" }
+          # - { name: "PM30_2018 BTC vas",             dispatch: "BTCPM30_2018:pm30_vas" }
+          # - { name: "PM30_2018 BTC lo_vas",          dispatch: "BTCPM30_2018:pm30_lo_vas" }
+          # - { name: "PM30_2018 BTC lo_c15_lev3",     dispatch: "BTCPM30_2018:pm30_lo_c15_lev3" }
+          # - { name: "PM30_2018 BTC lo_vas_c15",      dispatch: "BTCPM30_2018:pm30_lo_vas_c15" }
+          # - { name: "PM30_2018 BTC lo_vas_c15_lev3", dispatch: "BTCPM30_2018:pm30_lo_vas_c15_lev3" }
+          # - { name: "PM30_2018 BTC c15_lev5",        dispatch: "BTCPM30_2018:pm30_c15_lev5" }
+          # ── PM31 Groups A–H (19 variants) ──
+          # - { name: "PM31 BTC ts004",          dispatch: "BTCPM31:pm31_ts004" }
+          # - { name: "PM31 BTC ts006",          dispatch: "BTCPM31:pm31_ts006" }
+          # - { name: "PM31 BTC ovas_a",         dispatch: "BTCPM31:pm31_ovas_a" }
+          # - { name: "PM31 BTC ovas_b",         dispatch: "BTCPM31:pm31_ovas_b" }
+          # - { name: "PM31 BTC ovas_c",         dispatch: "BTCPM31:pm31_ovas_c" }
+          # - { name: "PM31 BTC combo_a",        dispatch: "BTCPM31:pm31_combo_a" }
+          # - { name: "PM31 BTC combo_b",        dispatch: "BTCPM31:pm31_combo_b" }
+          # - { name: "PM31 BTC combo_c",        dispatch: "BTCPM31:pm31_combo_c" }
+          # - { name: "PM31 BTC dca_a",          dispatch: "BTCPM31:pm31_dca_a" }
+          # - { name: "PM31 BTC dca_b",          dispatch: "BTCPM31:pm31_dca_b" }
+          # - { name: "PM31 BTC dca_c",          dispatch: "BTCPM31:pm31_dca_c" }
+          # - { name: "PM31 BTC dca_lev1",       dispatch: "BTCPM31:pm31_dca_lev1" }
+          # - { name: "PM31 BTC dca_lev5",       dispatch: "BTCPM31:pm31_dca_lev5" }
+          # - { name: "PM31 BTC dca_novas_004",  dispatch: "BTCPM31:pm31_dca_novas_004" }
+          # - { name: "PM31 BTC dca_novas_006",  dispatch: "BTCPM31:pm31_dca_novas_006" }
+          # - { name: "PM31 BTC dca_both_b",     dispatch: "BTCPM31:pm31_dca_both_b" }
+          # - { name: "PM31 BTC dca_s008",       dispatch: "BTCPM31:pm31_dca_s008" }
+          # - { name: "PM31 BTC dca_s008_novas", dispatch: "BTCPM31:pm31_dca_s008_novas" }
+          # ══════════════════════════════════════════════════════════════
+          # PM31 Group I: Missing DCA counterparts + re-run — ACTIVE
+          # ══════════════════════════════════════════════════════════════
+          # Group I: DCA counterparts for ovas_a/b/c (the PM31 winners)
+          - name: "PM31 BTC dca_ovas_a"
+            dispatch: "BTCPM31:pm31_dca_ovas_a"
+          - name: "PM31 BTC dca_ovas_b"
+            dispatch: "BTCPM31:pm31_dca_ovas_b"
+          - name: "PM31 BTC dca_ovas_c"
+            dispatch: "BTCPM31:pm31_dca_ovas_c"
+          # Re-run: cancelled in previous run
           - name: "PM31 BTC dca_both_a"
             dispatch: "BTCPM31:pm31_dca_both_a"
-          - name: "PM31 BTC dca_both_b"
-            dispatch: "BTCPM31:pm31_dca_both_b"
-          # Group H: DCA with original 0.008 spacing
-          - name: "PM31 BTC dca_s008"
-            dispatch: "BTCPM31:pm31_dca_s008"
-          - name: "PM31 BTC dca_s008_novas"
-            dispatch: "BTCPM31:pm31_dca_s008_novas"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
