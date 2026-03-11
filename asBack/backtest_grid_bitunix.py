@@ -95,6 +95,12 @@ class GridOrderBacktester:
         self._consec_trend_losses: int = 0    # running count of consecutive trend losses
         self._consec_loss_pause_counter: int = 0  # candles remaining in loss pause
 
+        # v45 — DCA (Dollar Cost Averaging) injection state
+        self._dca_amount: float = float(config.get("dca_amount", 0.0))
+        self._dca_interval: int = int(config.get("dca_interval_candles", 0))
+        self._dca_total_injected: float = 0.0
+        self._dca_count: int = 0
+
         # Pre-compute ADX series for the full dataset (used by ADX filter)
         self.adx_series = self._compute_adx(
             self.df,
@@ -488,6 +494,17 @@ class GridOrderBacktester:
 
             price: float = row["close"]
             timestamp = row["open_time"]
+
+            # v45 — DCA injection: periodically add cash to the account.
+            # Simulates regular deposits (e.g. $470 USDT every 2 weeks).
+            # With order_value_pct, the increased equity naturally scales
+            # grid order sizes — no explicit parameter change needed.
+            if (self._dca_interval > 0 and self._dca_amount > 0
+                    and idx > 0 and idx % self._dca_interval == 0):
+                self.balance += self._dca_amount
+                self._dca_total_injected += self._dca_amount
+                self._dca_count += 1
+
             # v17 equity-proportional sizing: if order_value_pct is set, scale each
             # grid order by (current equity × pct) instead of a fixed USD amount.
             # Gains compound naturally; position risk shrinks after losses.
@@ -1766,16 +1783,22 @@ class GridOrderBacktester:
         unrealized_pnl = long_pnl + short_pnl + trend_pnl
         realized_pnl = sum(t[5] for t in self.trade_history if t[5] != 0.0)
         final_equity = self.balance + self._locked_margin() + unrealized_pnl
+        # v45 DCA: total capital deployed = initial + all DCA injections.
+        # return_pct is measured against total capital deployed (cost basis).
+        total_capital = self.config["initial_balance"] + self._dca_total_injected
         return {
             "final_equity": final_equity,
-            "return_pct": (final_equity - self.config["initial_balance"])
-            / self.config["initial_balance"],
+            "return_pct": (final_equity - total_capital) / total_capital,
             "max_drawdown": 1 - final_equity / self.max_equity,
             "realized_pnl": realized_pnl,
             "unrealized_pnl": unrealized_pnl,
             "total_pnl": realized_pnl + unrealized_pnl,
             "trades": len(self.trade_history),
             "direction": self.direction,
+            # DCA tracking fields (zero when DCA is disabled)
+            "dca_total_injected": self._dca_total_injected,
+            "dca_injection_count": self._dca_count,
+            "total_capital_deployed": total_capital,
         }
 
     def export_trades(self, filename: str = "grid_orders_trades.csv") -> None:
@@ -2375,6 +2398,8 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
                     "trend_entry_dwell", "trend_exit_countervel",
                     # v44 — grid long-only mode
                     "grid_long_only",
+                    # v45 — DCA injection
+                    "dca_amount", "dca_interval_candles",
                 ) if k in params}),
             }
         )
@@ -2408,6 +2433,13 @@ async def grid_search_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
             f"unrealized: ${result['unrealized_pnl']:+.2f}  "
             f"open at end: {open_long}L / {open_short}S"
         )
+        if result.get("dca_total_injected", 0) > 0:
+            print(
+                f"     DCA: ${result['dca_total_injected']:,.0f} injected"
+                f" ({result['dca_injection_count']} deposits),"
+                f" total capital: ${result['total_capital_deployed']:,.0f},"
+                f" final equity: ${result['final_equity']:,.0f}"
+            )
         _print_quarterly_breakdown(bt, config["initial_balance"])
         _print_weekly_breakdown(bt, config["initial_balance"])
         if config.get("daily_breakdown"):
@@ -3393,8 +3425,11 @@ def _pm_v2_set(
     dd_halt_candles: int = 384,                     # Halt duration after DD trigger (~4 days on 15min)
     # v44 — grid long-only mode
     grid_long_only: bool = False,                   # Permanently suppress all short grid entries
+    # v45 — DCA (Dollar Cost Averaging) injection
+    dca_amount: float = 0.0,                        # USDT to inject per interval (0 = off)
+    dca_interval_candles: int = 0,                  # Candles between injections (0 = off; 20160 = fortnightly on 1min)
 ) -> Dict[str, Any]:
-    """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28/v29/v34/v44 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA, combination sweep, regime rotation, grid long-only."""
+    """v12/v13/v15/v16/v17/v18/v23/v24/v26/v27/v28/v29/v34/v44/v45 PM-tuning param set — RSI, BB, vol scale, regime filter, spacing, leverage, vol-adaptive spacing, adaptive gates, directional gates, dynamic velocity/decay/sizing, directional velocity, equity curve, consecutive loss guard, configurable dir EMA, combination sweep, regime rotation, grid long-only, DCA injection."""
     return {
         "name": name,
         "use_sl": True,
@@ -3544,6 +3579,10 @@ def _pm_v2_set(
            if dd_halt else {}),
         # v44 — grid long-only mode
         **({"grid_long_only": True} if grid_long_only else {}),
+        # v45 — DCA injection
+        **({"dca_amount": dca_amount,
+            "dca_interval_candles": dca_interval_candles}
+           if dca_amount > 0 and dca_interval_candles > 0 else {}),
     }
 
 
@@ -5832,6 +5871,130 @@ BTC_PM30_2018_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# v45 PM31 — BTC grid optimisation sweep (post-bubble only: Jan 2018 → Mar 2026)
+#
+# Four groups targeting forward-looking performance improvements:
+#
+# Group A: Tighter fixed spacing (0.004, 0.006 vs PM30's 0.008)
+#   Tests whether tighter grids capture more of BTC's moderate oscillations
+#   post-bubble.  Based on lo_vas_c15_lev3 (PM30 2018+ winner) but VAS off.
+#
+# Group B: Optimised VAS parameters
+#   PM30 VAS used floor=0.003/ceil=0.012 (from XRP tuning).  BTC post-2017
+#   has lower vol — tighter VAS bounds may capture more trades.
+#
+# Group C: Combined — tighter baseline spacing + tighter VAS bounds
+#   VAS scales from the base spacing; a lower base + tighter bounds = more
+#   aggressive grid in calm markets while still widening on volatility.
+#
+# Group D: Group C + DCA ($470 USDT fortnightly ≈ $750 AUD)
+#   Simulates regular capital injection.  With order_value_pct=0.15, DCA
+#   naturally grows grid order sizes as equity rises.
+# ===========================================================================
+
+# ── Group A: Tighter fixed spacing (VAS off) ────────────────────────────
+_PM31_GROUP_A = [
+    _pm29("pm31_ts004",
+          grid_long_only=True,
+          spacing=0.004,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+    _pm29("pm31_ts006",
+          grid_long_only=True,
+          spacing=0.006,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+]
+
+# ── Group B: Optimised VAS parameters ───────────────────────────────────
+_PM31_GROUP_B = [
+    _pm29("pm31_ovas_a",
+          grid_long_only=True,
+          spacing=0.008,
+          vol_adaptive_spacing=True,
+          vas_floor=0.002, vas_ceil=0.008, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+    _pm29("pm31_ovas_b",
+          grid_long_only=True,
+          spacing=0.008,
+          vol_adaptive_spacing=True,
+          vas_floor=0.002, vas_ceil=0.010, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+    _pm29("pm31_ovas_c",
+          grid_long_only=True,
+          spacing=0.008,
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.008, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+]
+
+# ── Group C: Combined tighter spacing + optimised VAS ───────────────────
+_PM31_GROUP_C = [
+    _pm29("pm31_combo_a",
+          grid_long_only=True,
+          spacing=0.004,
+          vol_adaptive_spacing=True,
+          vas_floor=0.002, vas_ceil=0.006, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+    _pm29("pm31_combo_b",
+          grid_long_only=True,
+          spacing=0.004,
+          vol_adaptive_spacing=True,
+          vas_floor=0.002, vas_ceil=0.008, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+    _pm29("pm31_combo_c",
+          grid_long_only=True,
+          spacing=0.006,
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.008, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3),
+]
+
+# ── Group D: Group C + DCA ($470 USDT every 20,160 1min candles = fortnightly)
+_PM31_GROUP_D = [
+    _pm29("pm31_dca_a",
+          grid_long_only=True,
+          spacing=0.004,
+          vol_adaptive_spacing=True,
+          vas_floor=0.002, vas_ceil=0.006, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+    _pm29("pm31_dca_b",
+          grid_long_only=True,
+          spacing=0.004,
+          vol_adaptive_spacing=True,
+          vas_floor=0.002, vas_ceil=0.008, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+    _pm29("pm31_dca_c",
+          grid_long_only=True,
+          spacing=0.006,
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.008, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+]
+
+_PM31_ALL_SETS = _PM31_GROUP_A + _PM31_GROUP_B + _PM31_GROUP_C + _PM31_GROUP_D
+
+# BTC PM31: post-bubble only (Jan 2018 → Mar 2026)
+BTC_PM31_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM31_CONFIG["start_date"]      = datetime(2018, 1, 1)
+BTC_PM31_CONFIG["end_date"]        = datetime(2026, 3, 8)
+BTC_PM31_CONFIG["param_sets"]      = _PM31_ALL_SETS
+BTC_PM31_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -6548,6 +6711,20 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v45 PM30 BTC 2018 — post-bubble grid on BTCUSDT{variant_label}  (Jan 2018 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM31", "PM31")):
+        cfg = dict(BTC_PM31_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM31 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM31_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v45 PM31 BTC — tighter spacing + VAS + DCA optimisation{variant_label}  (Jan 2018 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):

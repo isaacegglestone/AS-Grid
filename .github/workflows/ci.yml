@@ -229,6 +229,33 @@ jobs:
             dispatch: "BTCPM30_2018:pm30_lo_vas_c15_lev3"
           - name: "PM30_2018 BTC c15_lev5"
             dispatch: "BTCPM30_2018:pm30_c15_lev5"
+          # ── PM31: BTC grid optimisation — tighter spacing + VAS + DCA (11 variants) ──
+          # Group A: Tighter fixed spacing
+          - name: "PM31 BTC ts004"
+            dispatch: "BTCPM31:pm31_ts004"
+          - name: "PM31 BTC ts006"
+            dispatch: "BTCPM31:pm31_ts006"
+          # Group B: Optimised VAS
+          - name: "PM31 BTC ovas_a"
+            dispatch: "BTCPM31:pm31_ovas_a"
+          - name: "PM31 BTC ovas_b"
+            dispatch: "BTCPM31:pm31_ovas_b"
+          - name: "PM31 BTC ovas_c"
+            dispatch: "BTCPM31:pm31_ovas_c"
+          # Group C: Combined tighter spacing + VAS
+          - name: "PM31 BTC combo_a"
+            dispatch: "BTCPM31:pm31_combo_a"
+          - name: "PM31 BTC combo_b"
+            dispatch: "BTCPM31:pm31_combo_b"
+          - name: "PM31 BTC combo_c"
+            dispatch: "BTCPM31:pm31_combo_c"
+          # Group D: Combined + DCA ($470 USDT fortnightly)
+          - name: "PM31 BTC dca_a"
+            dispatch: "BTCPM31:pm31_dca_a"
+          - name: "PM31 BTC dca_b"
+            dispatch: "BTCPM31:pm31_dca_b"
+          - name: "PM31 BTC dca_c"
+            dispatch: "BTCPM31:pm31_dca_c"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
