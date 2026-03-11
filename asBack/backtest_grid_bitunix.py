@@ -5984,7 +5984,82 @@ _PM31_GROUP_D = [
           dca_amount=470.0, dca_interval_candles=20160),
 ]
 
-_PM31_ALL_SETS = _PM31_GROUP_A + _PM31_GROUP_B + _PM31_GROUP_C + _PM31_GROUP_D
+# ── Group E: DCA leverage sweep (combo_a base, test lev1 + lev5) ────────
+_PM31_GROUP_E = [
+    _pm29("pm31_dca_lev1",
+          grid_long_only=True,
+          spacing=0.004,
+          vol_adaptive_spacing=True,
+          vas_floor=0.002, vas_ceil=0.006, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=1,
+          dca_amount=470.0, dca_interval_candles=20160),
+    _pm29("pm31_dca_lev5",
+          grid_long_only=True,
+          spacing=0.004,
+          vol_adaptive_spacing=True,
+          vas_floor=0.002, vas_ceil=0.006, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=5,
+          dca_amount=470.0, dca_interval_candles=20160),
+]
+
+# ── Group F: DCA without VAS (pure tighter fixed spacing) ───────────────
+_PM31_GROUP_F = [
+    _pm29("pm31_dca_novas_004",
+          grid_long_only=True,
+          spacing=0.004,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+    _pm29("pm31_dca_novas_006",
+          grid_long_only=True,
+          spacing=0.006,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+]
+
+# ── Group G: Non-long-only DCA (both sides, captures more trades) ───────
+_PM31_GROUP_G = [
+    _pm29("pm31_dca_both_a",
+          grid_long_only=False,
+          spacing=0.004,
+          vol_adaptive_spacing=True,
+          vas_floor=0.002, vas_ceil=0.006, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+    _pm29("pm31_dca_both_b",
+          grid_long_only=False,
+          spacing=0.006,
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.008, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+]
+
+# ── Group H: DCA with original PM30 0.008 spacing (reference) ───────────
+_PM31_GROUP_H = [
+    _pm29("pm31_dca_s008",
+          grid_long_only=True,
+          spacing=0.008,
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.012, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+    _pm29("pm31_dca_s008_novas",
+          grid_long_only=True,
+          spacing=0.008,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          dca_amount=470.0, dca_interval_candles=20160),
+]
+
+_PM31_ALL_SETS = (_PM31_GROUP_A + _PM31_GROUP_B + _PM31_GROUP_C + _PM31_GROUP_D
+                  + _PM31_GROUP_E + _PM31_GROUP_F + _PM31_GROUP_G + _PM31_GROUP_H)
 
 # BTC PM31: post-bubble only (Jan 2018 → Mar 2026)
 BTC_PM31_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
