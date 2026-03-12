@@ -2487,6 +2487,422 @@ def grid_search_backtest(config: Optional[Dict[str, Any]] = None) -> pd.DataFram
 
 
 # ===========================================================================
+# Hedge Repair Backtester — simultaneous long + short with trailing stop
+# + DCA repair.  Completely independent of the grid engine above.
+#
+# Strategy overview:
+#   1. Open simultaneous long + short at mid-range of last week's candles.
+#   2. Trailing stop on winning side ($5 profit threshold, $1 trail).
+#   3. DCA 2× repair on losing side when price levels off (zig-zag).
+#   4. Spot reserve as margin backstop.
+#   5. Repeat once both sides are closed.
+#
+# Margin model:
+#   Conservative (no hedge netting) — each side locks independent margin.
+#   Real hedge-mode performance would be better.
+# ===========================================================================
+
+class HedgeRepairBacktester:
+    """Hedge-mode backtester: simultaneous long+short, trailing stop, DCA repair."""
+
+    IDLE = "IDLE"
+    BOTH_OPEN = "BOTH_OPEN"
+    REPAIRING = "REPAIRING"
+
+    def __init__(self, df: pd.DataFrame, config: Dict[str, Any]):
+        self.df = df.reset_index(drop=True)
+        self.symbol = config["symbol"]
+        self.initial_balance = float(config["initial_balance"])
+        self.spot_reserve_initial = float(config.get("spot_reserve", 1000))
+        self.entry_pct = float(config.get("entry_pct", 0.10))
+        self.leverage = int(config.get("leverage", 5))
+        self.fee_pct = float(config.get("fee_pct", 0.0006))
+        self.profit_threshold = float(config.get("profit_threshold", 5.0))
+        self.trailing_distance = float(config.get("trailing_distance", 1.0))
+        self.lookback_candles = int(config.get("lookback_candles", 672))
+        self.zig_zag_candles = int(config.get("zig_zag_candles", 20))
+        self.zig_zag_threshold = float(config.get("zig_zag_threshold", 0.01))
+        self.liq_proximity_pct = float(config.get("liq_proximity_pct", 0.80))
+        self.trade_start_idx = int(config.get("trade_start_idx", 0))
+        self.dca_multiplier = float(config.get("dca_multiplier", 1.0))
+
+        # Runtime state
+        self.futures_balance = self.initial_balance
+        self.spot_balance = self.spot_reserve_initial
+        self.spot_borrowed = 0.0
+        self.state = self.IDLE
+        self.long_pos: Optional[Dict[str, Any]] = None
+        self.short_pos: Optional[Dict[str, Any]] = None
+
+        # Tracking
+        self.equity_curve: List[Dict[str, Any]] = []
+        self.trade_log: List[Dict[str, Any]] = []
+        self.cycles_completed = 0
+        self.total_dca_count = 0
+        self.total_spot_borrows = 0
+        self.peak_equity = self.initial_balance + self.spot_reserve_initial
+        self.max_drawdown = 0.0
+        self.liquidated = False
+        self.total_fees = 0.0
+
+    # ── helpers ───────────────────────────────────────────────────────
+
+    def _calc_profit(self, pos: Optional[Dict], price: float) -> float:
+        if pos is None:
+            return 0.0
+        if pos["side"] == "long":
+            return (price - pos["avg_entry"]) * pos["qty"]
+        return (pos["avg_entry"] - price) * pos["qty"]
+
+    def _futures_equity(self, price: float) -> float:
+        long_pnl = self._calc_profit(self.long_pos, price)
+        short_pnl = self._calc_profit(self.short_pos, price)
+        long_margin = self.long_pos["margin"] if self.long_pos else 0.0
+        short_margin = self.short_pos["margin"] if self.short_pos else 0.0
+        return self.futures_balance + long_margin + short_margin + long_pnl + short_pnl
+
+    def _total_equity(self, price: float) -> float:
+        return self._futures_equity(price) + self.spot_balance
+
+    # ── position lifecycle ────────────────────────────────────────────
+
+    def _open_both(self, price: float, idx: int) -> bool:
+        """Open equal-size long + short at *price*."""
+        margin_per_side = self.futures_balance * self.entry_pct
+        notional = margin_per_side * self.leverage
+        qty = notional / price
+        fee_per_side = notional * self.fee_pct
+        total_cost = 2 * margin_per_side + 2 * fee_per_side
+        if self.futures_balance < total_cost:
+            return False
+        self.futures_balance -= total_cost
+        self.total_fees += 2 * fee_per_side
+        base = {
+            "qty": qty, "margin": margin_per_side,
+            "dca_count": 0, "peak_profit": 0.0,
+            "trailing_active": False, "entry_candle": idx,
+        }
+        self.long_pos = {**base, "side": "long", "avg_entry": price}
+        self.short_pos = {**base, "side": "short", "avg_entry": price}
+        self.trade_log.append({
+            "action": "OPEN_PAIR", "price": price, "qty": qty,
+            "margin_per_side": margin_per_side, "fee": 2 * fee_per_side,
+            "candle_idx": idx,
+        })
+        return True
+
+    def _close_position(self, pos: Dict, price: float,
+                        reason: str = "trailing_stop") -> float:
+        """Close *pos*, return net realised P&L (after fee)."""
+        profit = self._calc_profit(pos, price)
+        fee = pos["qty"] * price * self.fee_pct
+        self.futures_balance += pos["margin"] + profit - fee
+        self.total_fees += fee
+        self.trade_log.append({
+            "action": "CLOSE", "side": pos["side"], "price": price,
+            "qty": pos["qty"], "avg_entry": pos["avg_entry"],
+            "profit": profit, "fee": fee, "reason": reason,
+            "dca_count": pos["dca_count"], "candle_idx": None,
+        })
+        return profit - fee
+
+    def _dca_repair(self, pos: Dict, price: float) -> bool:
+        """DCA: add *dca_multiplier* × current qty at *price*."""
+        dca_qty = pos["qty"] * self.dca_multiplier
+        dca_notional = dca_qty * price
+        dca_margin = dca_notional / self.leverage
+        dca_fee = dca_notional * self.fee_pct
+        needed = dca_margin + dca_fee
+        # Borrow from spot if futures can't cover
+        if self.futures_balance < needed:
+            shortfall = needed - self.futures_balance
+            borrow = min(shortfall, self.spot_balance)
+            self.spot_balance -= borrow
+            self.futures_balance += borrow
+            self.spot_borrowed += borrow
+            self.total_spot_borrows += 1
+            if self.futures_balance < needed:
+                return False  # can't afford
+        self.futures_balance -= needed
+        self.total_fees += dca_fee
+        old_notional = pos["qty"] * pos["avg_entry"]
+        new_notional = dca_qty * price
+        pos["avg_entry"] = (old_notional + new_notional) / (pos["qty"] + dca_qty)
+        pos["qty"] += dca_qty
+        pos["margin"] += dca_margin
+        pos["dca_count"] += 1
+        pos["peak_profit"] = self._calc_profit(pos, price)
+        pos["trailing_active"] = False
+        self.total_dca_count += 1
+        self.trade_log.append({
+            "action": "DCA", "side": pos["side"], "price": price,
+            "qty_added": dca_qty, "margin_added": dca_margin,
+            "fee": dca_fee, "new_avg": pos["avg_entry"],
+            "total_qty": pos["qty"], "candle_idx": None,
+        })
+        return True
+
+    def _repay_spot(self) -> None:
+        if self.spot_borrowed > 0:
+            repay = min(self.spot_borrowed, self.futures_balance)
+            self.futures_balance -= repay
+            self.spot_balance += repay
+            self.spot_borrowed -= repay
+
+    def _check_zig_zag(self, idx: int) -> bool:
+        """True when recent price range is tight (price levelling off)."""
+        if idx < self.zig_zag_candles:
+            return False
+        window = self.df.iloc[idx - self.zig_zag_candles : idx]
+        hi = window["high"].max()
+        lo = window["low"].min()
+        mid = (hi + lo) / 2.0
+        if mid <= 0:
+            return False
+        return (hi - lo) / mid < self.zig_zag_threshold
+
+    # ── trailing-stop helpers ─────────────────────────────────────────
+
+    @staticmethod
+    def _update_peak(pos: Dict, best_profit: float) -> None:
+        pos["peak_profit"] = max(pos["peak_profit"], best_profit)
+        if pos["peak_profit"] >= 0 and not pos["trailing_active"]:
+            pass  # threshold checked outside
+
+    def _trailing_triggered(self, pos: Dict, worst_profit: float) -> bool:
+        if not pos["trailing_active"]:
+            return False
+        return worst_profit <= pos["peak_profit"] - self.trailing_distance
+
+    def _stop_price(self, pos: Dict) -> float:
+        stop_profit = pos["peak_profit"] - self.trailing_distance
+        if pos["side"] == "long":
+            return pos["avg_entry"] + stop_profit / pos["qty"]
+        return pos["avg_entry"] - stop_profit / pos["qty"]
+
+    # ── main simulation loop ─────────────────────────────────────────
+
+    def run(self) -> Dict[str, Any]:
+        closes = self.df["close"].values
+        highs = self.df["high"].values
+        lows = self.df["low"].values
+        n = len(self.df)
+
+        for idx in range(n):
+            price = closes[idx]
+            high = highs[idx]
+            low = lows[idx]
+
+            if self.liquidated:
+                break
+
+            # ── IDLE: look for entry ──────────────────────────────────
+            if self.state == self.IDLE:
+                if idx >= self.trade_start_idx and idx >= self.lookback_candles:
+                    window = self.df.iloc[idx - self.lookback_candles : idx]
+                    w_hi = window["high"].max()
+                    w_lo = window["low"].min()
+                    mid = (w_hi + w_lo) / 2.0
+                    if low <= mid <= high and self.futures_balance > 0:
+                        if self._open_both(mid, idx):
+                            self.state = self.BOTH_OPEN
+
+            # ── BOTH_OPEN: monitor trailing stops ─────────────────────
+            elif self.state == self.BOTH_OPEN:
+                lp, sp = self.long_pos, self.short_pos
+                # Best/worst intra-candle profits
+                l_best = (high - lp["avg_entry"]) * lp["qty"]
+                s_best = (sp["avg_entry"] - low) * sp["qty"]
+                l_worst = (low - lp["avg_entry"]) * lp["qty"]
+                s_worst = (sp["avg_entry"] - high) * sp["qty"]
+
+                lp["peak_profit"] = max(lp["peak_profit"], l_best)
+                sp["peak_profit"] = max(sp["peak_profit"], s_best)
+                if lp["peak_profit"] >= self.profit_threshold:
+                    lp["trailing_active"] = True
+                if sp["peak_profit"] >= self.profit_threshold:
+                    sp["trailing_active"] = True
+
+                l_trig = self._trailing_triggered(lp, l_worst)
+                s_trig = self._trailing_triggered(sp, s_worst)
+
+                if l_trig and s_trig:
+                    # Both triggered — close the more profitable one
+                    if l_best >= s_best:
+                        self._close_position(lp, self._stop_price(lp))
+                        self.long_pos = None
+                    else:
+                        self._close_position(sp, self._stop_price(sp))
+                        self.short_pos = None
+                    self.state = self.REPAIRING
+                elif l_trig:
+                    self._close_position(lp, self._stop_price(lp))
+                    self.long_pos = None
+                    self.state = self.REPAIRING
+                elif s_trig:
+                    self._close_position(sp, self._stop_price(sp))
+                    self.short_pos = None
+                    self.state = self.REPAIRING
+
+            # ── REPAIRING: DCA the losing side ────────────────────────
+            elif self.state == self.REPAIRING:
+                remaining = self.long_pos or self.short_pos
+                if remaining is None:
+                    self._repay_spot()
+                    self.cycles_completed += 1
+                    self.state = self.IDLE
+                    continue
+
+                if remaining["side"] == "long":
+                    best_p = (high - remaining["avg_entry"]) * remaining["qty"]
+                    worst_p = (low - remaining["avg_entry"]) * remaining["qty"]
+                else:
+                    best_p = (remaining["avg_entry"] - low) * remaining["qty"]
+                    worst_p = (remaining["avg_entry"] - high) * remaining["qty"]
+
+                remaining["peak_profit"] = max(remaining["peak_profit"], best_p)
+                if remaining["peak_profit"] >= self.profit_threshold:
+                    remaining["trailing_active"] = True
+
+                if self._trailing_triggered(remaining, worst_p):
+                    self._close_position(remaining, self._stop_price(remaining))
+                    if remaining["side"] == "long":
+                        self.long_pos = None
+                    else:
+                        self.short_pos = None
+                    self._repay_spot()
+                    self.cycles_completed += 1
+                    self.state = self.IDLE
+                    continue
+
+                cur_profit = self._calc_profit(remaining, price)
+                # Emergency DCA — approaching liquidation
+                if (remaining["margin"] > 0
+                        and abs(cur_profit) > remaining["margin"] * self.liq_proximity_pct):
+                    self._dca_repair(remaining, price)
+                # Zig-zag DCA — price levelling off while position is losing
+                elif cur_profit < 0 and self._check_zig_zag(idx):
+                    self._dca_repair(remaining, price)
+
+            # ── equity tracking ───────────────────────────────────────
+            total_eq = self._total_equity(price)
+            if total_eq > self.peak_equity:
+                self.peak_equity = total_eq
+            dd = ((self.peak_equity - total_eq) / self.peak_equity
+                  if self.peak_equity > 0 else 0.0)
+            if dd > self.max_drawdown:
+                self.max_drawdown = dd
+
+            self.equity_curve.append({
+                "candle_idx": idx,
+                "price": price,
+                "futures_equity": self._futures_equity(price),
+                "spot_balance": self.spot_balance,
+                "total_equity": total_eq,
+                "state": self.state,
+            })
+
+            # Account wipeout
+            if self._futures_equity(price) <= 0 and self.spot_balance <= 0:
+                self.liquidated = True
+
+        # ── end of simulation: close any open positions ───────────────
+        final_price = closes[-1] if n > 0 else 0.0
+        if self.long_pos:
+            self._close_position(self.long_pos, final_price, "end_of_sim")
+            self.long_pos = None
+        if self.short_pos:
+            self._close_position(self.short_pos, final_price, "end_of_sim")
+            self.short_pos = None
+        self._repay_spot()
+
+        total_initial = self.initial_balance + self.spot_reserve_initial
+        total_final = self.futures_balance + self.spot_balance
+        return_pct = (total_final - total_initial) / total_initial if total_initial else 0.0
+        trades = sum(1 for t in self.trade_log if t["action"] == "CLOSE")
+        realised = sum(t.get("profit", 0) for t in self.trade_log if t["action"] == "CLOSE")
+
+        return {
+            "return_pct": return_pct,
+            "total_return": total_final - total_initial,
+            "initial_total": total_initial,
+            "final_total": total_final,
+            "futures_final": self.futures_balance,
+            "spot_final": self.spot_balance,
+            "trades": trades,
+            "entries": sum(1 for t in self.trade_log if t["action"] == "OPEN_PAIR"),
+            "dca_count": self.total_dca_count,
+            "cycles": self.cycles_completed,
+            "max_drawdown": self.max_drawdown,
+            "realized_pnl": realised,
+            "total_fees": self.total_fees,
+            "spot_borrows": self.total_spot_borrows,
+            "liquidated": self.liquidated,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Hedge repair runner (mirrors grid_search_backtest_async)
+# ---------------------------------------------------------------------------
+
+async def hedge_repair_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
+    """Run all param_sets through the HedgeRepairBacktester."""
+    lookback_days = (config.get("lookback_candles", 672) * 15 // 60 // 24) + 2
+    fetch_start = config["start_date"] - timedelta(days=lookback_days)
+
+    df = await fetch_klines_as_df(
+        symbol=config["symbol"],
+        interval="15min",
+        start_dt=fetch_start,
+        end_dt=config["end_date"],
+        api_key=config.get("api_key", ""),
+        secret_key=config.get("secret_key", ""),
+    )
+
+    trade_start_dt = config["start_date"]
+    if trade_start_dt.tzinfo is None:
+        trade_start_dt = trade_start_dt.replace(tzinfo=timezone.utc)
+    mask = df["open_time"] >= trade_start_dt
+    trade_start_idx = int(mask.idxmax()) if mask.any() else 0
+
+    results = []
+    for params in config["param_sets"]:
+        print(f"\n🚀 Hedge Repair: {params['name']}")
+        print(f"  leverage={params.get('leverage', config.get('leverage', 5))}x  "
+              f"entry_pct={params.get('entry_pct', config.get('entry_pct', 0.10)) * 100:.0f}%  "
+              f"balance=${params.get('initial_balance', config.get('initial_balance', 1000)):,}")
+        run_config: Dict[str, Any] = {**config, **params,
+                                       "trade_start_idx": trade_start_idx}
+        bt = HedgeRepairBacktester(df, run_config)
+        result = bt.run()
+        result["strategy_name"] = params["name"]
+        results.append(result)
+
+        print(f"  → return: {result['return_pct'] * 100:.2f}%  "
+              f"trades: {result['trades']}  "
+              f"max_dd: {result['max_drawdown'] * 100:.2f}%")
+        print(f"     cycles: {result['cycles']}  "
+              f"DCAs: {result['dca_count']}  "
+              f"spot_borrows: {result['spot_borrows']}  "
+              f"fees: ${result['total_fees']:.2f}")
+        print(f"     initial: ${result['initial_total']:,.0f} → "
+              f"final: ${result['final_total']:,.2f}  "
+              f"realized: ${result['realized_pnl']:+.2f}")
+        if result["liquidated"]:
+            print("     ⚠️  LIQUIDATED")
+
+    df_results = pd.DataFrame(results)
+    df_results.to_csv("bitunix_hedge_repair_results.csv", index=False)
+    print("\n✅ Results saved → bitunix_hedge_repair_results.csv")
+    return df_results
+
+
+def hedge_repair_backtest(config: Dict[str, Any]) -> pd.DataFrame:
+    """Synchronous wrapper around :func:`hedge_repair_backtest_async`."""
+    return asyncio.run(hedge_repair_backtest_async(config))
+
+
+# ===========================================================================
 # Configuration
 # ===========================================================================
 
@@ -6570,6 +6986,100 @@ BTC_PM38_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# PM39 — Hedge Repair Sweep  (2024-01 → 2026-03)
+#
+# Simultaneous long + short in hedge mode.  Trailing stop ($5 threshold,
+# $1 trail) on winning side.  DCA 2× repair on losing side when price
+# levels off.  Spot reserve as margin backstop.
+#
+# 40 variants: 2 symbols × 4 capital tiers × 5 leverage levels
+#   Capital: $1K/10%, $5K/10%, $10K/10%, $10K/5%
+#   Leverage: 3×, 5×, 10×, 15×, 20×
+#   Spot reserve = futures balance (1:1)
+# ===========================================================================
+
+_PM39_LEVERAGE_LEVELS = [3, 5, 10, 15, 20]
+
+
+def _pm39_variants(sym_prefix: str, balance: int, spot: int,
+                   entry_pct: float, leverages: List[int]) -> List[Dict[str, Any]]:
+    """Generate PM39 variant param_sets for one symbol × capital tier."""
+    cap_label = f"{balance // 1000}k{int(entry_pct * 100)}"
+    return [
+        {
+            "name": f"pm39_{sym_prefix}_{cap_label}_{lev}x",
+            "initial_balance": balance,
+            "spot_reserve": spot,
+            "entry_pct": entry_pct,
+            "leverage": lev,
+            "profit_threshold": 5.0,
+            "trailing_distance": 1.0,
+            "lookback_candles": 672,
+            "zig_zag_candles": 20,
+            "zig_zag_threshold": 0.01,
+            "liq_proximity_pct": 0.80,
+            "dca_multiplier": 1.0,
+        }
+        for lev in leverages
+    ]
+
+
+# ── BTC PM39 configs (4 capital tiers × 5 leverage = 20 variants) ────────
+
+BTC_PM39_1K10_CONFIG: Dict[str, Any] = {
+    "symbol": "BTCUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 1, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 1000,
+    "param_sets": _pm39_variants("btc", 1000, 1000, 0.10, _PM39_LEVERAGE_LEVELS),
+}
+BTC_PM39_5K10_CONFIG: Dict[str, Any] = {
+    "symbol": "BTCUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 1, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 5000,
+    "param_sets": _pm39_variants("btc", 5000, 5000, 0.10, _PM39_LEVERAGE_LEVELS),
+}
+BTC_PM39_10K10_CONFIG: Dict[str, Any] = {
+    "symbol": "BTCUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 1, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 10000,
+    "param_sets": _pm39_variants("btc", 10000, 10000, 0.10, _PM39_LEVERAGE_LEVELS),
+}
+BTC_PM39_10K5_CONFIG: Dict[str, Any] = {
+    "symbol": "BTCUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 1, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 10000,
+    "param_sets": _pm39_variants("btc", 10000, 10000, 0.05, _PM39_LEVERAGE_LEVELS),
+}
+
+# ── XRP PM39 configs (4 capital tiers × 5 leverage = 20 variants) ────────
+
+XRP_PM39_1K10_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 1, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 1000,
+    "param_sets": _pm39_variants("xrp", 1000, 1000, 0.10, _PM39_LEVERAGE_LEVELS),
+}
+XRP_PM39_5K10_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 1, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 5000,
+    "param_sets": _pm39_variants("xrp", 5000, 5000, 0.10, _PM39_LEVERAGE_LEVELS),
+}
+XRP_PM39_10K10_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 1, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 10000,
+    "param_sets": _pm39_variants("xrp", 10000, 10000, 0.10, _PM39_LEVERAGE_LEVELS),
+}
+XRP_PM39_10K5_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 1, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 10000,
+    "param_sets": _pm39_variants("xrp", 10000, 10000, 0.05, _PM39_LEVERAGE_LEVELS),
+}
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -7470,6 +7980,141 @@ if __name__ == "__main__":
         print(f"  v48 PM38 BTC — Wider Spacing{variant_label}  (Jan 2024 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
+
+    # ── PM39 Hedge Repair (BTC) ──────────────────────────────────────────
+    elif symbol.startswith(("BTCPM39_1K10", "PM39_1K10")):
+        cfg = dict(BTC_PM39_1K10_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM39 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM39_1K10_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM39 BTC — Hedge Repair $1K/10%  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith(("BTCPM39_5K10", "PM39_5K10")):
+        cfg = dict(BTC_PM39_5K10_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM39 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM39_5K10_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM39 BTC — Hedge Repair $5K/10%  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith(("BTCPM39_10K10", "PM39_10K10")):
+        cfg = dict(BTC_PM39_10K10_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM39 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM39_10K10_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM39 BTC — Hedge Repair $10K/10%  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith(("BTCPM39_10K5", "PM39_10K5")):
+        cfg = dict(BTC_PM39_10K5_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM39 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM39_10K5_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM39 BTC — Hedge Repair $10K/5%  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith(("BTCPM39", "PM39")):
+        # Run all BTC PM39 capital tiers
+        for cfg_src, label in [
+            (BTC_PM39_1K10_CONFIG, "$1K/10%"),
+            (BTC_PM39_5K10_CONFIG, "$5K/10%"),
+            (BTC_PM39_10K10_CONFIG, "$10K/10%"),
+            (BTC_PM39_10K5_CONFIG, "$10K/5%"),
+        ]:
+            cfg = dict(cfg_src)
+            print("\n" + "=" * 60)
+            print(f"  PM39 BTC — Hedge Repair {label}  (Jan 2024 → Mar 2026)")
+            print("=" * 60)
+            hedge_repair_backtest(cfg)
+
+    # ── PM39 Hedge Repair (XRP) ──────────────────────────────────────────
+    elif symbol.startswith("XRPPM39_1K10"):
+        cfg = dict(XRP_PM39_1K10_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM39 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM39_1K10_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM39 XRP — Hedge Repair $1K/10%  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith("XRPPM39_5K10"):
+        cfg = dict(XRP_PM39_5K10_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM39 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM39_5K10_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM39 XRP — Hedge Repair $5K/10%  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith("XRPPM39_10K10"):
+        cfg = dict(XRP_PM39_10K10_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM39 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM39_10K10_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM39 XRP — Hedge Repair $10K/10%  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith("XRPPM39_10K5"):
+        cfg = dict(XRP_PM39_10K5_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM39 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM39_10K5_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM39 XRP — Hedge Repair $10K/5%  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith("XRPPM39"):
+        # Run all XRP PM39 capital tiers
+        for cfg_src, label in [
+            (XRP_PM39_1K10_CONFIG, "$1K/10%"),
+            (XRP_PM39_5K10_CONFIG, "$5K/10%"),
+            (XRP_PM39_10K10_CONFIG, "$10K/10%"),
+            (XRP_PM39_10K5_CONFIG, "$10K/5%"),
+        ]:
+            cfg = dict(cfg_src)
+            print("\n" + "=" * 60)
+            print(f"  PM39 XRP — Hedge Repair {label}  (Jan 2024 → Mar 2026)")
+            print("=" * 60)
+            hedge_repair_backtest(cfg)
+
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
         print("  v11 Crash protection — 3.9-year MAX history  (Apr 2022 → Feb 2026)")
