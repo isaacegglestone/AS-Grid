@@ -158,6 +158,11 @@ class GridOrderBacktester:
             _pct_window, min_periods=1
         ).quantile(_pct_thresh).fillna(0)
 
+        # Pre-compute 200-day SMA (used by v46 SMA regime filter).
+        # On 15-min candles: 200 trading days × 96 candles/day = 19200.
+        _sma_regime_period = int(self.config.get("sma_regime_period", 19200))
+        self.sma_200d_series = _close_s.rolling(_sma_regime_period, min_periods=1).mean()
+
         # Pre-compute slow EMA series (used by EMA bias filter)
         self.ema_slow_series = self._compute_ema(
             self.df["close"],
@@ -543,6 +548,15 @@ class GridOrderBacktester:
             # v44 — grid_long_only: permanently suppress all short grid entries.
             if self.config.get("grid_long_only", False):
                 halt_grid_shorts = True
+
+            # v46 — SMA regime filter: suppress shorts when price > 200d SMA.
+            # In bull territory (above long-term average), shorting bleeds.
+            # In bear/range territory (below), both-sides grid thrives.
+            if (not halt_grid_shorts
+                    and self.config.get("sma_regime_filter", False)):
+                _sma_200d = float(self.sma_200d_series.iloc[idx])
+                if _sma_200d > 0 and price > _sma_200d:
+                    halt_grid_shorts = True
 
             # ------------------------------------------------------------------
             # Velocity circuit breaker (crash_cb)
@@ -3425,6 +3439,9 @@ def _pm_v2_set(
     dd_halt_candles: int = 384,                     # Halt duration after DD trigger (~4 days on 15min)
     # v44 — grid long-only mode
     grid_long_only: bool = False,                   # Permanently suppress all short grid entries
+    # v46 — SMA regime filter: dynamically suppress shorts above 200d SMA
+    sma_regime_filter: bool = False,                 # When True, shorts blocked while price > 200d SMA
+    sma_regime_period: int = 19200,                  # SMA lookback in candles (200d × 96 = 19200 for 15min)
     # v45 — DCA (Dollar Cost Averaging) injection
     dca_amount: float = 0.0,                        # USDT to inject per interval (0 = off)
     dca_interval_candles: int = 0,                  # Candles between injections (0 = off; 20160 = fortnightly on 1min)
@@ -3579,6 +3596,10 @@ def _pm_v2_set(
            if dd_halt else {}),
         # v44 — grid long-only mode
         **({"grid_long_only": True} if grid_long_only else {}),
+        # v46 — SMA regime filter
+        **({"sma_regime_filter": True,
+            "sma_regime_period": sma_regime_period}
+           if sma_regime_filter else {}),
         # v45 — DCA injection
         **({"dca_amount": dca_amount,
             "dca_interval_candles": dca_interval_candles}
@@ -6385,6 +6406,57 @@ BTC_PM35_10K_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# PM36 — SMA Regime Filter: adaptive long-only above 200d SMA
+#
+# Same c15_lev5 champion grid as PM35, but with sma_regime_filter=True.
+# When BTC price > 200-day SMA → long-only (no shorts).
+# When BTC price < 200-day SMA → both-sides grid (shorts enabled).
+# Tests at 3 capital tiers ($1K/$5K/$10K) for the 2024→2026 window,
+# plus a FULL 2017→2026 run for comparison against PM30 c15_lev5.
+# ===========================================================================
+
+_PM36_SETS = [
+    _pm29("pm36_sma_regime",
+          spacing=0.008,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=5,
+          sma_regime_filter=True),
+]
+
+# PM36 $1,000 starting capital (2024→2026)
+BTC_PM36_1K_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM36_1K_CONFIG["start_date"]       = datetime(2024, 1, 1)
+BTC_PM36_1K_CONFIG["end_date"]         = datetime(2026, 3, 12)
+BTC_PM36_1K_CONFIG["initial_balance"]  = 1000
+BTC_PM36_1K_CONFIG["param_sets"]       = _PM36_SETS
+BTC_PM36_1K_CONFIG["daily_breakdown"]  = True
+
+# PM36 $5,000 starting capital (2024→2026)
+BTC_PM36_5K_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM36_5K_CONFIG["start_date"]       = datetime(2024, 1, 1)
+BTC_PM36_5K_CONFIG["end_date"]         = datetime(2026, 3, 12)
+BTC_PM36_5K_CONFIG["initial_balance"]  = 5000
+BTC_PM36_5K_CONFIG["param_sets"]       = _PM36_SETS
+BTC_PM36_5K_CONFIG["daily_breakdown"]  = True
+
+# PM36 $10,000 starting capital (2024→2026)
+BTC_PM36_10K_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM36_10K_CONFIG["start_date"]      = datetime(2024, 1, 1)
+BTC_PM36_10K_CONFIG["end_date"]        = datetime(2026, 3, 12)
+BTC_PM36_10K_CONFIG["initial_balance"] = 10000
+BTC_PM36_10K_CONFIG["param_sets"]      = _PM36_SETS
+BTC_PM36_10K_CONFIG["daily_breakdown"] = True
+
+# PM36 FULL: 2017→2026 for comparison against PM30 c15_lev5 (+1,944%)
+BTC_PM36_FULL_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM36_FULL_CONFIG["start_date"]      = datetime(2017, 5, 1)
+BTC_PM36_FULL_CONFIG["end_date"]        = datetime(2026, 3, 12)
+BTC_PM36_FULL_CONFIG["initial_balance"] = 1000
+BTC_PM36_FULL_CONFIG["param_sets"]      = _PM36_SETS
+BTC_PM36_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -7231,6 +7303,30 @@ if __name__ == "__main__":
         cfg = dict(BTC_PM35_10K_CONFIG)
         print("\n" + "=" * 60)
         print(f"  v45 PM35 BTC — c15_lev5 $10K  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM36_1K", "PM36_1K")):
+        cfg = dict(BTC_PM36_1K_CONFIG)
+        print("\n" + "=" * 60)
+        print(f"  v46 PM36 BTC — SMA regime c15_lev5 $1K  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM36_5K", "PM36_5K")):
+        cfg = dict(BTC_PM36_5K_CONFIG)
+        print("\n" + "=" * 60)
+        print(f"  v46 PM36 BTC — SMA regime c15_lev5 $5K  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM36_10K", "PM36_10K")):
+        cfg = dict(BTC_PM36_10K_CONFIG)
+        print("\n" + "=" * 60)
+        print(f"  v46 PM36 BTC — SMA regime c15_lev5 $10K  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM36FULL", "PM36FULL")):
+        cfg = dict(BTC_PM36_FULL_CONFIG)
+        print("\n" + "=" * 60)
+        print(f"  v46 PM36 BTC — SMA regime c15_lev5 FULL  (May 2017 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):

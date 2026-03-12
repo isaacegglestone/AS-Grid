@@ -223,14 +223,27 @@ jobs:
           #   dispatch: "XRPPM34FULL:pm34_xrp_trend"
           # ══════════════════════════════════════════════════════════════
           # PM35: Recent-window capital scaling — c15_lev5 Jan 2024→Mar 2026
-          # Same champion grid strategy at 3 capital tiers ($1K/$5K/$10K)
+          # Results: $1K +1.70%, $5K +0.79%, $10K +0.51% — short side bleeds in bull
           # ══════════════════════════════════════════════════════════════
-          - name: "PM35 BTC c15_lev5 $1K (2024)"
-            dispatch: "BTCPM35_1K:pm35_c15_lev5"
-          - name: "PM35 BTC c15_lev5 $5K (2024)"
-            dispatch: "BTCPM35_5K:pm35_c15_lev5"
-          - name: "PM35 BTC c15_lev5 $10K (2024)"
-            dispatch: "BTCPM35_10K:pm35_c15_lev5"
+          # - name: "PM35 BTC c15_lev5 $1K (2024)"
+          #   dispatch: "BTCPM35_1K:pm35_c15_lev5"
+          # - name: "PM35 BTC c15_lev5 $5K (2024)"
+          #   dispatch: "BTCPM35_5K:pm35_c15_lev5"
+          # - name: "PM35 BTC c15_lev5 $10K (2024)"
+          #   dispatch: "BTCPM35_10K:pm35_c15_lev5"
+          # ══════════════════════════════════════════════════════════════
+          # PM36: SMA Regime Filter — 200d SMA adaptive long-only/both-sides
+          # Long-only above SMA (bull), both-sides below SMA (bear/range)
+          # 3 capital tiers + FULL window for comparison against PM30
+          # ══════════════════════════════════════════════════════════════
+          - name: "PM36 BTC SMA regime $1K (2024)"
+            dispatch: "BTCPM36_1K:pm36_sma_regime"
+          - name: "PM36 BTC SMA regime $5K (2024)"
+            dispatch: "BTCPM36_5K:pm36_sma_regime"
+          - name: "PM36 BTC SMA regime $10K (2024)"
+            dispatch: "BTCPM36_10K:pm36_sma_regime"
+          - name: "PM36 BTC SMA regime FULL (2017)"
+            dispatch: "BTCPM36FULL:pm36_sma_regime"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
