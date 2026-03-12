@@ -294,21 +294,21 @@ jobs:
           # 8 jobs: 2 symbols × 4 capital tiers, each running 5 leverage
           # levels internally (3×, 5×, 10×, 15×, 20×) = 40 variants total
           # ══════════════════════════════════════════════════════════════
-          - name: "PM39 BTC 1K/10%"
+          - name: "PM39 BTC 1K-10pct"
             dispatch: "BTCPM39_1K10"
-          - name: "PM39 BTC 5K/10%"
+          - name: "PM39 BTC 5K-10pct"
             dispatch: "BTCPM39_5K10"
-          - name: "PM39 BTC 10K/10%"
+          - name: "PM39 BTC 10K-10pct"
             dispatch: "BTCPM39_10K10"
-          - name: "PM39 BTC 10K/5%"
+          - name: "PM39 BTC 10K-5pct"
             dispatch: "BTCPM39_10K5"
-          - name: "PM39 XRP 1K/10%"
+          - name: "PM39 XRP 1K-10pct"
             dispatch: "XRPPM39_1K10"
-          - name: "PM39 XRP 5K/10%"
+          - name: "PM39 XRP 5K-10pct"
             dispatch: "XRPPM39_5K10"
-          - name: "PM39 XRP 10K/10%"
+          - name: "PM39 XRP 10K-10pct"
             dispatch: "XRPPM39_10K10"
-          - name: "PM39 XRP 10K/5%"
+          - name: "PM39 XRP 10K-5pct"
             dispatch: "XRPPM39_10K5"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
