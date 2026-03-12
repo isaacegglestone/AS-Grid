@@ -386,7 +386,7 @@ jobs:
         run: python asBack/backtest_grid_bitunix.py ${{ matrix.dispatch }}
 
       - name: Run gap analysis
-        if: always()
+        if: always() && !startsWith(matrix.dispatch, 'BTCPM39') && !startsWith(matrix.dispatch, 'XRPPM39')
         run: python scripts/analyze_gaps.py bitunix_best_grid_trades.csv bitunix_best_equity_curve.csv
 
       - name: Upload backtest results
@@ -398,6 +398,7 @@ jobs:
             bitunix_grid_search_results.csv
             bitunix_best_grid_trades.csv
             bitunix_best_equity_curve.csv
+            bitunix_hedge_repair_results.csv
             gap_analysis_daily.csv
             gap_analysis_report.html
           if-no-files-found: warn
