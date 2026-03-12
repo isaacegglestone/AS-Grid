@@ -6236,6 +6236,105 @@ BTC_PM33_FULL_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# PM34 — Trend-Only: zero grid, pure trend capture
+#
+# PM33 confirmed that any trend overlay hurts BTC grid (+22.16% → +14.12%).
+# Question: can trend capture stand alone for either asset?
+#
+# Deep-dive analysis of 8+ years of candle data:
+#
+#   BTC: trends rare but long (67.5hr mean for ≥5% moves, 242hr for ≥10%)
+#        Only 0.6 velocity signals/day ≥6% at LB=15 — low noise
+#        Simplified sim champion: LB=20 v6% t5% lev3 50% LO → +81.3%
+#
+#   XRP: high velocity (2.1 signals/day ≥6% at LB=15) but mostly whipsaws
+#        Trends shorter (32.7hr mean ≥5%, 100hr ≥10%)
+#        Simplified sim: ALL configs negative, best -44.5%
+#        Full engine (ADX, ATR-adaptive trail, regime, etc.) may help
+#
+# Grid disabled via spacing=1.0 (100%) — grid levels never fill.
+# All engine protections active (ADX, ATR trail, circuit breakers, etc.).
+#
+# 4 runs: 2 assets × 2 windows (2018+ and FULL)
+# ===========================================================================
+
+def _pm34_trend_only(name: str, lookback: int = 10, vel_detect: float = 0.04,
+                     vel_entry: float = 0.06, trail: float = 0.04,
+                     size: float = 0.90, confirm: int = 3,
+                     reentry_fast: bool = True, **kw):
+    """Build a PM34 trend-only param set — grid disabled, pure trend capture."""
+    result = _pm29(name, trend_detection=True, trend_capture=True,
+                   spacing=1.0, **kw)
+    # Override hardcoded trend params from _pm_v2_set
+    result["trend_lookback_candles"]     = lookback
+    result["trend_velocity_pct"]         = vel_detect
+    result["trend_capture_velocity_pct"] = vel_entry
+    result["trend_trailing_stop_pct"]    = trail
+    result["trend_capture_size_pct"]     = size
+    result["trend_confirm_candles"]      = confirm
+    result["trend_force_close_grid"]     = False   # no grid to close
+    result["trend_reentry_fast"]         = reentry_fast
+    return result
+
+# ── BTC Trend-Only: optimized from deep dive ─────────────────────────────
+# Champion from simplified sim: LB=20, vel=6%, trail=5%, lev3, 50%, LO → +81.3%
+_PM34_BTC_SETS = [
+    _pm34_trend_only("pm34_btc_trend",
+                     grid_long_only=True, leverage=3,
+                     lookback=20,             # 5hr window — BTC trends slower
+                     vel_detect=0.04,         # detection threshold
+                     vel_entry=0.06,          # entry @ 6% — deep dive champion
+                     trail=0.05,              # 5% trail — BTC trends persist
+                     size=0.50,               # 50% equity
+                     confirm=3,
+                     reentry_fast=True),
+]
+
+# ── XRP Trend-Only: optimized from deep dive ─────────────────────────────
+# Best from simplified sim: LB=30, vel=10%, trail=6%, lev3, 70%, LO → -44.5%
+# Full engine features (ADX, ATR-adaptive trail, regime rotation) may help.
+_PM34_XRP_SETS = [
+    _pm34_trend_only("pm34_xrp_trend",
+                     grid_long_only=True, leverage=3,
+                     lookback=30,             # 7.5hr window — filter XRP noise
+                     vel_detect=0.06,         # higher detection — skip minor wiggles
+                     vel_entry=0.10,          # entry only on strong ≥10% velocity
+                     trail=0.06,              # 6% trail — wider for XRP retracements
+                     size=0.70,               # 70% equity — bigger size for big moves
+                     confirm=3,
+                     reentry_fast=True),
+]
+
+# PM34 BTC 2018+ (Jan 2018 → Mar 2026)
+BTC_PM34_2018_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM34_2018_CONFIG["start_date"]      = datetime(2018, 1, 1)
+BTC_PM34_2018_CONFIG["end_date"]        = datetime(2026, 3, 8)
+BTC_PM34_2018_CONFIG["param_sets"]      = _PM34_BTC_SETS
+BTC_PM34_2018_CONFIG["daily_breakdown"] = True
+
+# PM34 BTC FULL (Jan 2017 → Mar 2026)
+BTC_PM34_FULL_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM34_FULL_CONFIG["start_date"]      = datetime(2017, 1, 1)
+BTC_PM34_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+BTC_PM34_FULL_CONFIG["param_sets"]      = _PM34_BTC_SETS
+BTC_PM34_FULL_CONFIG["daily_breakdown"] = True
+
+# PM34 XRP 2018+ (Jan 2018 → Mar 2026)
+XRP_PM34_2018_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM34_2018_CONFIG["start_date"]      = datetime(2018, 1, 1)
+XRP_PM34_2018_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM34_2018_CONFIG["param_sets"]      = _PM34_XRP_SETS
+XRP_PM34_2018_CONFIG["daily_breakdown"] = True
+
+# PM34 XRP FULL (May 2017 → Mar 2026)
+XRP_PM34_FULL_CONFIG: Dict[str, Any] = dict(XRP_CONFIG)
+XRP_PM34_FULL_CONFIG["start_date"]      = datetime(2017, 5, 19)
+XRP_PM34_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+XRP_PM34_FULL_CONFIG["param_sets"]      = _PM34_XRP_SETS
+XRP_PM34_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -7008,6 +7107,62 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v45 PM33 BTC — Trend-Lite{variant_label}  (Jan 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM34_2018", "PM34_2018BTC")):
+        cfg = dict(BTC_PM34_2018_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM34 BTC variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM34_2018_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v45 PM34 BTC — Trend-Only{variant_label}  (Jan 2018 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM34FULL", "PM34FULLBTC", "BTCPM34", "PM34BTC")):
+        cfg = dict(BTC_PM34_FULL_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM34 BTC variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM34_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v45 PM34 BTC — Trend-Only{variant_label}  (Jan 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("XRPPM34_2018", "PM34_2018XRP")):
+        cfg = dict(XRP_PM34_2018_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM34 XRP variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM34_2018_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v45 PM34 XRP — Trend-Only{variant_label}  (Jan 2018 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("XRPPM34FULL", "PM34FULLXRP", "XRPPM34", "PM34XRP")):
+        cfg = dict(XRP_PM34_FULL_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM34 XRP variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM34_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v45 PM34 XRP — Trend-Only{variant_label}  (May 2017 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):

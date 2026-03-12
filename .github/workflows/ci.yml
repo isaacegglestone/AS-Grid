@@ -196,16 +196,31 @@ jobs:
           # - name: "PM32 BTC tc_ovas_c_dca"
           #   dispatch: "BTCPM32:pm32_tc_ovas_c_dca"
           # ══════════════════════════════════════════════════════════════
-          # PM33: Trend-Lite — 4 clean runs (2 windows × 2 configs) — ACTIVE
+          # PM33: Trend-Lite — COMPLETED
+          # Results: grid_only +22.16%/+587.16%, trend_lite +14.12%/+524.94%
+          # Conclusion: even conservative trend overlay hurts BTC grid returns
           # ══════════════════════════════════════════════════════════════
-          - name: "PM33 BTC grid_only (2018)"
-            dispatch: "BTCPM33_2018:pm33_grid_only"
-          - name: "PM33 BTC trend_lite (2018)"
-            dispatch: "BTCPM33_2018:pm33_trend_lite"
-          - name: "PM33 BTC grid_only (FULL)"
-            dispatch: "BTCPM33FULL:pm33_grid_only"
-          - name: "PM33 BTC trend_lite (FULL)"
-            dispatch: "BTCPM33FULL:pm33_trend_lite"
+          # - name: "PM33 BTC grid_only (2018)"
+          #   dispatch: "BTCPM33_2018:pm33_grid_only"
+          # - name: "PM33 BTC trend_lite (2018)"
+          #   dispatch: "BTCPM33_2018:pm33_trend_lite"
+          # - name: "PM33 BTC grid_only (FULL)"
+          #   dispatch: "BTCPM33FULL:pm33_grid_only"
+          # - name: "PM33 BTC trend_lite (FULL)"
+          #   dispatch: "BTCPM33FULL:pm33_trend_lite"
+          # ══════════════════════════════════════════════════════════════
+          # PM34: Trend-Only — zero grid, pure trend capture — ACTIVE
+          # BTC: LB=20, vel=6%, trail=5%, lev3, 50%, LO (deep-dive champion)
+          # XRP: LB=30, vel=10%, trail=6%, lev3, 70%, LO (best from analysis)
+          # ══════════════════════════════════════════════════════════════
+          - name: "PM34 BTC trend-only (2018)"
+            dispatch: "BTCPM34_2018:pm34_btc_trend"
+          - name: "PM34 BTC trend-only (FULL)"
+            dispatch: "BTCPM34FULL:pm34_btc_trend"
+          - name: "PM34 XRP trend-only (2018)"
+            dispatch: "XRPPM34_2018:pm34_xrp_trend"
+          - name: "PM34 XRP trend-only (FULL)"
+            dispatch: "XRPPM34FULL:pm34_xrp_trend"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
