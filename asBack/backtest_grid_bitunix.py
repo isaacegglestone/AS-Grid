@@ -2568,7 +2568,9 @@ class HedgeRepairBacktester:
 
     def _open_both(self, price: float, idx: int) -> bool:
         """Open equal-size long + short at *price*."""
-        margin_per_side = self.futures_balance * self.entry_pct
+        # Cap margin at initial_balance * entry_pct to prevent exponential compounding
+        margin_per_side = min(self.futures_balance * self.entry_pct,
+                              self.initial_balance * self.entry_pct * 5)
         notional = margin_per_side * self.leverage
         qty = notional / price
         fee_per_side = notional * self.fee_pct
@@ -2790,6 +2792,7 @@ class HedgeRepairBacktester:
                 self.peak_equity = total_eq
             dd = ((self.peak_equity - total_eq) / self.peak_equity
                   if self.peak_equity > 0 else 0.0)
+            dd = min(dd, 1.0)  # cap at 100 %
             if dd > self.max_drawdown:
                 self.max_drawdown = dd
 
@@ -2802,19 +2805,45 @@ class HedgeRepairBacktester:
                 "state": self.state,
             })
 
-            # Account wipeout
+            # Account wipeout — force-liquidate like a real exchange
             if self._futures_equity(price) <= 0 and self.spot_balance <= 0:
                 self.liquidated = True
+                # Zero everything: exchange seizes remaining margin
+                if self.long_pos:
+                    self.trade_log.append({
+                        "action": "CLOSE", "side": "long", "price": price,
+                        "qty": self.long_pos["qty"],
+                        "avg_entry": self.long_pos["avg_entry"],
+                        "profit": -self.long_pos["margin"],
+                        "fee": 0, "reason": "liquidation",
+                        "dca_count": self.long_pos["dca_count"],
+                        "candle_idx": idx,
+                    })
+                    self.long_pos = None
+                if self.short_pos:
+                    self.trade_log.append({
+                        "action": "CLOSE", "side": "short", "price": price,
+                        "qty": self.short_pos["qty"],
+                        "avg_entry": self.short_pos["avg_entry"],
+                        "profit": -self.short_pos["margin"],
+                        "fee": 0, "reason": "liquidation",
+                        "dca_count": self.short_pos["dca_count"],
+                        "candle_idx": idx,
+                    })
+                    self.short_pos = None
+                self.futures_balance = 0.0
+                self.spot_balance = 0.0
 
         # ── end of simulation: close any open positions ───────────────
-        final_price = closes[-1] if n > 0 else 0.0
-        if self.long_pos:
-            self._close_position(self.long_pos, final_price, "end_of_sim")
-            self.long_pos = None
-        if self.short_pos:
-            self._close_position(self.short_pos, final_price, "end_of_sim")
-            self.short_pos = None
-        self._repay_spot()
+        if not self.liquidated:
+            final_price = closes[-1] if n > 0 else 0.0
+            if self.long_pos:
+                self._close_position(self.long_pos, final_price, "end_of_sim")
+                self.long_pos = None
+            if self.short_pos:
+                self._close_position(self.short_pos, final_price, "end_of_sim")
+                self.short_pos = None
+            self._repay_spot()
 
         total_initial = self.initial_balance + self.spot_reserve_initial
         total_final = self.futures_balance + self.spot_balance
