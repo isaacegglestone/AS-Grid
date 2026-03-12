@@ -7109,6 +7109,70 @@ XRP_PM39_10K5_CONFIG: Dict[str, Any] = {
 
 
 # ===========================================================================
+# PM40 — Hedge Repair Full-Window Sweep  (2017 → 2026)
+#
+# Re-tests the 10 PM39 survivors over the full available data window.
+# BTC: 2017-01-01 → 2026-03-13  (~9+ years, 321K candles)
+# XRP: 2017-06-01 → 2026-03-13  (~8.8 years, 307K candles)
+#
+# 10 variants: PM39 winners only (leverages that survived 2024-2026)
+#   BTC: $5K/10%@3×, $10K/10%@3×
+#   XRP: $1K/10%@10×, $5K/10%@5×, $10K/10%@{3×,5×}, $10K/5%@{3×,5×,10×,15×}
+# ===========================================================================
+
+def _pm40_variants(sym_prefix: str, balance: int, spot: int,
+                   entry_pct: float, leverages: List[int]) -> List[Dict[str, Any]]:
+    """Generate PM40 variant param_sets — same as PM39 but with pm40_ prefix."""
+    return [
+        {**v, "name": v["name"].replace("pm39_", "pm40_")}
+        for v in _pm39_variants(sym_prefix, balance, spot, entry_pct, leverages)
+    ]
+
+
+# ── BTC PM40 configs (2 winners from PM39) ───────────────────────────────
+
+BTC_PM40_5K10_CONFIG: Dict[str, Any] = {
+    "symbol": "BTCUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2017, 1, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 5000,
+    "param_sets": _pm40_variants("btc", 5000, 5000, 0.10, [3]),
+}
+BTC_PM40_10K10_CONFIG: Dict[str, Any] = {
+    "symbol": "BTCUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2017, 1, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 10000,
+    "param_sets": _pm40_variants("btc", 10000, 10000, 0.10, [3]),
+}
+
+# ── XRP PM40 configs (8 winners from PM39) ───────────────────────────────
+
+XRP_PM40_1K10_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2017, 6, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 1000,
+    "param_sets": _pm40_variants("xrp", 1000, 1000, 0.10, [10]),
+}
+XRP_PM40_5K10_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2017, 6, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 5000,
+    "param_sets": _pm40_variants("xrp", 5000, 5000, 0.10, [5]),
+}
+XRP_PM40_10K10_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2017, 6, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 10000,
+    "param_sets": _pm40_variants("xrp", 10000, 10000, 0.10, [3, 5]),
+}
+XRP_PM40_10K5_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2017, 6, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 10000,
+    "param_sets": _pm40_variants("xrp", 10000, 10000, 0.05, [3, 5, 10, 15]),
+}
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -8141,6 +8205,112 @@ if __name__ == "__main__":
             cfg = dict(cfg_src)
             print("\n" + "=" * 60)
             print(f"  PM39 XRP — Hedge Repair {label}  (Jan 2024 → Mar 2026)")
+            print("=" * 60)
+            hedge_repair_backtest(cfg)
+
+    # ── PM40 Hedge Repair Full-Window (BTC) ──────────────────────────────
+    elif symbol.startswith("BTCPM40_5K10"):
+        cfg = dict(BTC_PM40_5K10_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM40 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM40_5K10_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM40 BTC — Hedge Repair $5K/10%  (Jan 2017 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith("BTCPM40_10K10"):
+        cfg = dict(BTC_PM40_10K10_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM40 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM40_10K10_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM40 BTC — Hedge Repair $10K/10%  (Jan 2017 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith("BTCPM40"):
+        # Run all BTC PM40 configs
+        for cfg_src, label in [
+            (BTC_PM40_5K10_CONFIG, "$5K/10%"),
+            (BTC_PM40_10K10_CONFIG, "$10K/10%"),
+        ]:
+            cfg = dict(cfg_src)
+            print("\n" + "=" * 60)
+            print(f"  PM40 BTC — Hedge Repair {label}  (Jan 2017 → Mar 2026)")
+            print("=" * 60)
+            hedge_repair_backtest(cfg)
+
+    # ── PM40 Hedge Repair Full-Window (XRP) ──────────────────────────────
+    elif symbol.startswith("XRPPM40_1K10"):
+        cfg = dict(XRP_PM40_1K10_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM40 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM40_1K10_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM40 XRP — Hedge Repair $1K/10%  (Jun 2017 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith("XRPPM40_5K10"):
+        cfg = dict(XRP_PM40_5K10_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM40 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM40_5K10_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM40 XRP — Hedge Repair $5K/10%  (Jun 2017 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith("XRPPM40_10K10"):
+        cfg = dict(XRP_PM40_10K10_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM40 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM40_10K10_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM40 XRP — Hedge Repair $10K/10%  (Jun 2017 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith("XRPPM40_10K5"):
+        cfg = dict(XRP_PM40_10K5_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM40 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM40_10K5_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM40 XRP — Hedge Repair $10K/5%  (Jun 2017 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+    elif symbol.startswith("XRPPM40"):
+        # Run all XRP PM40 configs
+        for cfg_src, label in [
+            (XRP_PM40_1K10_CONFIG, "$1K/10%"),
+            (XRP_PM40_5K10_CONFIG, "$5K/10%"),
+            (XRP_PM40_10K10_CONFIG, "$10K/10%"),
+            (XRP_PM40_10K5_CONFIG, "$10K/5%"),
+        ]:
+            cfg = dict(cfg_src)
+            print("\n" + "=" * 60)
+            print(f"  PM40 XRP — Hedge Repair {label}  (Jun 2017 → Mar 2026)")
             print("=" * 60)
             hedge_repair_backtest(cfg)
 
