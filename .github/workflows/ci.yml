@@ -49,7 +49,7 @@ jobs:
   backtests:
     name: "Backtest ${{ matrix.name }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     needs: tests
     strategy:
       fail-fast: false
@@ -181,16 +181,20 @@ jobs:
           # ══════════════════════════════════════════════════════════════
           # PM31 Group I: Missing DCA counterparts + re-run — ACTIVE
           # ══════════════════════════════════════════════════════════════
-          # Group I: DCA counterparts for ovas_a/b/c (the PM31 winners)
-          - name: "PM31 BTC dca_ovas_a"
-            dispatch: "BTCPM31:pm31_dca_ovas_a"
-          - name: "PM31 BTC dca_ovas_b"
-            dispatch: "BTCPM31:pm31_dca_ovas_b"
-          - name: "PM31 BTC dca_ovas_c"
-            dispatch: "BTCPM31:pm31_dca_ovas_c"
-          # Re-run: cancelled in previous run
+          # Group I: DCA counterparts for ovas_a/b/c — COMPLETED
+          # - { name: "PM31 BTC dca_ovas_a", dispatch: "BTCPM31:pm31_dca_ovas_a" }
+          # - { name: "PM31 BTC dca_ovas_b", dispatch: "BTCPM31:pm31_dca_ovas_b" }
+          # - { name: "PM31 BTC dca_ovas_c", dispatch: "BTCPM31:pm31_dca_ovas_c" }
+          # Re-run: cancelled in previous run (timeout — now 120 min)
           - name: "PM31 BTC dca_both_a"
             dispatch: "BTCPM31:pm31_dca_both_a"
+          # ══════════════════════════════════════════════════════════════
+          # PM32: Grid + trend capture — ACTIVE
+          # ══════════════════════════════════════════════════════════════
+          - name: "PM32 BTC tc_ovas_c"
+            dispatch: "BTCPM32:pm32_tc_ovas_c"
+          - name: "PM32 BTC tc_ovas_c_dca"
+            dispatch: "BTCPM32:pm32_tc_ovas_c_dca"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),

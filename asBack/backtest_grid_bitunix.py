@@ -6099,6 +6099,68 @@ BTC_PM31_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# PM32 — BTC trend capture
+#
+# All PM30/PM31 configs are grid-only (trend_capture=False).  PM32 re-enables
+# the full trend capture engine on top of the best grid configs to see if
+# riding BTC's multi-month trends adds value.
+#
+# BTC should suit trend capture better than XRP:
+#   • Longer sustained trends (months, not hours) — trailing stop has room
+#   • Lower noise-to-signal — velocity detector gets fewer false triggers
+#   • 3-5% pullbacks within trend are normal — 4% trail survives
+#   • Major cycles: 2017 bull, 2018 bear, 2020-21 bull, 2022 bear, 2023-26 bull
+#
+# Trend capture settings (inherited from _pm_v2_set via _pm27/_pm29):
+#   trend_capture_size_pct = 0.90  (90% equity per trend position)
+#   trend_trailing_stop_pct = 0.04 (4% trail, overridden by ATR-adaptive)
+#   trend_lookback_candles = 10    (10 × 15min = 2.5hr velocity window)
+#   trend_confirm_candles = 3      (3 consecutive candles above threshold)
+#   trend_force_close_grid = True  (close opposing grid legs on trend fire)
+#   atr_trail = True               (ATR-adaptive trailing stop)
+#   adx_filter = True, adx_min_trend = 25
+#   trend_reentry_fast = True      (re-enter next leg without full cooldown)
+#
+# Velocity thresholds from BTC_BASE_CONFIG:
+#   trend_velocity_pct = 0.04      (4% in 2.5hr = strong move for BTC)
+#   trend_capture_velocity_pct = 0.06 (6% entry threshold)
+# ===========================================================================
+
+_PM32_SETS = [
+    # ── (A) Grid + trend: ovas_c winner with trend capture enabled ────
+    # Same grid: LO, s=0.008, VAS 0.003/0.008, compound15, lev3
+    # + full trend engine: 90% equity trend position, ATR trail, ADX gate
+    _pm29("pm32_tc_ovas_c",
+          grid_long_only=True,
+          spacing=0.008,
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.008, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          trend_detection=True, trend_capture=True),
+
+    # ── (B) Grid + trend + DCA: the full stack ───────────────────────
+    # ovas_c grid + trend capture + fortnightly DCA injection
+    _pm29("pm32_tc_ovas_c_dca",
+          grid_long_only=True,
+          spacing=0.008,
+          vol_adaptive_spacing=True,
+          vas_floor=0.003, vas_ceil=0.008, vas_period=40,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=3,
+          trend_detection=True, trend_capture=True,
+          dca_amount=470.0, dca_interval_candles=20160),
+]
+
+# BTC PM32: post-bubble (Jan 2018 → Mar 2026) — same window as PM31
+BTC_PM32_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM32_CONFIG["start_date"]      = datetime(2018, 1, 1)
+BTC_PM32_CONFIG["end_date"]        = datetime(2026, 3, 8)
+BTC_PM32_CONFIG["param_sets"]      = _PM32_SETS
+BTC_PM32_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -6829,6 +6891,20 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v45 PM31 BTC — tighter spacing + VAS + DCA optimisation{variant_label}  (Jan 2018 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM32", "PM32")):
+        cfg = dict(BTC_PM32_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM32 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM32_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v45 PM32 BTC — grid + trend capture{variant_label}  (Jan 2018 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):
