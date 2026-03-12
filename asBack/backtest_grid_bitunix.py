@@ -6335,6 +6335,56 @@ XRP_PM34_FULL_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# PM35 — Recent-window capital scaling: c15_lev5 on Jan 2024 → Mar 2026
+#
+# PM30 champion (c15_lev5) returned +1,944% over the full 2017→2026 window,
+# but only +22% from 2018.  The 2024→2026 window captures the most recent
+# bull run (BTC ~$42k → ~$80k+) and is the most relevant forward-looking
+# test: "if I started today-ish, what would happen?"
+#
+# Three capital tiers to test scaling:
+#   $1,000  — hobby / learning capital
+#   $5,000  — moderate allocation
+#   $10,000 — serious allocation
+#
+# order_value_pct=0.15 scales order size with equity, so the strategy
+# is identical at all capital levels — returns should be near-identical
+# as percentages.  Absolute P&L scales linearly.
+# ===========================================================================
+
+_PM35_SETS = [
+    _pm29("pm35_c15_lev5",
+          spacing=0.008,
+          order_value_pct=0.15, order_value_min=10.0,
+          leverage=5),
+]
+
+# PM35 $1,000 starting capital
+BTC_PM35_1K_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM35_1K_CONFIG["start_date"]       = datetime(2024, 1, 1)
+BTC_PM35_1K_CONFIG["end_date"]         = datetime(2026, 3, 12)
+BTC_PM35_1K_CONFIG["initial_balance"]  = 1000
+BTC_PM35_1K_CONFIG["param_sets"]       = _PM35_SETS
+BTC_PM35_1K_CONFIG["daily_breakdown"]  = True
+
+# PM35 $5,000 starting capital
+BTC_PM35_5K_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM35_5K_CONFIG["start_date"]       = datetime(2024, 1, 1)
+BTC_PM35_5K_CONFIG["end_date"]         = datetime(2026, 3, 12)
+BTC_PM35_5K_CONFIG["initial_balance"]  = 5000
+BTC_PM35_5K_CONFIG["param_sets"]       = _PM35_SETS
+BTC_PM35_5K_CONFIG["daily_breakdown"]  = True
+
+# PM35 $10,000 starting capital
+BTC_PM35_10K_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM35_10K_CONFIG["start_date"]      = datetime(2024, 1, 1)
+BTC_PM35_10K_CONFIG["end_date"]        = datetime(2026, 3, 12)
+BTC_PM35_10K_CONFIG["initial_balance"] = 10000
+BTC_PM35_10K_CONFIG["param_sets"]      = _PM35_SETS
+BTC_PM35_10K_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -7163,6 +7213,24 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v45 PM34 XRP — Trend-Only{variant_label}  (May 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM35_1K", "PM35_1K")):
+        cfg = dict(BTC_PM35_1K_CONFIG)
+        print("\n" + "=" * 60)
+        print(f"  v45 PM35 BTC — c15_lev5 $1K  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM35_5K", "PM35_5K")):
+        cfg = dict(BTC_PM35_5K_CONFIG)
+        print("\n" + "=" * 60)
+        print(f"  v45 PM35 BTC — c15_lev5 $5K  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM35_10K", "PM35_10K")):
+        cfg = dict(BTC_PM35_10K_CONFIG)
+        print("\n" + "=" * 60)
+        print(f"  v45 PM35 BTC — c15_lev5 $10K  (Jan 2024 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):

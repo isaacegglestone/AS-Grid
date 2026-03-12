@@ -209,18 +209,28 @@ jobs:
           # - name: "PM33 BTC trend_lite (FULL)"
           #   dispatch: "BTCPM33FULL:pm33_trend_lite"
           # ══════════════════════════════════════════════════════════════
-          # PM34: Trend-Only — zero grid, pure trend capture — ACTIVE
-          # BTC: LB=20, vel=6%, trail=5%, lev3, 50%, LO (deep-dive champion)
-          # XRP: LB=30, vel=10%, trail=6%, lev3, 70%, LO (best from analysis)
+          # PM34: Trend-Only — COMPLETED (all negative)
+          # BTC: -52.59% (2018), -83.23% (FULL)
+          # XRP: -86.13% (2018), -98.74% (FULL)
           # ══════════════════════════════════════════════════════════════
-          - name: "PM34 BTC trend-only (2018)"
-            dispatch: "BTCPM34_2018:pm34_btc_trend"
-          - name: "PM34 BTC trend-only (FULL)"
-            dispatch: "BTCPM34FULL:pm34_btc_trend"
-          - name: "PM34 XRP trend-only (2018)"
-            dispatch: "XRPPM34_2018:pm34_xrp_trend"
-          - name: "PM34 XRP trend-only (FULL)"
-            dispatch: "XRPPM34FULL:pm34_xrp_trend"
+          # - name: "PM34 BTC trend-only (2018)"
+          #   dispatch: "BTCPM34_2018:pm34_btc_trend"
+          # - name: "PM34 BTC trend-only (FULL)"
+          #   dispatch: "BTCPM34FULL:pm34_btc_trend"
+          # - name: "PM34 XRP trend-only (2018)"
+          #   dispatch: "XRPPM34_2018:pm34_xrp_trend"
+          # - name: "PM34 XRP trend-only (FULL)"
+          #   dispatch: "XRPPM34FULL:pm34_xrp_trend"
+          # ══════════════════════════════════════════════════════════════
+          # PM35: Recent-window capital scaling — c15_lev5 Jan 2024→Mar 2026
+          # Same champion grid strategy at 3 capital tiers ($1K/$5K/$10K)
+          # ══════════════════════════════════════════════════════════════
+          - name: "PM35 BTC c15_lev5 $1K (2024)"
+            dispatch: "BTCPM35_1K:pm35_c15_lev5"
+          - name: "PM35 BTC c15_lev5 $5K (2024)"
+            dispatch: "BTCPM35_5K:pm35_c15_lev5"
+          - name: "PM35 BTC c15_lev5 $10K (2024)"
+            dispatch: "BTCPM35_10K:pm35_c15_lev5"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
