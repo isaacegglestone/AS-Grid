@@ -248,28 +248,10 @@ jobs:
           # PM37: Spacing & Direction Optimisation (2024→2026, $1K)
           # Theoretical optimal: 0.5% spacing after fees, long-only in bull
           # 10 variants: spacing (0.4-0.8%), LO/both, sizing, VAS, leverage
-          # ══════════════════════════════════════════════════════════════
-          - name: "PM37 s004 LO"
-            dispatch: "BTCPM37:pm37_s004_lo"
-          - name: "PM37 s005 LO"
-            dispatch: "BTCPM37:pm37_s005_lo"
-          - name: "PM37 s006 LO"
-            dispatch: "BTCPM37:pm37_s006_lo"
-          - name: "PM37 s008 LO (control)"
-            dispatch: "BTCPM37:pm37_s008_lo"
-          - name: "PM37 s005 both"
-            dispatch: "BTCPM37:pm37_s005_both"
-          - name: "PM37 s005 LO big"
-            dispatch: "BTCPM37:pm37_s005_lo_big"
-          - name: "PM37 VAS LO"
-            dispatch: "BTCPM37:pm37_vas_lo"
-          - name: "PM37 s005 lev3"
-            dispatch: "BTCPM37:pm37_s005_lev3"
-          - name: "PM37 s005 lev7"
-            dispatch: "BTCPM37:pm37_s005_lev7"
-          # PM37 Results: Only s008_lo +0.66%, all tighter spacing negative
+          # Results: Only s008_lo +0.66%, all tighter spacing negative
           # s004_lo -40.26%, s005_lo -13.06%, s006_lo -9.26%
           # Tighter spacing = more concurrent positions = leverage drag
+          # ══════════════════════════════════════════════════════════════
           # - name: "PM37 s004 LO"
           #   dispatch: "BTCPM37:pm37_s004_lo"
           # - name: "PM37 s005 LO"
@@ -288,8 +270,6 @@ jobs:
           #   dispatch: "BTCPM37:pm37_s005_lev3"
           # - name: "PM37 s005 lev7"
           #   dispatch: "BTCPM37:pm37_s005_lev7"
-          # - name: "PM37 s004 lev3"
-          #   dispatch: "BTCPM37:pm37_s004_lev3"
           # ══════════════════════════════════════════════════════════════
           # PM38: Wider Spacing Sweep (2024→2026, $1K)
           # PM37 proved tighter < 0.8% is worse.  Test wider: 1.0–2.0%
