@@ -6161,6 +6161,81 @@ BTC_PM32_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# PM33 — BTC Trend-Lite
+#
+# PM32 showed that full trend capture (-25.50%) destroys the grid engine on BTC:
+#   • 90% equity positions with force_close_grid=True disrupts grid profits
+#   • XRP-tuned velocity thresholds (4%/6% in 15-candle window) whipsaw on BTC
+#   • BTC's mean |velocity| at LB=15 is only 0.827% vs XRP's 1.253%
+#
+# Trend-Lite approach: tiny overlay that cannot hurt the grid much:
+#   • trend_capture_size_pct:       0.90 → 0.15  (15% equity, not 90%)
+#   • trend_force_close_grid:       True → False  (grid undisturbed)
+#   • trend_confirm_candles:        3    → 5      (more confirmation)
+#   • trend_reentry_fast:           True → False  (full cooldown)
+#   • trend_velocity_pct:           0.04 → 0.06   (higher detection threshold)
+#   • trend_capture_velocity_pct:   0.06 → 0.08   (only enter strong moves)
+#   • trend_lookback_candles:       10   → 15     (wider window)
+#
+# Worst case: costs 2-3% on whipsaws.  Best case: adds a few percent
+# riding BTC's genuine multi-month trends.
+#
+# 4 runs across 2 time windows:
+#   1. 2017→2026 grid-only (ovas_c baseline)
+#   2. 2017→2026 grid + Trend-Lite
+#   3. 2018→2026 grid-only (ovas_c baseline)
+#   4. 2018→2026 grid + Trend-Lite
+# ===========================================================================
+
+def _pm33_trend_lite(name: str, **kw):
+    """Build a PM33 Trend-Lite param set — tiny trend overlay on ovas_c grid."""
+    result = _pm29(name, **kw)
+    # Override hardcoded trend params from _pm_v2_set
+    result["trend_capture_size_pct"]     = 0.15
+    result["trend_force_close_grid"]     = False
+    result["trend_confirm_candles"]      = 5
+    result["trend_reentry_fast"]         = False
+    result["trend_lookback_candles"]     = 15
+    result["trend_velocity_pct"]         = 0.06
+    result["trend_capture_velocity_pct"] = 0.08
+    return result
+
+# ovas_c grid params (shared by both grid-only and trend-lite)
+_PM33_OVAS_C_KW = dict(
+    grid_long_only=True,
+    spacing=0.008,
+    vol_adaptive_spacing=True,
+    vas_floor=0.003, vas_ceil=0.008, vas_period=40,
+    order_value_pct=0.15, order_value_min=10.0,
+    leverage=3,
+)
+
+_PM33_SETS = [
+    # ── Grid-only baseline (ovas_c clone, no trend) ──────────────────
+    _pm29("pm33_grid_only", **_PM33_OVAS_C_KW),
+
+    # ── Grid + Trend-Lite overlay ────────────────────────────────────
+    _pm33_trend_lite("pm33_trend_lite",
+                     trend_detection=True, trend_capture=True,
+                     **_PM33_OVAS_C_KW),
+]
+
+# PM33 2018+ (Jan 2018 → Mar 2026)
+BTC_PM33_2018_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM33_2018_CONFIG["start_date"]      = datetime(2018, 1, 1)
+BTC_PM33_2018_CONFIG["end_date"]        = datetime(2026, 3, 8)
+BTC_PM33_2018_CONFIG["param_sets"]      = _PM33_SETS
+BTC_PM33_2018_CONFIG["daily_breakdown"] = True
+
+# PM33 FULL (Jan 2017 → Mar 2026)
+BTC_PM33_FULL_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM33_FULL_CONFIG["start_date"]      = datetime(2017, 1, 1)
+BTC_PM33_FULL_CONFIG["end_date"]        = datetime(2026, 3, 8)
+BTC_PM33_FULL_CONFIG["param_sets"]      = _PM33_SETS
+BTC_PM33_FULL_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -6905,6 +6980,34 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v45 PM32 BTC — grid + trend capture{variant_label}  (Jan 2018 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM33_2018", "PM33_2018")):
+        cfg = dict(BTC_PM33_2018_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM33 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM33_2018_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v45 PM33 BTC — Trend-Lite{variant_label}  (Jan 2018 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM33FULL", "PM33FULL", "BTCPM33", "PM33")):
+        cfg = dict(BTC_PM33_FULL_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM33 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM33_FULL_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v45 PM33 BTC — Trend-Lite{variant_label}  (Jan 2017 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):
