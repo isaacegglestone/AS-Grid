@@ -6457,6 +6457,77 @@ BTC_PM36_FULL_CONFIG["daily_breakdown"] = True
 
 
 # ===========================================================================
+# PM37 — 2024→2026 Spacing & Direction Optimisation
+#
+# Market analysis (Jan 2024 → Mar 2026):
+#   BTC $42K→$68K (+60.8% B&H), 49.3% annualised vol, 67% above 200d SMA.
+#   Round-trip sweet spot after fees: spacing 0.5% (2,518% theoretical net).
+#   PM35 at 0.8% both-sides = +1.70%  →  spacing too wide + short side bleed.
+#
+# Sweep axes:
+#   (A) Spacing:   0.004, 0.005, 0.006, 0.008 (control)
+#   (B) Direction: long-only (LO) vs both-sides
+#   (C) Sizing:    ovp=0.10 (more levels) vs 0.15 (bigger bites)
+#   (D) VAS:       adaptive spacing (floor=0.004, ceil=0.010)
+#   (E) Leverage:  3x vs 5x vs 7x
+#
+# All variants at $1K capital.  Winner gets scaled in PM38.
+# ===========================================================================
+
+_PM37_SETS = [
+    # ── Axis A: Spacing sweep (long-only, lev5, ovp=0.10) ────────────────
+    _pm29("pm37_s004_lo",
+          spacing=0.004, grid_long_only=True,
+          order_value_pct=0.10, order_value_min=10.0, leverage=5),
+    _pm29("pm37_s005_lo",
+          spacing=0.005, grid_long_only=True,
+          order_value_pct=0.10, order_value_min=10.0, leverage=5),
+    _pm29("pm37_s006_lo",
+          spacing=0.006, grid_long_only=True,
+          order_value_pct=0.10, order_value_min=10.0, leverage=5),
+    _pm29("pm37_s008_lo",
+          spacing=0.008, grid_long_only=True,
+          order_value_pct=0.15, order_value_min=10.0, leverage=5),
+
+    # ── Axis B: Both-sides at optimal spacing ─────────────────────────────
+    _pm29("pm37_s005_both",
+          spacing=0.005,
+          order_value_pct=0.10, order_value_min=10.0, leverage=5),
+
+    # ── Axis C: Sizing at optimal spacing ─────────────────────────────────
+    _pm29("pm37_s005_lo_big",
+          spacing=0.005, grid_long_only=True,
+          order_value_pct=0.15, order_value_min=10.0, leverage=5),
+
+    # ── Axis D: VAS (adaptive spacing) ────────────────────────────────────
+    _pm29("pm37_vas_lo",
+          spacing=0.005, grid_long_only=True,
+          vol_adaptive_spacing=True, vas_floor=0.004, vas_ceil=0.010,
+          order_value_pct=0.10, order_value_min=10.0, leverage=5),
+
+    # ── Axis E: Leverage sweep at optimal spacing ─────────────────────────
+    _pm29("pm37_s005_lev3",
+          spacing=0.005, grid_long_only=True,
+          order_value_pct=0.10, order_value_min=10.0, leverage=3),
+    _pm29("pm37_s005_lev7",
+          spacing=0.005, grid_long_only=True,
+          order_value_pct=0.10, order_value_min=10.0, leverage=7),
+
+    # ── Axis A+E: Tightest spacing + conservative leverage ────────────────
+    _pm29("pm37_s004_lev3",
+          spacing=0.004, grid_long_only=True,
+          order_value_pct=0.10, order_value_min=10.0, leverage=3),
+]
+
+BTC_PM37_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM37_CONFIG["start_date"]      = datetime(2024, 1, 1)
+BTC_PM37_CONFIG["end_date"]        = datetime(2026, 3, 12)
+BTC_PM37_CONFIG["initial_balance"] = 1000
+BTC_PM37_CONFIG["param_sets"]      = _PM37_SETS
+BTC_PM37_CONFIG["daily_breakdown"] = True
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -7327,6 +7398,20 @@ if __name__ == "__main__":
         cfg = dict(BTC_PM36_FULL_CONFIG)
         print("\n" + "=" * 60)
         print(f"  v46 PM36 BTC — SMA regime c15_lev5 FULL  (May 2017 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM37", "PM37")):
+        cfg = dict(BTC_PM37_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM37 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM37_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v47 PM37 BTC — Spacing Optimisation{variant_label}  (Jan 2024 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):

@@ -233,17 +233,42 @@ jobs:
           #   dispatch: "BTCPM35_10K:pm35_c15_lev5"
           # ══════════════════════════════════════════════════════════════
           # PM36: SMA Regime Filter — 200d SMA adaptive long-only/both-sides
-          # Long-only above SMA (bull), both-sides below SMA (bear/range)
-          # 3 capital tiers + FULL window for comparison against PM30
+          # Results: $1K +1.70% (identical to PM35 — existing gates already blocked shorts)
+          # FULL +2,091.54% (beats PM30 +1,944% — shorts during bear add value)
           # ══════════════════════════════════════════════════════════════
-          - name: "PM36 BTC SMA regime $1K (2024)"
-            dispatch: "BTCPM36_1K:pm36_sma_regime"
-          - name: "PM36 BTC SMA regime $5K (2024)"
-            dispatch: "BTCPM36_5K:pm36_sma_regime"
-          - name: "PM36 BTC SMA regime $10K (2024)"
-            dispatch: "BTCPM36_10K:pm36_sma_regime"
-          - name: "PM36 BTC SMA regime FULL (2017)"
-            dispatch: "BTCPM36FULL:pm36_sma_regime"
+          # - name: "PM36 BTC SMA regime $1K (2024)"
+          #   dispatch: "BTCPM36_1K:pm36_sma_regime"
+          # - name: "PM36 BTC SMA regime $5K (2024)"
+          #   dispatch: "BTCPM36_5K:pm36_sma_regime"
+          # - name: "PM36 BTC SMA regime $10K (2024)"
+          #   dispatch: "BTCPM36_10K:pm36_sma_regime"
+          # - name: "PM36 BTC SMA regime FULL (2017)"
+          #   dispatch: "BTCPM36FULL:pm36_sma_regime"
+          # ══════════════════════════════════════════════════════════════
+          # PM37: Spacing & Direction Optimisation (2024→2026, $1K)
+          # Theoretical optimal: 0.5% spacing after fees, long-only in bull
+          # 10 variants: spacing (0.4-0.8%), LO/both, sizing, VAS, leverage
+          # ══════════════════════════════════════════════════════════════
+          - name: "PM37 s004 LO"
+            dispatch: "BTCPM37:pm37_s004_lo"
+          - name: "PM37 s005 LO"
+            dispatch: "BTCPM37:pm37_s005_lo"
+          - name: "PM37 s006 LO"
+            dispatch: "BTCPM37:pm37_s006_lo"
+          - name: "PM37 s008 LO (control)"
+            dispatch: "BTCPM37:pm37_s008_lo"
+          - name: "PM37 s005 both"
+            dispatch: "BTCPM37:pm37_s005_both"
+          - name: "PM37 s005 LO big"
+            dispatch: "BTCPM37:pm37_s005_lo_big"
+          - name: "PM37 VAS LO"
+            dispatch: "BTCPM37:pm37_vas_lo"
+          - name: "PM37 s005 lev3"
+            dispatch: "BTCPM37:pm37_s005_lev3"
+          - name: "PM37 s005 lev7"
+            dispatch: "BTCPM37:pm37_s005_lev7"
+          - name: "PM37 s004 lev3"
+            dispatch: "BTCPM37:pm37_s004_lev3"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
