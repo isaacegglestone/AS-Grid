@@ -6526,6 +6526,48 @@ BTC_PM37_CONFIG["initial_balance"] = 1000
 BTC_PM37_CONFIG["param_sets"]      = _PM37_SETS
 BTC_PM37_CONFIG["daily_breakdown"] = True
 
+# ===========================================================================
+# PM38 — Wider Spacing Sweep (2024-01 → 2026-03, $1 000)
+#
+# PM37 proved tighter spacing is categorically worse (concurrent position
+# exposure × leverage creates drag).  Only s008_lo (+0.66 %) was positive.
+# Hypothesis: wider spacing → fewer concurrent positions → less margin
+# exposure → better returns.  Test 1.0 %, 1.2 %, 1.5 %, 2.0 %.
+# ===========================================================================
+
+_PM38_SETS = [
+    # ── Control: PM37 winner ──────────────────────────────────────────────
+    _pm29("pm38_s008_lo",
+          spacing=0.008, grid_long_only=True,
+          order_value_pct=0.15, order_value_min=10.0, leverage=5),
+
+    # ── Wider spacing sweep (LO, lev5, ovp=0.15) ─────────────────────────
+    _pm29("pm38_s010_lo",
+          spacing=0.010, grid_long_only=True,
+          order_value_pct=0.15, order_value_min=10.0, leverage=5),
+    _pm29("pm38_s012_lo",
+          spacing=0.012, grid_long_only=True,
+          order_value_pct=0.15, order_value_min=10.0, leverage=5),
+    _pm29("pm38_s015_lo",
+          spacing=0.015, grid_long_only=True,
+          order_value_pct=0.15, order_value_min=10.0, leverage=5),
+    _pm29("pm38_s020_lo",
+          spacing=0.020, grid_long_only=True,
+          order_value_pct=0.15, order_value_min=10.0, leverage=5),
+
+    # ── Conservative leverage at best wide spacing ────────────────────────
+    _pm29("pm38_s015_lev3",
+          spacing=0.015, grid_long_only=True,
+          order_value_pct=0.15, order_value_min=10.0, leverage=3),
+]
+
+BTC_PM38_CONFIG: Dict[str, Any] = dict(BTC_BASE_CONFIG)
+BTC_PM38_CONFIG["start_date"]      = datetime(2024, 1, 1)
+BTC_PM38_CONFIG["end_date"]        = datetime(2026, 3, 13)
+BTC_PM38_CONFIG["initial_balance"] = 1000
+BTC_PM38_CONFIG["param_sets"]      = _PM38_SETS
+BTC_PM38_CONFIG["daily_breakdown"] = True
+
 
 # ===========================================================================
 # v11 — Crash protection sweep
@@ -7412,6 +7454,20 @@ if __name__ == "__main__":
         variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
         print("\n" + "=" * 60)
         print(f"  v47 PM37 BTC — Spacing Optimisation{variant_label}  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        grid_search_backtest(cfg)
+    elif symbol.startswith(("BTCPM38", "PM38")):
+        cfg = dict(BTC_PM38_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM38 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in BTC_PM38_CONFIG['param_sets']]}")
+                sys.exit(1)
+        variant_label = f" ({cfg['param_sets'][0]['name']})" if len(cfg["param_sets"]) == 1 else ""
+        print("\n" + "=" * 60)
+        print(f"  v48 PM38 BTC — Wider Spacing{variant_label}  (Jan 2024 → Mar 2026)")
         print("=" * 60)
         grid_search_backtest(cfg)
     elif symbol in ("XRPCB", "CB"):

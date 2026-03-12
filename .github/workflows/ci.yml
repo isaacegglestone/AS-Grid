@@ -267,8 +267,46 @@ jobs:
             dispatch: "BTCPM37:pm37_s005_lev3"
           - name: "PM37 s005 lev7"
             dispatch: "BTCPM37:pm37_s005_lev7"
-          - name: "PM37 s004 lev3"
-            dispatch: "BTCPM37:pm37_s004_lev3"
+          # PM37 Results: Only s008_lo +0.66%, all tighter spacing negative
+          # s004_lo -40.26%, s005_lo -13.06%, s006_lo -9.26%
+          # Tighter spacing = more concurrent positions = leverage drag
+          # - name: "PM37 s004 LO"
+          #   dispatch: "BTCPM37:pm37_s004_lo"
+          # - name: "PM37 s005 LO"
+          #   dispatch: "BTCPM37:pm37_s005_lo"
+          # - name: "PM37 s006 LO"
+          #   dispatch: "BTCPM37:pm37_s006_lo"
+          # - name: "PM37 s008 LO (control)"
+          #   dispatch: "BTCPM37:pm37_s008_lo"
+          # - name: "PM37 s005 both"
+          #   dispatch: "BTCPM37:pm37_s005_both"
+          # - name: "PM37 s005 LO big"
+          #   dispatch: "BTCPM37:pm37_s005_lo_big"
+          # - name: "PM37 VAS LO"
+          #   dispatch: "BTCPM37:pm37_vas_lo"
+          # - name: "PM37 s005 lev3"
+          #   dispatch: "BTCPM37:pm37_s005_lev3"
+          # - name: "PM37 s005 lev7"
+          #   dispatch: "BTCPM37:pm37_s005_lev7"
+          # - name: "PM37 s004 lev3"
+          #   dispatch: "BTCPM37:pm37_s004_lev3"
+          # ══════════════════════════════════════════════════════════════
+          # PM38: Wider Spacing Sweep (2024→2026, $1K)
+          # PM37 proved tighter < 0.8% is worse.  Test wider: 1.0–2.0%
+          # 6 variants: spacing sweep + leverage variant at 1.5%
+          # ══════════════════════════════════════════════════════════════
+          - name: "PM38 s008 LO (control)"
+            dispatch: "BTCPM38:pm38_s008_lo"
+          - name: "PM38 s010 LO"
+            dispatch: "BTCPM38:pm38_s010_lo"
+          - name: "PM38 s012 LO"
+            dispatch: "BTCPM38:pm38_s012_lo"
+          - name: "PM38 s015 LO"
+            dispatch: "BTCPM38:pm38_s015_lo"
+          - name: "PM38 s020 LO"
+            dispatch: "BTCPM38:pm38_s020_lo"
+          - name: "PM38 s015 lev3"
+            dispatch: "BTCPM38:pm38_s015_lev3"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
