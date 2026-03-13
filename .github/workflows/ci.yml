@@ -405,12 +405,16 @@ jobs:
             funding-v1-
 
       # Funding cache miss fallback: generate inline.
+      # continue-on-error because Binance blocks US IPs (HTTP 451).
+      # Funding parquets are also committed to git as a fallback.
       - name: Generate funding parquets (cache miss fallback)
         if: steps.cache-funding.outputs.cache-hit != 'true'
+        continue-on-error: true
         run: python scripts/generate_funding_cache.py
 
       - name: Save funding parquets to Actions cache (if freshly generated)
         if: steps.cache-funding.outputs.cache-hit != 'true'
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: |

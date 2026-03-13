@@ -632,6 +632,31 @@ class BitunixExchange:
         return candles
 
     # ------------------------------------------------------------------
+    # Funding rate
+    # ------------------------------------------------------------------
+
+    async def get_funding_rate(self, symbol: str) -> Dict[str, Any]:
+        """
+        Fetch the current/next funding rate for *symbol*.
+
+        GET /api/v1/futures/market/funding_rate?symbol=<symbol>
+
+        Returns a dict with:
+          ``rate``      – current funding rate as float (e.g. 0.0001 = 0.01%)
+          ``next_time`` – next funding timestamp in ms (int)
+        """
+        data = await self._client.get_public(
+            "/api/v1/futures/market/funding_rate",
+            params={"symbol": symbol},
+        )
+        entry = data if isinstance(data, dict) else (data[0] if data else {})
+        return {
+            "rate": float(entry.get("fundingRate", 0)),
+            "next_time": int(entry.get("nextFundingTime", 0)),
+            "raw": entry,
+        }
+
+    # ------------------------------------------------------------------
     # WebSocket helpers
     # ------------------------------------------------------------------
 
