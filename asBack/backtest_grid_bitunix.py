@@ -2528,6 +2528,8 @@ class HedgeRepairBacktester:
         self.dynamic_threshold = bool(config.get("dynamic_threshold", False))
         self.net_profit_target = float(config.get("net_profit_target", 0.0))
         self.funding_df: Optional[pd.DataFrame] = config.get("funding_df", None)
+        self.periodic_injection_usd = float(config.get("periodic_injection_usd", 0.0))
+        self.injection_interval_candles = int(config.get("injection_interval_candles", 1344))
 
         # Runtime state
         self.cycle_fees = 0.0
@@ -2535,6 +2537,8 @@ class HedgeRepairBacktester:
         self._funding_map: Dict[int, float] = {}
         self.futures_balance = self.initial_balance
         self.spot_balance = self.spot_reserve_initial
+        self.total_injected = 0.0
+        self.injection_count = 0
         self.spot_borrowed = 0.0
         self.state = self.IDLE
         self.long_pos: Optional[Dict[str, Any]] = None
@@ -2823,6 +2827,17 @@ class HedgeRepairBacktester:
                 if self.state != self.IDLE:
                     self.cycle_fees += funding_cost
 
+            # ── periodic capital injection (DCA) ──────────────────────
+            if (self.periodic_injection_usd > 0
+                    and idx >= self.trade_start_idx
+                    and (idx - self.trade_start_idx) > 0
+                    and (idx - self.trade_start_idx) % self.injection_interval_candles == 0):
+                half = self.periodic_injection_usd / 2.0
+                self.futures_balance += half
+                self.spot_balance += half
+                self.total_injected += self.periodic_injection_usd
+                self.injection_count += 1
+
             # ── equity tracking ───────────────────────────────────────
             total_eq = self._total_equity(price)
             if total_eq > self.peak_equity:
@@ -2883,15 +2898,19 @@ class HedgeRepairBacktester:
             self._repay_spot()
 
         total_initial = self.initial_balance + self.spot_reserve_initial
+        total_deployed = total_initial + self.total_injected
         total_final = self.futures_balance + self.spot_balance
-        return_pct = (total_final - total_initial) / total_initial if total_initial else 0.0
+        return_pct = (total_final - total_deployed) / total_deployed if total_deployed else 0.0
         trades = sum(1 for t in self.trade_log if t["action"] == "CLOSE")
         realised = sum(t.get("profit", 0) for t in self.trade_log if t["action"] == "CLOSE")
 
         return {
             "return_pct": return_pct,
-            "total_return": total_final - total_initial,
+            "total_return": total_final - total_deployed,
             "initial_total": total_initial,
+            "total_deployed": total_deployed,
+            "total_injected": self.total_injected,
+            "injection_count": self.injection_count,
             "final_total": total_final,
             "futures_final": self.futures_balance,
             "spot_final": self.spot_balance,
@@ -2965,6 +2984,10 @@ async def hedge_repair_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
         print(f"     initial: ${result['initial_total']:,.0f} → "
               f"final: ${result['final_total']:,.2f}  "
               f"realized: ${result['realized_pnl']:+.2f}")
+        if result.get("total_injected", 0) > 0:
+            print(f"     injected: ${result['total_injected']:,.0f} "
+                  f"({result['injection_count']} deposits)  "
+                  f"total deployed: ${result['total_deployed']:,.0f}")
         if result.get("total_funding", 0) != 0:
             print(f"     funding: ${result['total_funding']:+.2f}")
         if result["liquidated"]:
@@ -7316,6 +7339,76 @@ XRP_PM42_10C_CONFIG: Dict[str, Any] = {
 
 
 # ===========================================================================
+# PM43 — $1K start + fortnightly $750 AUD DCA (≈$480 USD), 50/50 split
+#
+# Same dynamic threshold as PM42 (break-even / fees+$0.10) with funding.
+# Starting balance $500 futures + $500 spot.  Every 14 days, inject $480 USD
+# ($240 futures + $240 spot).
+# Two windows: 2-year (Mar 2024 → Mar 2026) and 6-year (Apr 2020 → Mar 2026).
+# ===========================================================================
+
+def _pm43_variants(sym_prefix: str, balance: int, spot: int,
+                   entry_pct: float, leverages: List[int],
+                   net_target: float, suffix: str,
+                   injection_usd: float = 480.0,
+                   injection_interval: int = 1344) -> List[Dict[str, Any]]:
+    """Generate PM43 variant param_sets — dynamic threshold + periodic DCA."""
+    cap_label = f"{balance // 1000}k{int(entry_pct * 100)}" if balance >= 1000 else f"{balance}{int(entry_pct * 100)}"
+    return [
+        {
+            "name": f"pm43_{sym_prefix}_{cap_label}_{lev}x_{suffix}",
+            "initial_balance": balance,
+            "spot_reserve": spot,
+            "entry_pct": entry_pct,
+            "leverage": lev,
+            "profit_threshold": 5.0,
+            "trailing_distance": 1.0,
+            "lookback_candles": 672,
+            "zig_zag_candles": 20,
+            "zig_zag_threshold": 0.01,
+            "liq_proximity_pct": 0.80,
+            "dca_multiplier": 1.0,
+            "dynamic_threshold": True,
+            "net_profit_target": net_target,
+            "periodic_injection_usd": injection_usd,
+            "injection_interval_candles": injection_interval,
+        }
+        for lev in leverages
+    ]
+
+
+# ── PM43 2-year window (Mar 2024 → Mar 2026) ─────────────────────────────
+XRP_PM43_2Y_BE_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 3, 13), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 500,
+    "param_sets": _pm43_variants("xrp", 500, 500, 0.05, [3, 5, 10], 0.00, "2y_be"),
+}
+
+XRP_PM43_2Y_10C_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 3, 13), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 500,
+    "param_sets": _pm43_variants("xrp", 500, 500, 0.05, [3, 5, 10], 0.10, "2y_10c"),
+}
+
+# ── PM43 6-year window (Apr 2020 → Mar 2026) ─────────────────────────────
+XRP_PM43_6Y_BE_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2020, 4, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 500,
+    "param_sets": _pm43_variants("xrp", 500, 500, 0.05, [3, 5, 10], 0.00, "6y_be"),
+}
+
+XRP_PM43_6Y_10C_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2020, 4, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 500,
+    "param_sets": _pm43_variants("xrp", 500, 500, 0.05, [3, 5, 10], 0.10, "6y_10c"),
+}
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -8499,6 +8592,63 @@ if __name__ == "__main__":
                 sys.exit(1)
         print("\n" + "=" * 60)
         print(f"  PM42 XRP — Fees+$0.10 $10K/5%  (Apr 2020 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+
+    # ── PM43 DCA: $1K start + fortnightly $480 injection ──────────────
+    elif symbol.startswith("XRPPM43_2Y_BE"):
+        cfg = dict(XRP_PM43_2Y_BE_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM43-2Y-BE variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM43_2Y_BE_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM43 XRP — Break-Even $1K+DCA  (Mar 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+
+    elif symbol.startswith("XRPPM43_2Y_10C"):
+        cfg = dict(XRP_PM43_2Y_10C_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM43-2Y-10C variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM43_2Y_10C_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM43 XRP — Fees+$0.10 $1K+DCA  (Mar 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+
+    elif symbol.startswith("XRPPM43_6Y_BE"):
+        cfg = dict(XRP_PM43_6Y_BE_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM43-6Y-BE variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM43_6Y_BE_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM43 XRP — Break-Even $1K+DCA  (Apr 2020 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+
+    elif symbol.startswith("XRPPM43_6Y_10C"):
+        cfg = dict(XRP_PM43_6Y_10C_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM43-6Y-10C variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM43_6Y_10C_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM43 XRP — Fees+$0.10 $1K+DCA  (Apr 2020 → Mar 2026)")
         print("=" * 60)
         hedge_repair_backtest(cfg)
 
