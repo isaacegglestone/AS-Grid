@@ -2530,6 +2530,7 @@ class HedgeRepairBacktester:
         self.funding_df: Optional[pd.DataFrame] = config.get("funding_df", None)
         self.periodic_injection_usd = float(config.get("periodic_injection_usd", 0.0))
         self.injection_interval_candles = int(config.get("injection_interval_candles", 1344))
+        self.injection_futures_pct = float(config.get("injection_futures_pct", 0.5))
 
         # Runtime state
         self.cycle_fees = 0.0
@@ -2832,9 +2833,10 @@ class HedgeRepairBacktester:
                     and idx >= self.trade_start_idx
                     and (idx - self.trade_start_idx) > 0
                     and (idx - self.trade_start_idx) % self.injection_interval_candles == 0):
-                half = self.periodic_injection_usd / 2.0
-                self.futures_balance += half
-                self.spot_balance += half
+                fut_share = self.periodic_injection_usd * self.injection_futures_pct
+                spot_share = self.periodic_injection_usd - fut_share
+                self.futures_balance += fut_share
+                self.spot_balance += spot_share
                 self.total_injected += self.periodic_injection_usd
                 self.injection_count += 1
 
@@ -7409,6 +7411,63 @@ XRP_PM43_6Y_10C_CONFIG: Dict[str, Any] = {
 
 
 # ===========================================================================
+# PM44 — $2K start + fortnightly $480 USD DCA (100% to futures)
+#
+# Same dynamic threshold with fees + $0.50 net target.
+# Starting balance $1K futures + $1K spot.  Every 14 days, inject $480 USD
+# entirely into futures balance (spot reserve stays as-is).
+# Two windows: 2-year (Mar 2024 → Mar 2026) and 6-year (Apr 2020 → Mar 2026).
+# ===========================================================================
+
+def _pm44_variants(sym_prefix: str, balance: int, spot: int,
+                   entry_pct: float, leverages: List[int],
+                   suffix: str,
+                   injection_usd: float = 480.0,
+                   injection_interval: int = 1344) -> List[Dict[str, Any]]:
+    """Generate PM44 variant param_sets — fees+$0.50, 100% DCA to futures."""
+    cap_label = f"{balance // 1000}k{int(entry_pct * 100)}" if balance >= 1000 else f"{balance}{int(entry_pct * 100)}"
+    return [
+        {
+            "name": f"pm44_{sym_prefix}_{cap_label}_{lev}x_{suffix}",
+            "initial_balance": balance,
+            "spot_reserve": spot,
+            "entry_pct": entry_pct,
+            "leverage": lev,
+            "profit_threshold": 5.0,
+            "trailing_distance": 1.0,
+            "lookback_candles": 672,
+            "zig_zag_candles": 20,
+            "zig_zag_threshold": 0.01,
+            "liq_proximity_pct": 0.80,
+            "dca_multiplier": 1.0,
+            "dynamic_threshold": True,
+            "net_profit_target": 0.50,
+            "periodic_injection_usd": injection_usd,
+            "injection_interval_candles": injection_interval,
+            "injection_futures_pct": 1.0,
+        }
+        for lev in leverages
+    ]
+
+
+# ── PM44 2-year window (Mar 2024 → Mar 2026) ─────────────────────────────
+XRP_PM44_2Y_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 3, 13), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 1000,
+    "param_sets": _pm44_variants("xrp", 1000, 1000, 0.05, [3, 5, 10], "2y"),
+}
+
+# ── PM44 6-year window (Apr 2020 → Mar 2026) ─────────────────────────────
+XRP_PM44_6Y_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2020, 4, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 1000,
+    "param_sets": _pm44_variants("xrp", 1000, 1000, 0.05, [3, 5, 10], "6y"),
+}
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -8649,6 +8708,35 @@ if __name__ == "__main__":
                 sys.exit(1)
         print("\n" + "=" * 60)
         print(f"  PM43 XRP — Fees+$0.10 $2K+DCA  (Apr 2020 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+
+    # ── PM44 DCA: $2K start + $480 fortnightly (100% to futures), fees+$0.50 ─
+    elif symbol.startswith("XRPPM44_2Y"):
+        cfg = dict(XRP_PM44_2Y_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM44-2Y variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM44_2Y_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM44 XRP — Fees+$0.50 $2K+DCA(fut)  (Mar 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+
+    elif symbol.startswith("XRPPM44_6Y"):
+        cfg = dict(XRP_PM44_6Y_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM44-6Y variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM44_6Y_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM44 XRP — Fees+$0.50 $2K+DCA(fut)  (Apr 2020 → Mar 2026)")
         print("=" * 60)
         hedge_repair_backtest(cfg)
 
