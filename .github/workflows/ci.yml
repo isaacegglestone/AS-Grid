@@ -571,7 +571,6 @@ jobs:
     name: "Stage 2b: Integration tests (Bitunix)"
     runs-on: ubuntu-latest
     needs: ec2-tests
-    if: github.ref == 'refs/heads/main'
     environment: integration
 
     steps:
