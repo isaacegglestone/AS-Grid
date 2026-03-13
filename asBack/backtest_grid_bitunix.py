@@ -2525,8 +2525,11 @@ class HedgeRepairBacktester:
         self.liq_proximity_pct = float(config.get("liq_proximity_pct", 0.80))
         self.trade_start_idx = int(config.get("trade_start_idx", 0))
         self.dca_multiplier = float(config.get("dca_multiplier", 1.0))
+        self.dynamic_threshold = bool(config.get("dynamic_threshold", False))
+        self.net_profit_target = float(config.get("net_profit_target", 0.0))
 
         # Runtime state
+        self.cycle_fees = 0.0
         self.futures_balance = self.initial_balance
         self.spot_balance = self.spot_reserve_initial
         self.spot_borrowed = 0.0
@@ -2546,6 +2549,12 @@ class HedgeRepairBacktester:
         self.total_fees = 0.0
 
     # ── helpers ───────────────────────────────────────────────────────
+
+    def _effective_threshold(self) -> float:
+        """Dynamic: cycle_fees + net target; fixed: profit_threshold."""
+        if self.dynamic_threshold:
+            return self.cycle_fees + self.net_profit_target
+        return self.profit_threshold
 
     def _calc_profit(self, pos: Optional[Dict], price: float) -> float:
         if pos is None:
@@ -2579,6 +2588,7 @@ class HedgeRepairBacktester:
             return False
         self.futures_balance -= total_cost
         self.total_fees += 2 * fee_per_side
+        self.cycle_fees = 2 * fee_per_side
         base = {
             "qty": qty, "margin": margin_per_side,
             "dca_count": 0, "peak_profit": 0.0,
@@ -2627,6 +2637,7 @@ class HedgeRepairBacktester:
                 return False  # can't afford
         self.futures_balance -= needed
         self.total_fees += dca_fee
+        self.cycle_fees += dca_fee
         old_notional = pos["qty"] * pos["avg_entry"]
         new_notional = dca_qty * price
         pos["avg_entry"] = (old_notional + new_notional) / (pos["qty"] + dca_qty)
@@ -2720,9 +2731,10 @@ class HedgeRepairBacktester:
 
                 lp["peak_profit"] = max(lp["peak_profit"], l_best)
                 sp["peak_profit"] = max(sp["peak_profit"], s_best)
-                if lp["peak_profit"] >= self.profit_threshold:
+                _thr = self._effective_threshold()
+                if lp["peak_profit"] >= _thr:
                     lp["trailing_active"] = True
-                if sp["peak_profit"] >= self.profit_threshold:
+                if sp["peak_profit"] >= _thr:
                     sp["trailing_active"] = True
 
                 l_trig = self._trailing_triggered(lp, l_worst)
@@ -2763,7 +2775,7 @@ class HedgeRepairBacktester:
                     worst_p = (remaining["avg_entry"] - high) * remaining["qty"]
 
                 remaining["peak_profit"] = max(remaining["peak_profit"], best_p)
-                if remaining["peak_profit"] >= self.profit_threshold:
+                if remaining["peak_profit"] >= self._effective_threshold():
                     remaining["trailing_active"] = True
 
                 if self._trailing_triggered(remaining, worst_p):
@@ -7172,6 +7184,48 @@ XRP_PM40_10K5_CONFIG: Dict[str, Any] = {
 }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PM41 — Dynamic Threshold Hedge Repair (2024→2026, 2-year window)
+#
+# Instead of a fixed $5 profit_threshold, the trailing stop activates when:
+#   peak_profit >= cycle_fees + net_profit_target ($3)
+# This ensures every closed cycle is net-profitable after fees, and lower-
+# leverage variants (3×) don't bleed out from prolonged REPAIRING phases.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _pm41_variants(sym_prefix: str, balance: int, spot: int,
+                   entry_pct: float, leverages: List[int]) -> List[Dict[str, Any]]:
+    """Generate PM41 variant param_sets — dynamic threshold, 2-year window."""
+    cap_label = f"{balance // 1000}k{int(entry_pct * 100)}"
+    return [
+        {
+            "name": f"pm41_{sym_prefix}_{cap_label}_{lev}x",
+            "initial_balance": balance,
+            "spot_reserve": spot,
+            "entry_pct": entry_pct,
+            "leverage": lev,
+            "profit_threshold": 5.0,   # fallback (unused when dynamic)
+            "trailing_distance": 1.0,
+            "lookback_candles": 672,
+            "zig_zag_candles": 20,
+            "zig_zag_threshold": 0.01,
+            "liq_proximity_pct": 0.80,
+            "dca_multiplier": 1.0,
+            "dynamic_threshold": True,
+            "net_profit_target": 3.0,
+        }
+        for lev in leverages
+    ]
+
+
+XRP_PM41_10K5_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 1, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 10000,
+    "param_sets": _pm41_variants("xrp", 10000, 10000, 0.05, [3, 5, 10]),
+}
+
+
 # ===========================================================================
 # v11 — Crash protection sweep
 #
@@ -8313,6 +8367,21 @@ if __name__ == "__main__":
             print(f"  PM40 XRP — Hedge Repair {label}  (Jun 2017 → Mar 2026)")
             print("=" * 60)
             hedge_repair_backtest(cfg)
+
+    # ── PM41 Dynamic Threshold Hedge Repair (XRP, 2024→2026) ──────────
+    elif symbol.startswith("XRPPM41_10K5"):
+        cfg = dict(XRP_PM41_10K5_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM41 variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM41_10K5_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM41 XRP — Dynamic Threshold $10K/5%  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
 
     elif symbol in ("XRPCB", "CB"):
         print("\n" + "=" * 60)
