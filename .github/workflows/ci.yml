@@ -21,9 +21,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -383,9 +383,9 @@ jobs:
           # These are fully superseded; run locally if needed.
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -399,7 +399,7 @@ jobs:
       # restore-keys falls back to prior cache versions for partial hits.
       - name: Restore klines from Actions cache
         id: cache-klines
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             asBack/klines_cache/XRPUSDT_1min.parquet
@@ -418,7 +418,7 @@ jobs:
 
       - name: Save klines parquets to Actions cache (if freshly generated)
         if: steps.cache-klines.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             asBack/klines_cache/XRPUSDT_1min.parquet
@@ -430,7 +430,7 @@ jobs:
       # Restore funding rate parquets from Actions cache (populated by cache-funding.yml).
       - name: Restore funding rates from Actions cache
         id: cache-funding
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             asBack/klines_cache/XRPUSDT_funding.parquet
@@ -450,7 +450,7 @@ jobs:
       - name: Save funding parquets to Actions cache (if freshly generated)
         if: steps.cache-funding.outputs.cache-hit != 'true'
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             asBack/klines_cache/XRPUSDT_funding.parquet
@@ -466,7 +466,7 @@ jobs:
 
       - name: Upload backtest results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: backtest-${{ matrix.name }}
           path: |
@@ -492,7 +492,7 @@ jobs:
     environment: ec2
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -574,9 +574,9 @@ jobs:
     environment: integration
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -601,7 +601,7 @@ jobs:
 
     steps:
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user

@@ -22,11 +22,11 @@ jobs:
         runs-on: ubuntu-latest
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
 
             - name: Restore funding cache
               id: cache-funding
-              uses: actions/cache/restore@v4
+              uses: actions/cache/restore@v5
               with:
                   path: |
                       asBack/klines_cache/XRPUSDT_funding.parquet
@@ -44,7 +44,7 @@ jobs:
                     echo "Cache miss — will fetch funding rates."
                   fi
 
-            - uses: actions/setup-python@v5
+            - uses: actions/setup-python@v6
               if: steps.check.outputs.skip == 'false'
               with:
                   python-version: "3.11"
@@ -60,7 +60,7 @@ jobs:
 
             - name: Save funding cache
               if: steps.check.outputs.skip == 'false'
-              uses: actions/cache/save@v4
+              uses: actions/cache/save@v5
               with:
                   path: |
                       asBack/klines_cache/XRPUSDT_funding.parquet

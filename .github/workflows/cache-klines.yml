@@ -31,14 +31,14 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # Try to restore all klines parquets from Actions cache before deciding to skip.
       - name: Restore klines from Actions cache
         id: cache-klines
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             asBack/klines_cache/XRPUSDT_1min.parquet
@@ -59,7 +59,7 @@ jobs:
             echo "Cache miss — will fetch and generate parquets."
           fi
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         if: steps.check.outputs.skip == 'false'
         with:
           python-version: "3.11"
@@ -85,7 +85,7 @@ jobs:
       # Store all klines parquets in Actions cache.
       - name: Save klines parquets to Actions cache
         if: steps.check.outputs.skip == 'false'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             asBack/klines_cache/XRPUSDT_1min.parquet
