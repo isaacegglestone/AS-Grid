@@ -363,6 +363,227 @@ class TestDCARepair:
         assert bot.short_pos.dca_count == 1
         assert bot.total_dca_count == 1
 
+    async def test_dca_borrows_from_spot_reserve(self):
+        """DCA transfers from spot reserve when futures balance is insufficient."""
+        # Low futures balance: after opening 1 contract (margin=0.4 + fee ≈ 0.40),
+        # free ≈ 0.10 — not enough for 2nd contract DCA (needs 0.40)
+        bot = _make_bot(balance=0.50, spot=500.0, leverage=5, entry_pct=0.10, initial_price=2.0)
+        sim = bot.exchange
+
+        await sim.place_market_order(SYMBOL, "buy", 1)
+        bot.long_pos = HedgePosition(
+            side="long", qty=1, avg_entry=2.0, margin=0.4, dca_count=0,
+        )
+
+        result = await bot._dca_repair(bot.long_pos, 2.0)
+        assert result is True
+        assert bot.spot_borrowed > 0
+        assert bot.spot_balance < 500.0
+        assert bot.total_spot_borrows == 1
+
+    async def test_dca_fails_when_totally_underfunded(self):
+        """DCA returns False when even spot borrow can't cover the cost."""
+        bot = _make_bot(balance=0.01, spot=0.0, leverage=5, entry_pct=0.10, initial_price=2.0)
+        sim = bot.exchange
+
+        bot.long_pos = HedgePosition(
+            side="long", qty=100, avg_entry=2.0, margin=40.0, dca_count=0,
+        )
+        # qty*multiplier=100, notional=200, margin=40, fee=0.12 → need ~40.12
+        sim._last_price = 2.0
+        result = await bot._dca_repair(bot.long_pos, 2.0)
+        assert result is False
+        assert bot.long_pos.dca_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Repay Spot
+# ---------------------------------------------------------------------------
+
+class TestRepaySpot:
+    async def test_repay_spot_returns_borrowed(self):
+        """_repay_spot() transfers borrowed funds from futures back to spot."""
+        bot = _make_bot(balance=1000.0, spot=500.0)
+        bot.spot_borrowed = 100.0
+        bot.spot_balance = 400.0  # 500 - 100 borrowed
+
+        await bot._repay_spot()
+        assert bot.spot_borrowed == 0.0
+        assert bot.spot_balance == 500.0
+
+    async def test_repay_spot_noop_when_no_debt(self):
+        """_repay_spot() does nothing when nothing was borrowed."""
+        bot = _make_bot(balance=1000.0, spot=500.0)
+        original_bal = bot.spot_balance
+
+        await bot._repay_spot()
+        assert bot.spot_balance == original_bal
+        assert bot.spot_borrowed == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Emergency & Zig-Zag DCA in REPAIRING state
+# ---------------------------------------------------------------------------
+
+class TestRepairingDCA:
+    async def test_emergency_dca_on_liq_proximity(self):
+        """In REPAIRING, emergency DCA fires when loss exceeds liq_proximity_pct * margin."""
+        bot = _make_bot(
+            balance=2000.0, leverage=5, entry_pct=0.10, initial_price=2.0,
+            liq_proximity_pct=0.50,
+            profit_threshold=1000.0,  # high so trailing doesn't interfere
+        )
+        sim = bot.exchange
+
+        # Set up: in REPAIRING with a losing long
+        await sim.place_market_order(SYMBOL, "buy", 100)
+        bot.long_pos = HedgePosition(
+            side="long", qty=100, avg_entry=2.0, margin=40.0, dca_count=0,
+        )
+        bot.state = HedgeRepairBot.REPAIRING
+        bot._price_ring = [{"high": 2.0, "low": 1.6, "close": 1.7}] * 10
+
+        # Feed a candle where loss > 50% of margin (40 * 0.5 = 20)
+        # At close=1.7: loss = (1.7 - 2.0) * 100 = -30, abs(30) > 20 → emergency DCA
+        sim._last_price = 1.7
+        await _feed(bot, _candle(1.7, high=1.75, low=1.65))
+
+        assert bot.long_pos.dca_count >= 1
+        assert bot.total_dca_count >= 1
+
+    async def test_zigzag_dca_in_repairing(self):
+        """In REPAIRING, zig-zag DCA fires when price flattens and position is losing."""
+        bot = _make_bot(
+            balance=2000.0, leverage=5, entry_pct=0.10, initial_price=2.0,
+            zig_zag_candles=3, zig_zag_threshold=0.02,
+            profit_threshold=1000.0,  # high so trailing doesn't interfere
+            liq_proximity_pct=0.99,   # high so emergency doesn't fire first
+        )
+        sim = bot.exchange
+
+        await sim.place_market_order(SYMBOL, "buy", 100)
+        bot.long_pos = HedgePosition(
+            side="long", qty=100, avg_entry=2.0, margin=40.0, dca_count=0,
+        )
+        bot.state = HedgeRepairBot.REPAIRING
+
+        # Feed tight-range candles below entry → losing + flat market
+        for _ in range(4):
+            sim._last_price = 1.9
+            await _feed(bot, _candle(1.9, high=1.901, low=1.899))
+
+        assert bot.long_pos.dca_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# Both Trails Trigger Simultaneously
+# ---------------------------------------------------------------------------
+
+class TestBothTrailsTrigger:
+    async def test_closes_more_profitable_side(self):
+        """When both trails trigger, close the more profitable side first."""
+        bot = _make_bot(
+            balance=1000.0, leverage=5, entry_pct=0.10,
+            profit_threshold=5.0, trailing_distance=1.0,
+        )
+
+        # Manually open both
+        bot.long_pos = HedgePosition(
+            side="long", qty=100, avg_entry=2.0, margin=40.0,
+            peak_profit=10.0, trailing_active=True,
+        )
+        bot.short_pos = HedgePosition(
+            side="short", qty=100, avg_entry=2.0, margin=40.0,
+            peak_profit=6.0, trailing_active=True,
+        )
+        bot.state = HedgeRepairBot.BOTH_OPEN
+        bot.exchange._last_price = 2.0
+        await bot.exchange.place_market_order(SYMBOL, "buy", 100)
+        await bot.exchange.place_market_order(SYMBOL, "sell", 100)
+
+        # Candle where both trails trigger:
+        # l_worst = (1.0-2.0)*100 = -100 <= 10-1 = 9 ✓
+        # s_worst = (2.0-3.0)*100 = -100 <= 6-1 = 5 ✓
+        # l_best = (3.0-2.0)*100 = 100 > s_best = (2.0-1.0)*100 = 100
+        # long is more profitable → close long, keep short
+        bot._price_ring = [{"high": 3.0, "low": 1.0, "close": 2.0}] * 5
+        await _feed(bot, _candle(2.0, high=3.0, low=1.0))
+
+        assert bot.state == HedgeRepairBot.REPAIRING
+        assert bot.long_pos is None  # more profitable → closed
+        assert bot.short_pos is not None  # kept for repair
+
+
+# ---------------------------------------------------------------------------
+# Open Both Guards
+# ---------------------------------------------------------------------------
+
+class TestOpenBothGuards:
+    async def test_open_both_insufficient_balance(self):
+        """_open_both returns False when balance is too low for minimum qty."""
+        bot = _make_bot(balance=0.01, leverage=5, entry_pct=0.10, initial_price=2.0)
+
+        result = await bot._open_both(2.0)
+        assert result is False
+        assert bot.long_pos is None
+        assert bot.short_pos is None
+
+    async def test_open_both_rollback_on_short_failure(self):
+        """If long opens but short fails, long is rolled back."""
+        from unittest.mock import AsyncMock, patch
+        bot = _make_bot(balance=1000.0, leverage=5, entry_pct=0.10, initial_price=2.0)
+        sim = bot.exchange
+
+        original_market = sim.place_market_order
+        call_count = 0
+
+        async def fail_on_second(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:  # Short order
+                return None
+            return await original_market(*args, **kwargs)
+
+        sim.place_market_order = fail_on_second
+
+        result = await bot._open_both(2.0)
+        assert result is False
+        assert bot.long_pos is None
+
+
+# ---------------------------------------------------------------------------
+# Liquidation Flag
+# ---------------------------------------------------------------------------
+
+class TestLiquidation:
+    async def test_liquidated_skips_processing(self):
+        """When liquidated=True, process_candle does nothing."""
+        bot = _make_bot(lookback=2)
+        bot.liquidated = True
+
+        # Even with enough lookback, no entry should happen
+        for _ in range(5):
+            await _feed(bot, _candle(2.0, high=2.05, low=1.95))
+
+        assert bot.state == HedgeRepairBot.IDLE
+        assert bot.long_pos is None
+
+
+# ---------------------------------------------------------------------------
+# BOTH_OPEN Recovery
+# ---------------------------------------------------------------------------
+
+class TestBothOpenRecovery:
+    async def test_null_position_recovers_to_repairing(self):
+        """If state is BOTH_OPEN but a position is None, recover to REPAIRING."""
+        bot = _make_bot()
+        bot.state = HedgeRepairBot.BOTH_OPEN
+        bot.long_pos = HedgePosition(side="long", qty=100, avg_entry=2.0, margin=40)
+        bot.short_pos = None  # Shouldn't happen, but guard rail
+
+        await _feed(bot, _candle(2.0))
+        assert bot.state == HedgeRepairBot.REPAIRING
+
 
 # ---------------------------------------------------------------------------
 # Simulation Mode

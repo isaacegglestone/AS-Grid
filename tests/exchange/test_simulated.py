@@ -330,3 +330,36 @@ class TestTransfers:
         bal_after = await sim.get_balance()
         assert bal_after["free"] == pytest.approx(bal_before["free"] - 50.0)
         assert tid
+
+
+# ---------------------------------------------------------------------------
+# Edge Cases
+# ---------------------------------------------------------------------------
+
+class TestEdgeCases:
+    async def test_insufficient_balance_for_open(self, sim: SimulatedExchange):
+        """Opening a position larger than balance should leave position empty."""
+        await sim.set_leverage(SYMBOL, 1)  # no leverage
+        sim._last_price = 2.0
+        # Need 2.0 * 10000 / 1 = 20000 margin, only have 1000
+        await sim.place_market_order(SYMBOL, "buy", 10000)
+
+        long_qty, _ = await sim.get_positions(SYMBOL)
+        assert long_qty == 0.0  # fill rejected
+
+    async def test_close_with_no_position(self, sim: SimulatedExchange):
+        """Closing when no position exists should not crash."""
+        await sim.set_leverage(SYMBOL, 5)
+        sim._last_price = 2.0
+        # Try to close a non-existent long
+        result = await sim.place_market_order(SYMBOL, "sell", 100, reduce_only=True)
+        # Should complete without error
+        assert result is not None
+
+    async def test_futures_to_spot_overdraft(self, sim: SimulatedExchange):
+        """Transferring more than available deducts what's there."""
+        bal_before = await sim.get_balance()
+        await sim.transfer_futures_to_spot(2000.0)  # more than 1000
+        bal_after = await sim.get_balance()
+        # Balance went negative (sim doesn't enforce boundary)
+        assert bal_after["free"] < 0
