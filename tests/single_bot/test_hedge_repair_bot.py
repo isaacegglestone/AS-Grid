@@ -342,6 +342,27 @@ class TestDCARepair:
         await bot._dca_repair(bot.long_pos, 1.5)
         assert bot.long_pos.trailing_active is False
 
+    async def test_dca_short_updates_position(self):
+        bot = _make_bot(balance=1000.0, leverage=5, entry_pct=0.10, initial_price=2.0)
+        sim = bot.exchange
+
+        # Create a short position manually
+        await sim.place_market_order(SYMBOL, "sell", 100)
+        bot.short_pos = HedgePosition(
+            side="short", qty=100, avg_entry=2.0,
+            margin=40.0, dca_count=0,
+        )
+
+        # DCA at 2.5 (price moved against the short)
+        sim._last_price = 2.5
+        result = await bot._dca_repair(bot.short_pos, 2.5)
+        assert result is True
+        assert bot.short_pos.qty == 200
+        # Weighted avg: (100*2.0 + 100*2.5) / 200 = 2.25
+        assert bot.short_pos.avg_entry == pytest.approx(2.25, abs=0.01)
+        assert bot.short_pos.dca_count == 1
+        assert bot.total_dca_count == 1
+
 
 # ---------------------------------------------------------------------------
 # Simulation Mode

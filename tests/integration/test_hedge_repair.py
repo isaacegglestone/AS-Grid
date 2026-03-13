@@ -171,7 +171,7 @@ class TestDCARepair:
     """Test DCA repair with real exchange orders."""
 
     async def test_dca_adds_to_position(self, exchange: BitunixExchange) -> None:
-        """_dca_repair() adds to the position via a real market order."""
+        """_dca_repair() adds to the long position via a real market order."""
         bot = _make_hedge_bot(exchange)
         await bot.setup()
 
@@ -191,6 +191,28 @@ class TestDCARepair:
         # Verify the position grew on the exchange
         long_qty, _ = await exchange.get_positions(SYMBOL)
         assert long_qty > original_qty
+
+    async def test_dca_short(self, exchange: BitunixExchange) -> None:
+        """_dca_repair() adds to the short position via a real market order."""
+        bot = _make_hedge_bot(exchange)
+        await bot.setup()
+
+        price = await get_mid_price(exchange)
+        await bot._open_both(price)
+        assert bot.short_pos is not None
+
+        original_qty = bot.short_pos.qty
+
+        # DCA the short side at current price
+        result = await bot._dca_repair(bot.short_pos, price)
+        assert result is True
+        assert bot.short_pos.qty > original_qty
+        assert bot.short_pos.dca_count == 1
+        assert bot.total_dca_count == 1
+
+        # Verify the short position grew on the exchange
+        _, short_qty = await exchange.get_positions(SYMBOL)
+        assert short_qty > original_qty
 
 
 # ═══════════════════════════════════════════════════════════════════════════
