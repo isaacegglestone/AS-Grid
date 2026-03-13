@@ -1,0 +1,68 @@
+name: Generate funding rate cache
+
+# Mirrors the cache-klines.yml pattern:
+#   1. push — triggered when this script or workflow changes.
+#   2. workflow_dispatch — manual refresh.
+#
+# Fetches historical 8-hour funding rates from Binance Futures API
+# (public, no key required) and stores as parquet in Actions cache.
+# BTCUSDT from 2019-09, XRPUSDT from 2020-03.
+
+on:
+    push:
+        branches: ["**"]
+        paths:
+            - "scripts/generate_funding_cache.py"
+            - ".github/workflows/cache-funding.yml"
+    workflow_dispatch:
+
+jobs:
+    generate:
+        name: Fetch & cache funding rates
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Restore funding cache
+              id: cache-funding
+              uses: actions/cache/restore@v4
+              with:
+                  path: |
+                      asBack/klines_cache/XRPUSDT_funding.parquet
+                      asBack/klines_cache/BTCUSDT_funding.parquet
+                  key: funding-v1-${{ hashFiles('scripts/generate_funding_cache.py') }}
+
+            - name: Check if cache hit
+              id: check
+              run: |
+                  if [ "${{ steps.cache-funding.outputs.cache-hit }}" = "true" ]; then
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                    echo "Funding cache present — skipping fetch."
+                  else
+                    echo "skip=false" >> "$GITHUB_OUTPUT"
+                    echo "Cache miss — will fetch funding rates."
+                  fi
+
+            - uses: actions/setup-python@v5
+              if: steps.check.outputs.skip == 'false'
+              with:
+                  python-version: "3.11"
+                  cache: pip
+
+            - name: Install dependencies
+              if: steps.check.outputs.skip == 'false'
+              run: python -m pip install -r requirements.txt
+
+            - name: Fetch funding rates
+              if: steps.check.outputs.skip == 'false'
+              run: python scripts/generate_funding_cache.py
+
+            - name: Save funding cache
+              if: steps.check.outputs.skip == 'false'
+              uses: actions/cache/save@v4
+              with:
+                  path: |
+                      asBack/klines_cache/XRPUSDT_funding.parquet
+                      asBack/klines_cache/BTCUSDT_funding.parquet
+                  key: funding-v1-${{ hashFiles('scripts/generate_funding_cache.py') }}

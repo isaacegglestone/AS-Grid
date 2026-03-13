@@ -328,8 +328,18 @@ jobs:
           # PM41: Dynamic Threshold (fees + $3) — 2-year window 2024→2026
           # XRP $10K/5%, leverages 3×/5×/10×. 1 job, 3 variants.
           # ══════════════════════════════════════════════════════════════
-          - name: "PM41 XRP 10K-5pct"
-            dispatch: "XRPPM41_10K5"
+          # - name: "PM41 XRP 10K-5pct"
+          #   dispatch: "XRPPM41_10K5"
+          # ══════════════════════════════════════════════════════════════
+          # PM42: Dynamic Threshold sweeps — 6-year window 2020→2026
+          # A) Break-even (fees + $0)   B) Fees + $0.10
+          # XRP $10K/5%, leverages 3×/5×/10×. 2 jobs, 3 variants each.
+          # With funding rate data from Binance for realistic costs.
+          # ══════════════════════════════════════════════════════════════
+          - name: "PM42 XRP Break-Even"
+            dispatch: "XRPPM42_BE"
+          - name: "PM42 XRP Fees+10c"
+            dispatch: "XRPPM42_10C"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
@@ -382,11 +392,37 @@ jobs:
             asBack/klines_cache/BTCUSDT_15min.parquet
           key: klines-v3-${{ hashFiles('scripts/generate_klines_cache.py') }}
 
+      # Restore funding rate parquets from Actions cache (populated by cache-funding.yml).
+      - name: Restore funding rates from Actions cache
+        id: cache-funding
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            asBack/klines_cache/XRPUSDT_funding.parquet
+            asBack/klines_cache/BTCUSDT_funding.parquet
+          key: funding-v1-${{ hashFiles('scripts/generate_funding_cache.py') }}
+          restore-keys: |
+            funding-v1-
+
+      # Funding cache miss fallback: generate inline.
+      - name: Generate funding parquets (cache miss fallback)
+        if: steps.cache-funding.outputs.cache-hit != 'true'
+        run: python scripts/generate_funding_cache.py
+
+      - name: Save funding parquets to Actions cache (if freshly generated)
+        if: steps.cache-funding.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            asBack/klines_cache/XRPUSDT_funding.parquet
+            asBack/klines_cache/BTCUSDT_funding.parquet
+          key: funding-v1-${{ hashFiles('scripts/generate_funding_cache.py') }}
+
       - name: "Run backtest: ${{ matrix.dispatch }}"
         run: python asBack/backtest_grid_bitunix.py ${{ matrix.dispatch }}
 
       - name: Run gap analysis
-        if: always() && !startsWith(matrix.dispatch, 'BTCPM39') && !startsWith(matrix.dispatch, 'XRPPM39') && !startsWith(matrix.dispatch, 'BTCPM40') && !startsWith(matrix.dispatch, 'XRPPM40') && !startsWith(matrix.dispatch, 'XRPPM41')
+        if: always() && !startsWith(matrix.dispatch, 'BTCPM39') && !startsWith(matrix.dispatch, 'XRPPM39') && !startsWith(matrix.dispatch, 'BTCPM40') && !startsWith(matrix.dispatch, 'XRPPM40') && !startsWith(matrix.dispatch, 'XRPPM41') && !startsWith(matrix.dispatch, 'XRPPM42') && !startsWith(matrix.dispatch, 'XRPPM42')
         run: python scripts/analyze_gaps.py bitunix_best_grid_trades.csv bitunix_best_equity_curve.csv
 
       - name: Upload backtest results

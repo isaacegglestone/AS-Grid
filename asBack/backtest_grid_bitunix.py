@@ -2527,9 +2527,12 @@ class HedgeRepairBacktester:
         self.dca_multiplier = float(config.get("dca_multiplier", 1.0))
         self.dynamic_threshold = bool(config.get("dynamic_threshold", False))
         self.net_profit_target = float(config.get("net_profit_target", 0.0))
+        self.funding_df: Optional[pd.DataFrame] = config.get("funding_df", None)
 
         # Runtime state
         self.cycle_fees = 0.0
+        self.total_funding = 0.0
+        self._funding_map: Dict[int, float] = {}
         self.futures_balance = self.initial_balance
         self.spot_balance = self.spot_reserve_initial
         self.spot_borrowed = 0.0
@@ -2701,6 +2704,15 @@ class HedgeRepairBacktester:
         lows = self.df["low"].values
         n = len(self.df)
 
+        # Pre-build funding-rate lookup: candle_idx → rate
+        if self.funding_df is not None and "open_time" in self.df.columns:
+            candle_times = self.df["open_time"].values
+            funding_times = self.funding_df["timestamp"].values
+            idxs = np.searchsorted(candle_times, funding_times, side="right") - 1
+            for i, rate in zip(idxs, self.funding_df["rate"].values):
+                if 0 <= i < n:
+                    self._funding_map[int(i)] = float(rate)
+
         for idx in range(n):
             price = closes[idx]
             high = highs[idx]
@@ -2798,6 +2810,19 @@ class HedgeRepairBacktester:
                 elif cur_profit < 0 and self._check_zig_zag(idx):
                     self._dca_repair(remaining, price)
 
+            # ── funding rate ───────────────────────────────────────────
+            if idx in self._funding_map:
+                rate = self._funding_map[idx]
+                funding_cost = 0.0
+                if self.long_pos is not None:
+                    funding_cost += self.long_pos["qty"] * price * rate
+                if self.short_pos is not None:
+                    funding_cost -= self.short_pos["qty"] * price * rate
+                self.futures_balance -= funding_cost
+                self.total_funding += funding_cost
+                if self.state != self.IDLE:
+                    self.cycle_fees += funding_cost
+
             # ── equity tracking ───────────────────────────────────────
             total_eq = self._total_equity(price)
             if total_eq > self.peak_equity:
@@ -2877,6 +2902,7 @@ class HedgeRepairBacktester:
             "max_drawdown": self.max_drawdown,
             "realized_pnl": realised,
             "total_fees": self.total_fees,
+            "total_funding": self.total_funding,
             "spot_borrows": self.total_spot_borrows,
             "liquidated": self.liquidated,
         }
@@ -2900,6 +2926,14 @@ async def hedge_repair_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
         secret_key=config.get("secret_key", ""),
     )
 
+    # Load funding rate data if available
+    funding_df = None
+    funding_path = os.path.join("asBack", "klines_cache",
+                                f"{config['symbol']}_funding.parquet")
+    if os.path.exists(funding_path):
+        funding_df = pd.read_parquet(funding_path)
+        print(f"  📈 Loaded {len(funding_df)} funding rate records")
+
     trade_start_dt = config["start_date"]
     if trade_start_dt.tzinfo is None:
         trade_start_dt = trade_start_dt.replace(tzinfo=timezone.utc)
@@ -2914,6 +2948,8 @@ async def hedge_repair_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
               f"balance=${params.get('initial_balance', config.get('initial_balance', 1000)):,}")
         run_config: Dict[str, Any] = {**config, **params,
                                        "trade_start_idx": trade_start_idx}
+        if funding_df is not None:
+            run_config["funding_df"] = funding_df
         bt = HedgeRepairBacktester(df, run_config)
         result = bt.run()
         result["strategy_name"] = params["name"]
@@ -2929,6 +2965,8 @@ async def hedge_repair_backtest_async(config: Dict[str, Any]) -> pd.DataFrame:
         print(f"     initial: ${result['initial_total']:,.0f} → "
               f"final: ${result['final_total']:,.2f}  "
               f"realized: ${result['realized_pnl']:+.2f}")
+        if result.get("total_funding", 0) != 0:
+            print(f"     funding: ${result['total_funding']:+.2f}")
         if result["liquidated"]:
             print("     ⚠️  LIQUIDATED")
 
@@ -7226,6 +7264,57 @@ XRP_PM41_10K5_CONFIG: Dict[str, Any] = {
 }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PM42 — Dynamic Threshold: break-even & barely-profitable sweeps
+#
+# Two sub-groups, both using dynamic_threshold (cycle_fees + net_profit_target):
+#   A) net_profit_target = 0.00  → break-even (exit as soon as fees are covered)
+#   B) net_profit_target = 0.10  → fees + 10 cents
+# 6-year window (Apr 2020 → Mar 2026), XRP $10K/5%, leverages 3×/5×/10×.
+# Starts 2020 to align with XRP funding rate data availability.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _pm42_variants(sym_prefix: str, balance: int, spot: int,
+                   entry_pct: float, leverages: List[int],
+                   net_target: float, suffix: str) -> List[Dict[str, Any]]:
+    """Generate PM42 variant param_sets — dynamic threshold with custom net target."""
+    cap_label = f"{balance // 1000}k{int(entry_pct * 100)}"
+    return [
+        {
+            "name": f"pm42_{sym_prefix}_{cap_label}_{lev}x_{suffix}",
+            "initial_balance": balance,
+            "spot_reserve": spot,
+            "entry_pct": entry_pct,
+            "leverage": lev,
+            "profit_threshold": 5.0,
+            "trailing_distance": 1.0,
+            "lookback_candles": 672,
+            "zig_zag_candles": 20,
+            "zig_zag_threshold": 0.01,
+            "liq_proximity_pct": 0.80,
+            "dca_multiplier": 1.0,
+            "dynamic_threshold": True,
+            "net_profit_target": net_target,
+        }
+        for lev in leverages
+    ]
+
+
+XRP_PM42_BE_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2020, 4, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 10000,
+    "param_sets": _pm42_variants("xrp", 10000, 10000, 0.05, [3, 5, 10], 0.00, "be"),
+}
+
+XRP_PM42_10C_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2020, 4, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 10000,
+    "param_sets": _pm42_variants("xrp", 10000, 10000, 0.05, [3, 5, 10], 0.10, "10c"),
+}
+
+
 # ===========================================================================
 # v11 — Crash protection sweep
 #
@@ -8380,6 +8469,36 @@ if __name__ == "__main__":
                 sys.exit(1)
         print("\n" + "=" * 60)
         print(f"  PM41 XRP — Dynamic Threshold $10K/5%  (Jan 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+
+    # ── PM42 Dynamic Threshold: break-even (XRP, Apr 2020→Mar 2026) ───
+    elif symbol.startswith("XRPPM42_BE"):
+        cfg = dict(XRP_PM42_BE_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM42-BE variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM42_BE_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM42 XRP — Break-Even $10K/5%  (Apr 2020 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+
+    # ── PM42 Dynamic Threshold: fees + $0.10 (XRP, Apr 2020→Mar 2026) ─
+    elif symbol.startswith("XRPPM42_10C"):
+        cfg = dict(XRP_PM42_10C_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM42-10C variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM42_10C_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM42 XRP — Fees+$0.10 $10K/5%  (Apr 2020 → Mar 2026)")
         print("=" * 60)
         hedge_repair_backtest(cfg)
 
