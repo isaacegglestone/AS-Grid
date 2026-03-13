@@ -254,3 +254,32 @@ class TestStatusSummary:
         assert "BOTH_OPEN" in summary
         assert "Long:" in summary
         assert "Short:" in summary
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Wallet Transfers (spot ↔ futures)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@skip_if_no_creds
+@pytest.mark.integration
+class TestWalletTransfers:
+    """Test real spot ↔ futures wallet transfers on Bitunix."""
+
+    async def test_round_trip_transfer(self, exchange: BitunixExchange) -> None:
+        """Transfer $1 futures → spot, then $1 spot → futures (net zero)."""
+        bal_before = await exchange.get_balance()
+
+        # Futures → spot
+        tid1 = await exchange.transfer_futures_to_spot(1.0, coin="USDT")
+        assert tid1  # non-empty transfer ID
+
+        bal_mid = await exchange.get_balance()
+        assert bal_mid["free"] < bal_before["free"]
+
+        # Spot → futures (return the $1)
+        tid2 = await exchange.transfer_spot_to_futures(1.0, coin="USDT")
+        assert tid2
+
+        bal_after = await exchange.get_balance()
+        # Should be approximately back to where we started (minus any processing delays)
+        assert bal_after["free"] == pytest.approx(bal_before["free"], abs=0.1)

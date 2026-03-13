@@ -416,6 +416,26 @@ class SimulatedExchange:
     def build_ping_payload() -> Dict[str, Any]:
         return {"op": "ping", "ping": int(time.time())}
 
+    # ── wallet transfers (spot ↔ futures) ────────────────────────────────
+
+    async def transfer_spot_to_futures(
+        self, amount: float, coin: str = "USDT"
+    ) -> str:
+        """Simulate spot → futures transfer by adding to free balance."""
+        self._free += amount
+        tid = str(uuid.uuid4())[:12]
+        logger.info("sim: transfer %.2f %s spot → futures (id=%s)", amount, coin, tid)
+        return tid
+
+    async def transfer_futures_to_spot(
+        self, amount: float, coin: str = "USDT"
+    ) -> str:
+        """Simulate futures → spot transfer by deducting from free balance."""
+        self._free -= amount
+        tid = str(uuid.uuid4())[:12]
+        logger.info("sim: transfer %.2f %s futures → spot (id=%s)", amount, coin, tid)
+        return tid
+
     # ── price feed / order matching ──────────────────────────────────────
 
     def on_price_update(self, symbol: str, price: float, high: float = 0.0, low: float = 0.0) -> List[Dict[str, Any]]:

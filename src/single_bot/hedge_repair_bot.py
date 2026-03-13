@@ -400,13 +400,11 @@ class HedgeRepairBot:
             shortfall = needed - available
             borrow = min(shortfall, self.spot_balance)
             if borrow > 0:
+                await self.exchange.transfer_spot_to_futures(borrow)
                 self.spot_balance -= borrow
                 self.spot_borrowed += borrow
                 self.total_spot_borrows += 1
-                # In live mode, spot borrow is conceptual — the exchange
-                # doesn't separate futures/spot balance. For simulation
-                # we'd need to inject funds.
-                logger.info("Borrowed $%.2f from spot reserve (remaining: $%.2f)",
+                logger.info("Transferred $%.2f spot → futures (remaining: $%.2f)",
                             borrow, self.spot_balance)
 
             # Re-check
@@ -452,14 +450,16 @@ class HedgeRepairBot:
         return True
 
     async def _repay_spot(self) -> None:
-        """Repay any spot borrowed funds from futures balance."""
+        """Repay any spot borrowed funds by transferring futures → spot."""
         if self.spot_borrowed > 0:
             bal = await self.exchange.get_balance()
             repay = min(self.spot_borrowed, bal["free"])
-            self.spot_balance += repay
-            self.spot_borrowed -= repay
-            logger.info("Repaid $%.2f to spot reserve (remaining debt: $%.2f)",
-                        repay, self.spot_borrowed)
+            if repay > 0:
+                await self.exchange.transfer_futures_to_spot(repay)
+                self.spot_balance += repay
+                self.spot_borrowed -= repay
+                logger.info("Transferred $%.2f futures → spot (remaining debt: $%.2f)",
+                            repay, self.spot_borrowed)
 
     # ══════════════════════════════════════════════════════════════════════
     # Main candle processing — the state machine

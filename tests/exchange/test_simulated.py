@@ -310,3 +310,23 @@ class TestDCA:
         assert pos.qty == 200.0
         # Weighted avg: (100*2.0 + 100*1.5) / 200 = 1.75
         assert pos.avg_entry == pytest.approx(1.75, abs=0.001)
+
+
+# ---------------------------------------------------------------------------
+# Wallet transfers (spot ↔ futures)
+# ---------------------------------------------------------------------------
+
+class TestTransfers:
+    async def test_spot_to_futures_adds_balance(self, sim: SimulatedExchange):
+        bal_before = await sim.get_balance()
+        tid = await sim.transfer_spot_to_futures(100.0)
+        bal_after = await sim.get_balance()
+        assert bal_after["free"] == pytest.approx(bal_before["free"] + 100.0)
+        assert tid  # non-empty transfer ID
+
+    async def test_futures_to_spot_deducts_balance(self, sim: SimulatedExchange):
+        bal_before = await sim.get_balance()
+        tid = await sim.transfer_futures_to_spot(50.0)
+        bal_after = await sim.get_balance()
+        assert bal_after["free"] == pytest.approx(bal_before["free"] - 50.0)
+        assert tid

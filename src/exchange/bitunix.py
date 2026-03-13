@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 REST_BASE = "https://fapi.bitunix.com"
+SPOT_REST_BASE = "https://openapi.bitunix.com"
 WS_PUBLIC = "wss://fapi.bitunix.com/public/"
 WS_PRIVATE = "wss://fapi.bitunix.com/private/"
 
@@ -187,6 +188,25 @@ class BitunixRestClient:
                 if data.get("code") != 0:
                     raise RuntimeError(
                         f"Bitunix POST {path} error {data.get('code')}: {data.get('msg')}"
+                    )
+                return data.get("data")
+
+    async def post_spot(
+        self, path: str, body: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        """Authenticated POST against the spot API (openapi.bitunix.com)."""
+        nonce = _new_nonce()
+        ts = str(int(time.time() * 1000))
+        sign = _rest_sign(self.api_key, self.secret_key, nonce, ts, body=body)
+        headers = self._auth_headers(nonce, ts, sign)
+
+        url = SPOT_REST_BASE + path
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=body, headers=headers) as resp:
+                data = await resp.json()
+                if str(data.get("code")) != "0":
+                    raise RuntimeError(
+                        f"Bitunix SPOT POST {path} error {data.get('code')}: {data.get('msg')}"
                     )
                 return data.get("data")
 
@@ -655,6 +675,44 @@ class BitunixExchange:
             "next_time": int(entry.get("nextFundingTime", 0)),
             "raw": entry,
         }
+
+    # ------------------------------------------------------------------
+    # Wallet transfers (spot ↔ futures)
+    # ------------------------------------------------------------------
+
+    async def transfer_spot_to_futures(
+        self, amount: float, coin: str = "USDT"
+    ) -> str:
+        """
+        Transfer funds from spot wallet to futures wallet.
+
+        POST /api/spot/v1/funds_transfer  (on openapi.bitunix.com)
+
+        Returns the transfer order ID.
+        """
+        data = await self._client.post_spot(
+            "/api/spot/v1/funds_transfer",
+            body={"type": "spot_futures", "coin": coin, "amount": amount},
+        )
+        logger.info("Transferred %.2f %s spot → futures (id=%s)", amount, coin, data)
+        return str(data)
+
+    async def transfer_futures_to_spot(
+        self, amount: float, coin: str = "USDT"
+    ) -> str:
+        """
+        Transfer funds from futures wallet to spot wallet.
+
+        POST /api/spot/v1/funds_transfer  (on openapi.bitunix.com)
+
+        Returns the transfer order ID.
+        """
+        data = await self._client.post_spot(
+            "/api/spot/v1/funds_transfer",
+            body={"type": "futures_spot", "coin": coin, "amount": amount},
+        )
+        logger.info("Transferred %.2f %s futures → spot (id=%s)", amount, coin, data)
+        return str(data)
 
     # ------------------------------------------------------------------
     # WebSocket helpers
