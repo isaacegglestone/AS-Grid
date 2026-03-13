@@ -7468,6 +7468,62 @@ XRP_PM44_6Y_CONFIG: Dict[str, Any] = {
 
 
 # ===========================================================================
+# PM45 — $2K start + fortnightly $480 USD DCA (50/50 split), fees + $0.50
+#
+# Same as PM44 but DCA split 50/50 between futures and spot (like PM43).
+# Starting balance $1K futures + $1K spot.
+# Two windows: 2-year (Mar 2024 → Mar 2026) and 6-year (Apr 2020 → Mar 2026).
+# ===========================================================================
+
+def _pm45_variants(sym_prefix: str, balance: int, spot: int,
+                   entry_pct: float, leverages: List[int],
+                   suffix: str,
+                   injection_usd: float = 480.0,
+                   injection_interval: int = 1344) -> List[Dict[str, Any]]:
+    """Generate PM45 variant param_sets — fees+$0.50, 50/50 DCA split."""
+    cap_label = f"{balance // 1000}k{int(entry_pct * 100)}" if balance >= 1000 else f"{balance}{int(entry_pct * 100)}"
+    return [
+        {
+            "name": f"pm45_{sym_prefix}_{cap_label}_{lev}x_{suffix}",
+            "initial_balance": balance,
+            "spot_reserve": spot,
+            "entry_pct": entry_pct,
+            "leverage": lev,
+            "profit_threshold": 5.0,
+            "trailing_distance": 1.0,
+            "lookback_candles": 672,
+            "zig_zag_candles": 20,
+            "zig_zag_threshold": 0.01,
+            "liq_proximity_pct": 0.80,
+            "dca_multiplier": 1.0,
+            "dynamic_threshold": True,
+            "net_profit_target": 0.50,
+            "periodic_injection_usd": injection_usd,
+            "injection_interval_candles": injection_interval,
+            "injection_futures_pct": 0.5,
+        }
+        for lev in leverages
+    ]
+
+
+# ── PM45 2-year window (Mar 2024 → Mar 2026) ─────────────────────────────
+XRP_PM45_2Y_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2024, 3, 13), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 1000,
+    "param_sets": _pm45_variants("xrp", 1000, 1000, 0.05, [3, 5, 10], "2y"),
+}
+
+# ── PM45 6-year window (Apr 2020 → Mar 2026) ─────────────────────────────
+XRP_PM45_6Y_CONFIG: Dict[str, Any] = {
+    "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
+    "start_date": datetime(2020, 4, 1), "end_date": datetime(2026, 3, 13),
+    "initial_balance": 1000,
+    "param_sets": _pm45_variants("xrp", 1000, 1000, 0.05, [3, 5, 10], "6y"),
+}
+
+
+# ===========================================================================
 # v11 — Crash protection sweep
 #
 # Three independent mechanisms to limit losses in flash-crash events
@@ -8737,6 +8793,35 @@ if __name__ == "__main__":
                 sys.exit(1)
         print("\n" + "=" * 60)
         print(f"  PM44 XRP — Fees+$0.50 $2K+DCA(fut)  (Apr 2020 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+
+    # ── PM45 DCA: $2K start + $480 fortnightly (50/50 split), fees+$0.50 ──
+    elif symbol.startswith("XRPPM45_2Y"):
+        cfg = dict(XRP_PM45_2Y_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM45-2Y variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM45_2Y_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM45 XRP — Fees+$0.50 $2K+DCA(50/50)  (Mar 2024 → Mar 2026)")
+        print("=" * 60)
+        hedge_repair_backtest(cfg)
+
+    elif symbol.startswith("XRPPM45_6Y"):
+        cfg = dict(XRP_PM45_6Y_CONFIG)
+        if ":" in symbol:
+            variant = symbol.split(":", 1)[1]
+            cfg["param_sets"] = [s for s in cfg["param_sets"] if s["name"] == variant]
+            if not cfg["param_sets"]:
+                print(f"ERROR: unknown PM45-6Y variant '{variant}'")
+                print(f"Available: {[s['name'] for s in XRP_PM45_6Y_CONFIG['param_sets']]}")
+                sys.exit(1)
+        print("\n" + "=" * 60)
+        print(f"  PM45 XRP — Fees+$0.50 $2K+DCA(50/50)  (Apr 2020 → Mar 2026)")
         print("=" * 60)
         hedge_repair_backtest(cfg)
 

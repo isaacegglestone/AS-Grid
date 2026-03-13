@@ -361,10 +361,20 @@ jobs:
           # Two windows: 2Y (Mar 2024→Mar 2026) and 6Y (Apr 2020→Mar 2026)
           # 2 jobs, 3 variants each = 6 variants total.
           # ══════════════════════════════════════════════════════════════
-          - name: "PM44 XRP 2Y Fees+50c"
-            dispatch: "XRPPM44_2Y"
-          - name: "PM44 XRP 6Y Fees+50c"
-            dispatch: "XRPPM44_6Y"
+          # - name: "PM44 XRP 2Y Fees+50c"
+          #   dispatch: "XRPPM44_2Y"
+          # - name: "PM44 XRP 6Y Fees+50c"
+          #   dispatch: "XRPPM44_6Y"
+          # ══════════════════════════════════════════════════════════════
+          # PM45: $2K start + fortnightly $480 USD DCA (50/50 split)
+          # Dynamic threshold: fees + $0.50, leverages 3×/5×/10×
+          # Two windows: 2Y (Mar 2024→Mar 2026) and 6Y (Apr 2020→Mar 2026)
+          # 2 jobs, 3 variants each = 6 variants total.
+          # ══════════════════════════════════════════════════════════════
+          - name: "PM45 XRP 2Y Fees+50c"
+            dispatch: "XRPPM45_2Y"
+          - name: "PM45 XRP 6Y Fees+50c"
+            dispatch: "XRPPM45_6Y"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
@@ -451,7 +461,7 @@ jobs:
         run: python asBack/backtest_grid_bitunix.py ${{ matrix.dispatch }}
 
       - name: Run gap analysis
-        if: always() && !startsWith(matrix.dispatch, 'BTCPM39') && !startsWith(matrix.dispatch, 'XRPPM39') && !startsWith(matrix.dispatch, 'BTCPM40') && !startsWith(matrix.dispatch, 'XRPPM40') && !startsWith(matrix.dispatch, 'XRPPM41') && !startsWith(matrix.dispatch, 'XRPPM42') && !startsWith(matrix.dispatch, 'XRPPM43') && !startsWith(matrix.dispatch, 'XRPPM44')
+        if: always() && !startsWith(matrix.dispatch, 'BTCPM39') && !startsWith(matrix.dispatch, 'XRPPM39') && !startsWith(matrix.dispatch, 'BTCPM40') && !startsWith(matrix.dispatch, 'XRPPM40') && !startsWith(matrix.dispatch, 'XRPPM41') && !startsWith(matrix.dispatch, 'XRPPM42') && !startsWith(matrix.dispatch, 'XRPPM43') && !startsWith(matrix.dispatch, 'XRPPM44') && !startsWith(matrix.dispatch, 'XRPPM45')
         run: python scripts/analyze_gaps.py bitunix_best_grid_trades.csv bitunix_best_equity_curve.csv
 
       - name: Upload backtest results
