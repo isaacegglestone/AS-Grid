@@ -7339,10 +7339,10 @@ XRP_PM42_10C_CONFIG: Dict[str, Any] = {
 
 
 # ===========================================================================
-# PM43 — $1K start + fortnightly $750 AUD DCA (≈$480 USD), 50/50 split
+# PM43 — $2K start + fortnightly $750 AUD DCA (≈$480 USD), 50/50 split
 #
 # Same dynamic threshold as PM42 (break-even / fees+$0.10) with funding.
-# Starting balance $500 futures + $500 spot.  Every 14 days, inject $480 USD
+# Starting balance $1K futures + $1K spot.  Every 14 days, inject $480 USD
 # ($240 futures + $240 spot).
 # Two windows: 2-year (Mar 2024 → Mar 2026) and 6-year (Apr 2020 → Mar 2026).
 # ===========================================================================
@@ -7381,30 +7381,30 @@ def _pm43_variants(sym_prefix: str, balance: int, spot: int,
 XRP_PM43_2Y_BE_CONFIG: Dict[str, Any] = {
     "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
     "start_date": datetime(2024, 3, 13), "end_date": datetime(2026, 3, 13),
-    "initial_balance": 500,
-    "param_sets": _pm43_variants("xrp", 500, 500, 0.05, [3, 5, 10], 0.00, "2y_be"),
+    "initial_balance": 1000,
+    "param_sets": _pm43_variants("xrp", 1000, 1000, 0.05, [3, 5, 10], 0.00, "2y_be"),
 }
 
 XRP_PM43_2Y_10C_CONFIG: Dict[str, Any] = {
     "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
     "start_date": datetime(2024, 3, 13), "end_date": datetime(2026, 3, 13),
-    "initial_balance": 500,
-    "param_sets": _pm43_variants("xrp", 500, 500, 0.05, [3, 5, 10], 0.10, "2y_10c"),
+    "initial_balance": 1000,
+    "param_sets": _pm43_variants("xrp", 1000, 1000, 0.05, [3, 5, 10], 0.10, "2y_10c"),
 }
 
 # ── PM43 6-year window (Apr 2020 → Mar 2026) ─────────────────────────────
 XRP_PM43_6Y_BE_CONFIG: Dict[str, Any] = {
     "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
     "start_date": datetime(2020, 4, 1), "end_date": datetime(2026, 3, 13),
-    "initial_balance": 500,
-    "param_sets": _pm43_variants("xrp", 500, 500, 0.05, [3, 5, 10], 0.00, "6y_be"),
+    "initial_balance": 1000,
+    "param_sets": _pm43_variants("xrp", 1000, 1000, 0.05, [3, 5, 10], 0.00, "6y_be"),
 }
 
 XRP_PM43_6Y_10C_CONFIG: Dict[str, Any] = {
     "symbol": "XRPUSDT", "interval": "15min", "fee_pct": 0.0006,
     "start_date": datetime(2020, 4, 1), "end_date": datetime(2026, 3, 13),
-    "initial_balance": 500,
-    "param_sets": _pm43_variants("xrp", 500, 500, 0.05, [3, 5, 10], 0.10, "6y_10c"),
+    "initial_balance": 1000,
+    "param_sets": _pm43_variants("xrp", 1000, 1000, 0.05, [3, 5, 10], 0.10, "6y_10c"),
 }
 
 
@@ -8606,7 +8606,7 @@ if __name__ == "__main__":
                 print(f"Available: {[s['name'] for s in XRP_PM43_2Y_BE_CONFIG['param_sets']]}")
                 sys.exit(1)
         print("\n" + "=" * 60)
-        print(f"  PM43 XRP — Break-Even $1K+DCA  (Mar 2024 → Mar 2026)")
+        print(f"  PM43 XRP — Break-Even $2K+DCA  (Mar 2024 → Mar 2026)")
         print("=" * 60)
         hedge_repair_backtest(cfg)
 
@@ -8620,7 +8620,7 @@ if __name__ == "__main__":
                 print(f"Available: {[s['name'] for s in XRP_PM43_2Y_10C_CONFIG['param_sets']]}")
                 sys.exit(1)
         print("\n" + "=" * 60)
-        print(f"  PM43 XRP — Fees+$0.10 $1K+DCA  (Mar 2024 → Mar 2026)")
+        print(f"  PM43 XRP — Fees+$0.10 $2K+DCA  (Mar 2024 → Mar 2026)")
         print("=" * 60)
         hedge_repair_backtest(cfg)
 
@@ -8634,7 +8634,7 @@ if __name__ == "__main__":
                 print(f"Available: {[s['name'] for s in XRP_PM43_6Y_BE_CONFIG['param_sets']]}")
                 sys.exit(1)
         print("\n" + "=" * 60)
-        print(f"  PM43 XRP — Break-Even $1K+DCA  (Apr 2020 → Mar 2026)")
+        print(f"  PM43 XRP — Break-Even $2K+DCA  (Apr 2020 → Mar 2026)")
         print("=" * 60)
         hedge_repair_backtest(cfg)
 
@@ -8648,7 +8648,7 @@ if __name__ == "__main__":
                 print(f"Available: {[s['name'] for s in XRP_PM43_6Y_10C_CONFIG['param_sets']]}")
                 sys.exit(1)
         print("\n" + "=" * 60)
-        print(f"  PM43 XRP — Fees+$0.10 $1K+DCA  (Apr 2020 → Mar 2026)")
+        print(f"  PM43 XRP — Fees+$0.10 $2K+DCA  (Apr 2020 → Mar 2026)")
         print("=" * 60)
         hedge_repair_backtest(cfg)
 
