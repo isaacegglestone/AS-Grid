@@ -538,14 +538,14 @@ jobs:
 
       - name: Unit tests on EC2
         run: |
-          ssh -o StrictHostKeyChecking=no -i /tmp/test_key \
-            ec2-user@${{ env.INSTANCE_IP }} \
+          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -i /tmp/test_key ec2-user@${{ env.INSTANCE_IP }} \
             'cd ~/AS-Grid && .venv/bin/python -m pytest --tb=short -q'
 
       - name: Backtest on EC2
         run: |
-          ssh -o StrictHostKeyChecking=no -i /tmp/test_key \
-            ec2-user@${{ env.INSTANCE_IP }} \
+          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -i /tmp/test_key ec2-user@${{ env.INSTANCE_IP }} \
             'cd ~/AS-Grid && .venv/bin/python asBack/backtest_grid_bitunix.py XRP'
 
       - name: Terraform destroy (always — prevent orphaned resources)
