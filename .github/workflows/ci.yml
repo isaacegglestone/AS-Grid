@@ -497,6 +497,31 @@ jobs:
         with:
           terraform_version: "~1.9"
 
+      # Restore klines + funding caches on the GH runner so we can SCP them
+      # to the EC2 instance, avoiding slow live API fetches on the t4g.nano.
+      - name: Restore klines from Actions cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            asBack/klines_cache/XRPUSDT_1min.parquet
+            asBack/klines_cache/BTCUSDT_1min.parquet
+            asBack/klines_cache/XRPUSDT_15min.parquet
+            asBack/klines_cache/BTCUSDT_15min.parquet
+          key: klines-v3-${{ hashFiles('scripts/generate_klines_cache.py') }}
+          restore-keys: |
+            klines-v3-
+            klines-1min-v2-
+
+      - name: Restore funding rates from Actions cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            asBack/klines_cache/XRPUSDT_funding.parquet
+            asBack/klines_cache/BTCUSDT_funding.parquet
+          key: funding-v1-${{ hashFiles('scripts/generate_funding_cache.py') }}
+          restore-keys: |
+            funding-v1-
+
       - name: Generate ephemeral SSH key pair
         run: |
           ssh-keygen -t ed25519 -f /tmp/test_key -N ""
@@ -536,17 +561,23 @@ jobs:
                echo "bootstrap in progress..."; sleep 10
              done; echo "bootstrap complete"'
 
+      - name: Copy klines cache to EC2
+        run: |
+          scp -o StrictHostKeyChecking=no -i /tmp/test_key \
+            asBack/klines_cache/*.parquet \
+            ec2-user@${{ env.INSTANCE_IP }}:~/AS-Grid/asBack/klines_cache/
+
       - name: Unit tests on EC2
         run: |
           ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -i /tmp/test_key ec2-user@${{ env.INSTANCE_IP }} \
             'cd ~/AS-Grid && .venv/bin/python -m pytest --tb=short -q'
 
-      - name: Backtest on EC2
+      - name: Backtest on EC2 (PM45 2Y)
         run: |
           ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -i /tmp/test_key ec2-user@${{ env.INSTANCE_IP }} \
-            'cd ~/AS-Grid && .venv/bin/python asBack/backtest_grid_bitunix.py XRP'
+            'cd ~/AS-Grid && .venv/bin/python asBack/backtest_grid_bitunix.py XRPPM45_2Y'
 
       - name: Terraform destroy (always — prevent orphaned resources)
         if: always()
