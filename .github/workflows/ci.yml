@@ -567,17 +567,28 @@ jobs:
             asBack/klines_cache/*.parquet \
             ec2-user@${{ env.INSTANCE_IP }}:~/AS-Grid/asBack/klines_cache/
 
+      # Run commands via background + poll pattern to avoid SSH broken pipes.
+      # Each command runs under nohup on EC2 with output to a log file; the
+      # runner polls via short-lived SSH sessions until the exit code file appears.
       - name: Unit tests on EC2
         run: |
-          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
-            -i /tmp/test_key ec2-user@${{ env.INSTANCE_IP }} \
-            'cd ~/AS-Grid && .venv/bin/python -m pytest --tb=short -q'
+          SSH="ssh -o StrictHostKeyChecking=no -i /tmp/test_key ec2-user@${{ env.INSTANCE_IP }}"
+          $SSH 'cd ~/AS-Grid && nohup bash -c ".venv/bin/python -m pytest --tb=short -q 2>&1; echo \$? > /tmp/unit.exit" > /tmp/unit.log 2>&1 &'
+          while ! $SSH 'test -f /tmp/unit.exit' 2>/dev/null; do
+            $SSH 'tail -1 /tmp/unit.log 2>/dev/null' || true
+            sleep 15
+          done
+          $SSH 'cat /tmp/unit.log; exit $(cat /tmp/unit.exit)'
 
       - name: Backtest on EC2 (PM45 2Y)
         run: |
-          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
-            -i /tmp/test_key ec2-user@${{ env.INSTANCE_IP }} \
-            'cd ~/AS-Grid && .venv/bin/python asBack/backtest_grid_bitunix.py XRPPM45_2Y'
+          SSH="ssh -o StrictHostKeyChecking=no -i /tmp/test_key ec2-user@${{ env.INSTANCE_IP }}"
+          $SSH 'cd ~/AS-Grid && nohup bash -c ".venv/bin/python asBack/backtest_grid_bitunix.py XRPPM45_2Y 2>&1; echo \$? > /tmp/bt.exit" > /tmp/bt.log 2>&1 &'
+          while ! $SSH 'test -f /tmp/bt.exit' 2>/dev/null; do
+            $SSH 'tail -3 /tmp/bt.log 2>/dev/null' || true
+            sleep 30
+          done
+          $SSH 'cat /tmp/bt.log; exit $(cat /tmp/bt.exit)'
 
       - name: Terraform destroy (always — prevent orphaned resources)
         if: always()
