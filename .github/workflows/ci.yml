@@ -539,7 +539,8 @@ jobs:
             -var="ssh_public_key=${{ env.TEST_PUBLIC_KEY }}" \
             -var="name_prefix=${{ env.NAME_PREFIX }}" \
             -var="repo_branch=${{ github.head_ref || github.ref_name }}" \
-            -var="allowed_ssh_cidr=${{ env.RUNNER_CIDR }}"
+            -var="allowed_ssh_cidr=${{ env.RUNNER_CIDR }}" \
+            -var="instance_type=t4g.small"
           echo "INSTANCE_IP=$(terraform output -raw instance_ip)" >> $GITHUB_ENV
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
