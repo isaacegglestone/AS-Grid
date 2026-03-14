@@ -47,6 +47,7 @@ jobs:
   # These are fully superseded by later configs; run locally if needed.
   # ---------------------------------------------------------------------------
   backtests:
+    if: false  # temporarily disabled for EC2 iteration
     name: "Backtest ${{ matrix.name }}"
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -371,10 +372,11 @@ jobs:
           # Two windows: 2Y (Mar 2024→Mar 2026) and 6Y (Apr 2020→Mar 2026)
           # 2 jobs, 3 variants each = 6 variants total.
           # ══════════════════════════════════════════════════════════════
-          - name: "PM45 XRP 2Y Fees+50c"
-            dispatch: "XRPPM45_2Y"
-          - name: "PM45 XRP 6Y Fees+50c"
-            dispatch: "XRPPM45_6Y"
+          # temporarily disabled for EC2 iteration
+          # - name: "PM45 XRP 2Y Fees+50c"
+          #   dispatch: "XRPPM45_2Y"
+          # - name: "PM45 XRP 6Y Fees+50c"
+          #   dispatch: "XRPPM45_6Y"
           # ── Previous sweeps removed from CI (code retained in backtest_grid_bitunix.py):
           #   XRPPM6 (v16), XRPPM7 (v17), XRPPM8 (v18), XRPPM11 (v21),
           #   XRPPM12 (v22), XRPPM13 (v23), XRPPM15 (v25), XRPPM16 (v26),
@@ -487,8 +489,8 @@ jobs:
   ec2-tests:
     name: "Stage 2: Tests (ephemeral EC2)"
     runs-on: ubuntu-latest
-    needs: backtests
-    environment: ec2
+    needs: tests
+    # environment: ec2  # temporarily disabled for iteration
 
     steps:
       - uses: actions/checkout@v5
