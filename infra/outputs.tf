@@ -1,6 +1,6 @@
 output "instance_ip" {
-  description = "Elastic IP of the bot instance — add this as GitHub secret EC2_HOST"
-  value       = aws_eip.bot.public_ip
+  description = "Public IP of the bot instance"
+  value       = var.eip_allocation_id != "" ? data.aws_eip.persistent[0].public_ip : aws_eip.bot[0].public_ip
 }
 
 output "instance_id" {
@@ -10,5 +10,5 @@ output "instance_id" {
 
 output "ssh_command" {
   description = "SSH command to connect to the instance"
-  value       = "ssh ec2-user@${aws_eip.bot.public_ip}"
+  value       = "ssh ec2-user@${var.eip_allocation_id != "" ? data.aws_eip.persistent[0].public_ip : aws_eip.bot[0].public_ip}"
 }

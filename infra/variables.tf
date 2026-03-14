@@ -42,3 +42,9 @@ variable "name_prefix" {
   type        = string
   default     = "bitunix-bot"
 }
+
+variable "eip_allocation_id" {
+  description = "Pre-allocated Elastic IP allocation ID. When set, Terraform associates this EIP with the instance instead of creating a new one. This keeps a stable public IP for API whitelisting."
+  type        = string
+  default     = ""
+}

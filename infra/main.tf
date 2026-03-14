@@ -17,6 +17,15 @@ provider "aws" {
 }
 
 # ---------------------------------------------------------------------------
+# Look up a pre-allocated EIP when an allocation ID is supplied
+# ---------------------------------------------------------------------------
+
+data "aws_eip" "persistent" {
+  count = var.eip_allocation_id != "" ? 1 : 0
+  id    = var.eip_allocation_id
+}
+
+# ---------------------------------------------------------------------------
 # Fetch latest Amazon Linux 2023 ARM64 AMI
 # ---------------------------------------------------------------------------
 
@@ -111,14 +120,22 @@ resource "aws_instance" "bot" {
 }
 
 # ---------------------------------------------------------------------------
-# Elastic IP — keeps the address stable across stop/start
+# Elastic IP — either associate a pre-allocated EIP (for stable IP whitelisting)
+# or create a new one for ad-hoc use.
 # ---------------------------------------------------------------------------
 
 resource "aws_eip" "bot" {
+  count    = var.eip_allocation_id == "" ? 1 : 0
   instance = aws_instance.bot.id
   domain   = "vpc"
 
   tags = {
     Name = "${var.name_prefix}-eip"
   }
+}
+
+resource "aws_eip_association" "bot" {
+  count         = var.eip_allocation_id != "" ? 1 : 0
+  allocation_id = var.eip_allocation_id
+  instance_id   = aws_instance.bot.id
 }
